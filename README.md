@@ -53,6 +53,9 @@ brew install nono
 **Other install options**
 
 Prebuilt binaries and package manager instructions are in the [Installation Guide](https://docs.nono.sh/cli/getting_started/installation).
+
+---
+
 ## CLI
 
 The CLI is the quickest way to get going! zero startup latency, no need to install hypervisors, runtimes, mount volumes...sandboxed and protected in a single command
@@ -76,8 +79,7 @@ nono run --profile custom-profile -- node agent.js
 
 Built-in profiles for [Claude Code](https://docs.nono.sh/cli/clients/claude-code), [Codex](https://docs.nono.sh/cli/clients/codex), [OpenCode](https://docs.nono.sh/cli/clients/opencode), [OpenClaw](https://docs.nono.sh/cli/clients/openclaw), and [Swival](https://docs.nono.sh/cli/clients/swival) — or define your own with custom permissions.
 
-> [!NOTE]
-> See our [latest release](https://github.com/always-further/nono/releases/latest) or [CHANGELOG.md](./CHANGELOG.md) for release notes.
+---
 
 ## Library
 
@@ -118,6 +120,8 @@ caps.allowPath("/tmp/workspace", AccessMode.ReadWrite);
 
 apply(caps);  // Irreversible — kernel-enforced from here on
 ```
+
+---
 
 ## Features
 
