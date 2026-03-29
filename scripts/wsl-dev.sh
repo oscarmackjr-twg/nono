@@ -4,7 +4,7 @@
 # Syncs changes from the Windows checkout into WSL2's Linux filesystem,
 # builds, and runs tests. Designed to be called from Windows:
 #
-#   wsl.exe -d Ubuntu -- bash /mnt/c/Users/scpar/Code/nono/scripts/wsl-dev.sh [command]
+#   wsl.exe -d Ubuntu -- bash /mnt/c/path/to/nono/scripts/wsl-dev.sh [command]
 #
 # Commands:
 #   setup       Install Rust toolchain and clone repo to ~/nono
@@ -26,8 +26,10 @@ YELLOW='\033[0;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-WIN_REPO="/mnt/c/Users/scpar/Code/nono"
-LINUX_REPO="$HOME/nono"
+# Auto-detect Windows repo from this script's location (scripts/ is one level down)
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WIN_REPO="${NONO_WIN_REPO:-$(dirname "$_SCRIPT_DIR")}"
+LINUX_REPO="${NONO_LINUX_REPO:-$HOME/nono}"
 
 log() { echo -e "${BLUE}==>${NC} $*"; }
 ok()  { echo -e "${GREEN}==>${NC} $*"; }
@@ -46,8 +48,8 @@ ensure_rust() {
 }
 
 ensure_repo() {
-    if [[ ! -d "$LINUX_REPO/.git" ]]; then
-        err "Repo not cloned to $LINUX_REPO. Run: $0 setup"
+    if [[ ! -d "$LINUX_REPO" ]]; then
+        err "Repo not found at $LINUX_REPO. Run: $0 setup"
         return 1
     fi
 }
@@ -95,15 +97,9 @@ cmd_setup() {
         fi
     fi
 
-    # Clone or update repo
-    if [[ -d "$LINUX_REPO/.git" ]]; then
-        ok "Repo already exists at $LINUX_REPO"
-        cmd_sync
-    else
-        log "Cloning from Windows checkout to $LINUX_REPO..."
-        git clone "$WIN_REPO" "$LINUX_REPO"
-        ok "Cloned to $LINUX_REPO"
-    fi
+    # Sync repo from Windows working tree
+    mkdir -p "$LINUX_REPO"
+    cmd_sync
 
     # Initial build
     cd "$LINUX_REPO"
@@ -116,40 +112,22 @@ cmd_sync() {
     ensure_repo
 
     cd "$LINUX_REPO"
-    local current_branch
-    current_branch=$(git -C "$WIN_REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
 
-    log "Syncing from Windows checkout (branch: $current_branch)..."
-
-    # Fetch from the Windows repo as a remote
-    if ! git remote get-url win &>/dev/null; then
-        git remote add win "$WIN_REPO"
-    fi
-    git fetch win --quiet
-
-    # Check for local uncommitted changes
-    if ! git diff --quiet || ! git diff --cached --quiet; then
-        err "WSL repo has uncommitted changes — stashing before sync"
-        git stash push -m "wsl-dev auto-stash before sync"
-    fi
-
-    # Checkout and fast-forward to match Windows committed state
-    git checkout "$current_branch" 2>/dev/null || git checkout -b "$current_branch" "win/$current_branch"
-    git reset --hard "win/$current_branch"
-
-    # Copy uncommitted changes from Windows working tree
-    # (git fetch only sees committed work, so we rsync the rest)
-    log "Copying uncommitted changes from Windows..."
+    # rsync the entire Windows working tree (committed + uncommitted).
+    # --delete ensures removed files are cleaned up. .git/ and target/
+    # are excluded so git state and builds are preserved.
+    log "Syncing from Windows working tree..."
     rsync -a --delete \
         --exclude '.git/' \
         --exclude 'target/' \
         --exclude 'node_modules/' \
         "$WIN_REPO/" "$LINUX_REPO/"
 
-    # Fix Windows CRLF line endings on shell scripts
-    find "$LINUX_REPO/tests" "$LINUX_REPO/scripts" -name '*.sh' -exec sed -i 's/\r$//' {} +
+    # Fix Windows CRLF line endings on all source files
+    find "$LINUX_REPO" \( -name '*.sh' -o -name '*.rs' -o -name '*.toml' -o -name '*.json' -o -name '*.md' -o -name '*.mdx' \) \
+        -not -path '*/target/*' -exec sed -i 's/\r$//' {} + 2>/dev/null || true
 
-    ok "Synced to $(git log --oneline -1) (+ uncommitted changes)"
+    ok "Synced from $WIN_REPO"
 }
 
 cmd_build() {

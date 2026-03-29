@@ -5,7 +5,7 @@ description: Complete feature-by-feature compatibility status for nono on WSL2
 
 Complete feature compatibility for nono running on WSL2 (kernel 6.6, Landlock V3).
 
-Legend: **Full** = identical to native Linux | **Degraded** = works with limitations | **Unavailable** = not functional
+Legend: **Full** = identical to native Linux | **Blocked (default)** = fails secure, requires profile opt-in | **Unavailable** = not functional on WSL2
 
 ## Subcommands
 
@@ -19,7 +19,7 @@ Legend: **Full** = identical to native Linux | **Degraded** = works with limitat
 | `nono setup` | Full | Reports WSL2 feature matrix |
 | `nono rollback` (list/show/restore/verify/cleanup) | Full | Pure userspace |
 | `nono audit` (list/show) | Full | Pure userspace |
-| `nono trust` (init/sign/verify/list) | Degraded | Keyless signing works; keygen/sign-policy need D-Bus `org.freedesktop.secrets` |
+| `nono trust` (init/sign/verify/list) | Full | keygen/sign-policy require `gnome-keyring` (distro dependency, not WSL2-specific) |
 | `nono policy` (groups/profiles/show/diff/validate) | Full | Pure logic |
 | `nono profile` (init/schema/guide) | Full | Pure logic |
 
@@ -57,20 +57,20 @@ Legend: **Full** = identical to native Linux | **Degraded** = works with limitat
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| `--credential SERVICE` (reverse proxy injection) | Degraded | Proxy works; child not port-locked to proxy |
+| `--credential SERVICE` (reverse proxy injection) | Blocked (default) | Fails secure unless profile sets `wsl2_proxy_policy: "insecure_proxy"` |
 | `--env-credential` (env var injection) | Full | No proxy needed |
 | `--env-credential-map` | Full | No proxy needed |
-| `--network-profile` (host allowlist via proxy) | Degraded | Proxy works; no port lockdown |
-| `--allow-domain` (domain allowlist) | Degraded | Proxy works; no port lockdown |
-| `--allow-endpoint` (L7 method+path filtering) | Degraded | Filtering works at proxy; child can bypass proxy |
-| `--upstream-proxy` (chain through external proxy) | Degraded | Proxy works; no port lockdown |
-| `--upstream-bypass` | Degraded | Same as above |
-| `--proxy-port` (fixed proxy port) | Degraded | Proxy binds correctly; no enforcement |
+| `--network-profile` (host allowlist via proxy) | Blocked (default) | Requires `wsl2_proxy_policy: "insecure_proxy"` opt-in; no port lockdown |
+| `--allow-domain` (domain allowlist) | Blocked (default) | Same as above |
+| `--allow-endpoint` (L7 method+path filtering) | Blocked (default) | Filtering works at proxy level; child can bypass proxy |
+| `--upstream-proxy` (chain through external proxy) | Blocked (default) | Same as above |
+| `--upstream-bypass` | Blocked (default) | Same as above |
+| `--proxy-port` (fixed proxy port) | Blocked (default) | Same as above |
 | Phantom token authentication | Full | Session token in env vars |
 | Credential zeroization in memory | Full | Rust `Zeroizing<String>` |
 | SSRF protection (cloud metadata blocking) | Full | Applied at proxy level |
 
-**Why degraded:** On native Linux with Landlock V4, the child can *only* connect to `127.0.0.1:{proxy_port}`. On WSL2 with V3, there's no port-level filtering — the child could bypass the proxy and connect directly. The proxy itself works correctly. When Landlock V4 arrives, enforcement activates automatically.
+**Why blocked by default:** On native Linux (even pre-V4), proxy-only mode is kernel-enforced via seccomp user notification. On WSL2, seccomp notify returns EBUSY, so the child could bypass the proxy. nono refuses to run in this mode by default. Profiles can opt in to degraded execution with `wsl2_proxy_policy: "insecure_proxy"` in the security config. When Landlock V4 arrives (kernel 6.7+), enforcement activates automatically and the policy setting becomes irrelevant.
 
 ## Execution & Supervision
 
@@ -128,17 +128,17 @@ Legend: **Full** = identical to native Linux | **Degraded** = works with limitat
 | Feature | Status | Notes |
 |---------|--------|-------|
 | `trust init` | Full | Creates trust-policy.json |
-| `trust sign` (with key) | Degraded | Needs D-Bus `org.freedesktop.secrets` for keystore |
+| `trust sign` (with key) | Full | Requires `gnome-keyring` (distro dependency, not WSL2-specific) |
 | `trust sign --keyless` (Sigstore) | Full | Fulcio + Rekor, no local keystore |
-| `trust sign-policy` | Degraded | Needs D-Bus keystore |
+| `trust sign-policy` | Full | Requires `gnome-keyring` (distro dependency) |
 | `trust verify` | Full | Bundle verification is pure crypto |
 | `trust list` | Full | |
-| `trust keygen` | Degraded | Needs D-Bus `org.freedesktop.secrets` |
-| `trust export-key` | Degraded | Needs D-Bus keystore |
+| `trust keygen` | Full | Requires `gnome-keyring` (distro dependency) |
+| `trust export-key` | Full | Requires `gnome-keyring` (distro dependency) |
 | Write-protection for signed files | Full | Landlock deny rules |
 | Trust interception in supervised mode | Full | Uses Unix socket IPC, not seccomp |
 
-**D-Bus keystore fix:** Install `gnome-keyring` or `keepassxc` and ensure the `org.freedesktop.secrets` service is running.
+**Note:** Key-based trust operations (`keygen`, `sign`, `sign-policy`, `export-key`) require a D-Bus secret service (`gnome-keyring` or `keepassxc`). This is a Linux distro dependency, not a WSL2 limitation — the same requirement applies on any headless Linux. Install with: `sudo apt install gnome-keyring dbus-x11`
 
 ## Profile System
 
@@ -200,23 +200,23 @@ Legend: **Full** = identical to native Linux | **Degraded** = works with limitat
 
 | Category | Full | Degraded | Unavailable |
 |----------|------|----------|-------------|
-| Subcommands (11) | 10 | 1 | 0 |
+| Subcommands (11) | 11 | 0 | 0 |
 | Filesystem (15) | 14 | 0 | 1 |
 | Network (5) | 2 | 0 | 3 |
-| Credential Proxy (10) | 4 | 6 | 0 |
+| Credential Proxy (10) | 4 | 0 | 6 |
 | Execution (12) | 9 | 0 | 3 |
 | Rollback (10) | 10 | 0 | 0 |
 | Audit (5) | 5 | 0 | 0 |
 | Command Blocking (3) | 3 | 0 | 0 |
-| Trust (10) | 5 | 4 | 1 |
+| Trust (10) | 10 | 0 | 0 |
 | Profiles (11) | 6 | 0 | 5 |
 | Hooks (3) | 3 | 0 | 0 |
 | Learn Mode (5) | 5 | 0 | 0 |
 | Output (6) | 6 | 0 | 0 |
 | Environment (4) | 4 | 0 | 0 |
-| **Total (110)** | **86 (78%)** | **11 (10%)** | **13 (12%)** |
+| **Total (110)** | **92 (84%)** | **0 (0%)** | **18 (16%)** |
 
-### Root causes of all limitations
+### Root causes of all WSL2-specific limitations
 
 | Root Cause | Features Affected | Fix |
 |------------|-------------------|-----|
@@ -224,5 +224,10 @@ Legend: **Full** = identical to native Linux | **Degraded** = works with limitat
 | Landlock V6 missing (kernel 6.6 < 6.12) | signal_mode, process_info_mode, ipc_mode (3) | WSL2 kernel upgrade (automatic) |
 | Landlock V5 missing (kernel 6.6 < 6.10) | Device ioctl filtering (1) | WSL2 kernel upgrade (automatic) |
 | seccomp notify EBUSY | capability_elevation, interactive mode, PTY relay, runtime expansion (4) | microsoft/WSL#9548 fix or eBPF alternative |
-| D-Bus `org.freedesktop.secrets` missing | trust keygen/sign/sign-policy/export-key (4) | Install gnome-keyring or keepassxc |
-| Proxy port enforcement (Landlock V4) | All credential proxy features (6 degraded) | WSL2 kernel upgrade (automatic) |
+
+### Distro dependencies (not WSL2-specific)
+
+| Dependency | Features Affected | Fix |
+|------------|-------------------|-----|
+| `gnome-keyring` or `keepassxc` | trust keygen/sign/sign-policy/export-key | `sudo apt install gnome-keyring dbus-x11` |
+| Proxy port enforcement (seccomp notify + Landlock V4) | Credential proxy features (6 blocked by default) | WSL2 kernel upgrade or `wsl2_proxy_policy: "insecure_proxy"` opt-in |

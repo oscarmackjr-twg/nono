@@ -24,7 +24,7 @@ pub use linux::{detect_abi, DetectedAbi};
 
 // Re-export Linux WSL2 detection
 #[cfg(target_os = "linux")]
-pub use linux::{is_wsl2, Wsl2FeatureMatrix};
+pub use linux::is_wsl2;
 
 // Re-export Linux seccomp-notify primitives for supervisor use
 #[cfg(target_os = "linux")]
