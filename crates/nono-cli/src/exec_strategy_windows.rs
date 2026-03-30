@@ -83,6 +83,16 @@ struct NetworkEnforcementGuard {
     outbound_rule: String,
 }
 
+trait WindowsNetworkBackend {
+    fn install(
+        &self,
+        policy: &nono::WindowsNetworkPolicy,
+        config: &ExecConfig<'_>,
+    ) -> Result<Option<NetworkEnforcementGuard>>;
+}
+
+struct FirewallRulesNetworkBackend;
+
 struct ProcessContainment {
     job: HANDLE,
 }
@@ -212,84 +222,17 @@ fn cleanup_network_enforcement_staging(staged_dir: &Path) {
     let _ = std::fs::remove_dir_all(staged_dir);
 }
 
-fn prepare_network_enforcement(config: &ExecConfig<'_>) -> Result<Option<NetworkEnforcementGuard>> {
-    let policy = Sandbox::windows_network_policy(config.caps);
-    if !policy.is_fully_supported() {
-        return Err(NonoError::UnsupportedPlatform(format!(
-            "Windows network enforcement does not support this capability set yet ({}, {}).",
-            policy.unsupported_messages().join(", "),
-            policy.backend_summary()
-        )));
-    }
-
-    let mode = policy.mode.clone();
-    let active_backend = policy.active_backend;
-
-    match (mode, active_backend) {
+fn select_network_backend(
+    policy: &nono::WindowsNetworkPolicy,
+) -> Result<Option<Box<dyn WindowsNetworkBackend>>> {
+    match (&policy.mode, policy.active_backend) {
         (nono::WindowsNetworkPolicyMode::AllowAll, nono::WindowsNetworkBackendKind::None) => {
             Ok(None)
         }
-        (nono::WindowsNetworkPolicyMode::Blocked, nono::WindowsNetworkBackendKind::FirewallRules) => {
-            match Sandbox::windows_network_launch_support(&policy, config.resolved_program) {
-                nono::WindowsNetworkLaunchSupport::Supported => {}
-                nono::WindowsNetworkLaunchSupport::UnsupportedShellHost => {
-                    return Err(NonoError::UnsupportedPlatform(format!(
-                        "Windows blocked-network enforcement currently supports standalone executable launches, not shell or interpreter hosts such as {}. \
-Use a direct executable target for the current backend subset. \
-This limitation comes from the current Windows Firewall-rule backend; the long-term backend target is WFP. \
-This is a current Windows backend limitation, not permanent product behavior.",
-                        config.resolved_program.display(),
-                    )));
-                }
-            }
-
-            let (staged_program, staged_dir) =
-                stage_program_for_blocked_network_launch(config.resolved_program)?;
-            let suffix = unique_windows_firewall_rule_suffix();
-            let inbound_rule = format!("nono-win-block-in-{suffix}");
-            let outbound_rule = format!("nono-win-block-out-{suffix}");
-            let program_arg = format!("program={}", staged_program.display());
-
-            if let Err(err) = run_netsh_firewall(&[
-                "advfirewall",
-                "firewall",
-                "add",
-                "rule",
-                &format!("name={outbound_rule}"),
-                "dir=out",
-                "action=block",
-                &program_arg,
-                "enable=yes",
-                "profile=any",
-            ]) {
-                cleanup_network_enforcement_staging(&staged_dir);
-                return Err(err);
-            }
-
-            if let Err(err) = run_netsh_firewall(&[
-                "advfirewall",
-                "firewall",
-                "add",
-                "rule",
-                &format!("name={inbound_rule}"),
-                "dir=in",
-                "action=block",
-                &program_arg,
-                "enable=yes",
-                "profile=any",
-            ]) {
-                let _ = delete_firewall_rule(&outbound_rule);
-                cleanup_network_enforcement_staging(&staged_dir);
-                return Err(err);
-            }
-
-            Ok(Some(NetworkEnforcementGuard {
-                staged_program,
-                staged_dir,
-                inbound_rule,
-                outbound_rule,
-            }))
-        }
+        (
+            nono::WindowsNetworkPolicyMode::Blocked,
+            nono::WindowsNetworkBackendKind::FirewallRules,
+        ) => Ok(Some(Box::new(FirewallRulesNetworkBackend))),
         (nono::WindowsNetworkPolicyMode::Blocked, nono::WindowsNetworkBackendKind::None) => Err(
             NonoError::UnsupportedPlatform(format!(
                 "Windows blocked-network enforcement has no active backend for this launch yet ({}). The preferred backend is WFP.",
@@ -308,6 +251,91 @@ This is a current Windows backend limitation, not permanent product behavior.",
             active_backend.label()
         ))),
     }
+}
+
+impl WindowsNetworkBackend for FirewallRulesNetworkBackend {
+    fn install(
+        &self,
+        policy: &nono::WindowsNetworkPolicy,
+        config: &ExecConfig<'_>,
+    ) -> Result<Option<NetworkEnforcementGuard>> {
+        match Sandbox::windows_network_launch_support(policy, config.resolved_program) {
+            nono::WindowsNetworkLaunchSupport::Supported => {}
+            nono::WindowsNetworkLaunchSupport::UnsupportedShellHost => {
+                return Err(NonoError::UnsupportedPlatform(format!(
+                    "Windows blocked-network enforcement currently supports standalone executable launches, not shell or interpreter hosts such as {}. \
+Use a direct executable target for the current backend subset. \
+This limitation comes from the current Windows Firewall-rule backend; the long-term backend target is WFP. \
+This is a current Windows backend limitation, not permanent product behavior.",
+                    config.resolved_program.display(),
+                )));
+            }
+        }
+
+        let (staged_program, staged_dir) =
+            stage_program_for_blocked_network_launch(config.resolved_program)?;
+        let suffix = unique_windows_firewall_rule_suffix();
+        let inbound_rule = format!("nono-win-block-in-{suffix}");
+        let outbound_rule = format!("nono-win-block-out-{suffix}");
+        let program_arg = format!("program={}", staged_program.display());
+
+        if let Err(err) = run_netsh_firewall(&[
+            "advfirewall",
+            "firewall",
+            "add",
+            "rule",
+            &format!("name={outbound_rule}"),
+            "dir=out",
+            "action=block",
+            &program_arg,
+            "enable=yes",
+            "profile=any",
+        ]) {
+            cleanup_network_enforcement_staging(&staged_dir);
+            return Err(err);
+        }
+
+        if let Err(err) = run_netsh_firewall(&[
+            "advfirewall",
+            "firewall",
+            "add",
+            "rule",
+            &format!("name={inbound_rule}"),
+            "dir=in",
+            "action=block",
+            &program_arg,
+            "enable=yes",
+            "profile=any",
+        ]) {
+            let _ = delete_firewall_rule(&outbound_rule);
+            cleanup_network_enforcement_staging(&staged_dir);
+            return Err(err);
+        }
+
+        Ok(Some(NetworkEnforcementGuard {
+            staged_program,
+            staged_dir,
+            inbound_rule,
+            outbound_rule,
+        }))
+    }
+}
+
+fn prepare_network_enforcement(config: &ExecConfig<'_>) -> Result<Option<NetworkEnforcementGuard>> {
+    let policy = Sandbox::windows_network_policy(config.caps);
+    if !policy.is_fully_supported() {
+        return Err(NonoError::UnsupportedPlatform(format!(
+            "Windows network enforcement does not support this capability set yet ({}, {}).",
+            policy.unsupported_messages().join(", "),
+            policy.backend_summary()
+        )));
+    }
+
+    let Some(backend) = select_network_backend(&policy)? else {
+        return Ok(None);
+    };
+
+    backend.install(&policy, config)
 }
 
 fn create_process_containment() -> Result<ProcessContainment> {
@@ -1271,5 +1299,31 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("does not support this capability set yet"));
         assert!(message.contains("preferred backend: windows-filtering-platform"));
+    }
+
+    #[test]
+    fn test_select_network_backend_returns_none_for_allow_all() {
+        let policy = Sandbox::windows_network_policy(&CapabilitySet::new());
+        let backend = select_network_backend(&policy).expect("allow-all selection");
+        assert!(backend.is_none(), "allow-all should not install a backend");
+    }
+
+    #[test]
+    fn test_select_network_backend_rejects_proxy_only_without_active_backend() {
+        let policy = Sandbox::windows_network_policy(&CapabilitySet::new().set_network_mode(
+            nono::NetworkMode::ProxyOnly {
+                port: 8080,
+                bind_ports: vec![8080],
+            },
+        ));
+
+        match select_network_backend(&policy) {
+            Ok(_) => panic!("proxy-only should fail without backend"),
+            Err(err) => {
+                let message = err.to_string();
+                assert!(message.contains("proxy-only network enforcement is not implemented yet"));
+                assert!(message.contains("preferred backend: windows-filtering-platform"));
+            }
+        }
     }
 }
