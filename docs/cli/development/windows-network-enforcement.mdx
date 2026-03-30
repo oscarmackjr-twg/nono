@@ -123,6 +123,10 @@ The first real probing layer is now in place for that scaffold:
   - binary: `nono-wfp-service.exe`
   - service: `nono-wfp-service`
   - driver: `nono-wfp-driver`
+- the binary now also defines the first explicit startup contract for service registration:
+  - registration target: `nono-wfp-service`
+  - startup args: `--service-mode`
+  - runtime result today: fail closed with a clear "not implemented yet" service-host error
 - missing backend binary is treated as an early installability failure before service probing
 - this repo now ships the first backend artifact, `nono-wfp-service`, as a placeholder binary that establishes the component contract without claiming service readiness
 - after building all CLI bins, readiness can advance from `missing binary` to `missing service` / `missing driver`
