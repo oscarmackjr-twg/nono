@@ -100,6 +100,7 @@ pub enum Commands {
     #[command(after_help = "\x1b[1mEXAMPLES\x1b[0m
   nono setup --profiles                        # Full setup with profile generation
   nono setup --check-only                      # Verify installation and sandbox support
+  nono setup --install-wfp-service             # Register the Windows WFP placeholder service
   nono setup --profiles --shell-integration    # Setup with shell integration help
   nono setup -v --profiles                     # Verbose setup
 ")]
@@ -970,6 +971,10 @@ pub struct SetupArgs {
     /// Only verify installation and sandbox support, don't create files
     #[arg(long, help_heading = "OPTIONS")]
     pub check_only: bool,
+
+    /// Register the Windows WFP service placeholder (Windows only)
+    #[arg(long, help_heading = "OPTIONS")]
+    pub install_wfp_service: bool,
 
     /// Generate example user profiles in ~/.config/nono/profiles/
     #[arg(long, help_heading = "OPTIONS")]

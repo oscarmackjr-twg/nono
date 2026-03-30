@@ -9,6 +9,7 @@ use nix::libc;
 
 pub struct SetupRunner {
     check_only: bool,
+    install_wfp_service: bool,
     generate_profiles: bool,
     show_shell_integration: bool,
     #[allow(dead_code)]
@@ -19,6 +20,7 @@ impl SetupRunner {
     pub fn new(args: &SetupArgs) -> Self {
         Self {
             check_only: args.check_only,
+            install_wfp_service: args.install_wfp_service,
             generate_profiles: args.profiles,
             show_shell_integration: args.shell_integration,
             verbose: args.verbose,
@@ -31,6 +33,11 @@ impl SetupRunner {
 
         // Sandbox support testing
         self.test_sandbox_support()?;
+
+        #[cfg(target_os = "windows")]
+        if !self.check_only && self.install_wfp_service {
+            self.install_windows_wfp_service()?;
+        }
 
         // Show what nono protects
         self.show_protection_summary()?;
@@ -85,6 +92,19 @@ impl SetupRunner {
         #[cfg(target_os = "windows")]
         self.test_windows_support()?;
 
+        println!();
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    fn install_windows_wfp_service(&self) -> Result<()> {
+        println!(
+            "[3/{}] Registering Windows WFP service...",
+            self.total_phases()
+        );
+        let report = crate::exec_strategy::install_windows_wfp_service()?;
+        println!("  * WFP service install: {}", report.status_label);
+        println!("  * {}", report.details);
         println!();
         Ok(())
     }
@@ -239,7 +259,11 @@ impl SetupRunner {
     }
 
     fn show_protection_summary(&self) -> Result<()> {
-        println!("[3/{}] Default protections...", self.total_phases());
+        println!(
+            "[{}/{}] Default protections...",
+            self.protection_phase_index(),
+            self.total_phases()
+        );
 
         // Get sensitive paths and dangerous commands from policy
         let loaded_policy = crate::policy::load_embedded_policy()?;
@@ -283,7 +307,11 @@ impl SetupRunner {
     }
 
     fn show_builtin_profiles(&self) {
-        println!("[4/{}] Built-in profiles...", self.total_phases());
+        println!(
+            "[{}/{}] Built-in profiles...",
+            self.profiles_phase_index(),
+            self.total_phases()
+        );
 
         let profiles = profile::list_profiles();
 
@@ -432,6 +460,11 @@ impl SetupRunner {
     fn total_phases(&self) -> usize {
         let mut count = 4; // Installation check + sandbox test + protection summary + profiles
 
+        #[cfg(target_os = "windows")]
+        if !self.check_only && self.install_wfp_service {
+            count += 1;
+        }
+
         if !self.check_only {
             if self.generate_profiles {
                 count += 1;
@@ -442,6 +475,24 @@ impl SetupRunner {
         }
 
         count
+    }
+
+    fn protection_phase_index(&self) -> usize {
+        #[cfg(target_os = "windows")]
+        if !self.check_only && self.install_wfp_service {
+            return 4;
+        }
+
+        3
+    }
+
+    fn profiles_phase_index(&self) -> usize {
+        #[cfg(target_os = "windows")]
+        if !self.check_only && self.install_wfp_service {
+            return 5;
+        }
+
+        4
     }
 }
 
@@ -627,6 +678,7 @@ mod tests {
         // Run the actual setup code that writes example profiles.
         let runner = SetupRunner {
             check_only: false,
+            install_wfp_service: false,
             generate_profiles: true,
             show_shell_integration: false,
             verbose: 0,

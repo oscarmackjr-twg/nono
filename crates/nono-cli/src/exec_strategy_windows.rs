@@ -137,6 +137,12 @@ pub(crate) struct WindowsWfpReadinessReport {
     pub details: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WindowsWfpInstallReport {
+    pub status_label: &'static str,
+    pub details: String,
+}
+
 struct ProcessContainment {
     job: HANDLE,
 }
@@ -288,6 +294,14 @@ fn current_wfp_probe_config() -> Result<WfpProbeConfig> {
     })
 }
 
+fn format_wfp_service_command(config: &WfpProbeConfig) -> String {
+    format!(
+        "\"{}\" {}",
+        config.backend_binary_path.display(),
+        config.backend_service_args.join(" ")
+    )
+}
+
 fn run_sc_query(service: &str) -> Result<String> {
     let output = Command::new("sc")
         .args(["query", service])
@@ -298,6 +312,41 @@ fn run_sc_query(service: &str) -> Result<String> {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     ))
+}
+
+fn run_sc_command(args: &[String]) -> Result<String> {
+    let output = Command::new("sc")
+        .args(args)
+        .output()
+        .map_err(NonoError::CommandExecution)?;
+    Ok(format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    ))
+}
+
+fn build_wfp_service_create_args(config: &WfpProbeConfig) -> Vec<String> {
+    vec![
+        "create".to_string(),
+        config.backend_service.to_string(),
+        "binPath=".to_string(),
+        format_wfp_service_command(config),
+        "start=".to_string(),
+        "demand".to_string(),
+        "type=".to_string(),
+        "own".to_string(),
+        "DisplayName=".to_string(),
+        "nono WFP Service".to_string(),
+    ]
+}
+
+fn build_wfp_service_description_args(config: &WfpProbeConfig) -> Vec<String> {
+    vec![
+        "description".to_string(),
+        config.backend_service.to_string(),
+        "Placeholder service host for the future nono Windows WFP backend. Registration is supported; runtime still fails closed until enforcement is implemented.".to_string(),
+    ]
 }
 
 fn parse_windows_service_state(output: &str) -> WindowsServiceState {
@@ -416,11 +465,7 @@ fn describe_wfp_probe_failure(
 }
 
 fn describe_wfp_probe_status_for_setup(config: &WfpProbeConfig, status: WfpProbeStatus) -> String {
-    let service_command = format!(
-        "\"{}\" {}",
-        config.backend_binary_path.display(),
-        config.backend_service_args.join(" ")
-    );
+    let service_command = format_wfp_service_command(config);
     match status {
         WfpProbeStatus::Ready => format!(
             "WFP backend components are present (binary: {}, service: {}, driver: {}), but the runtime installer is not implemented yet. Expected service command: {}.",
@@ -464,6 +509,76 @@ fn describe_wfp_probe_status_for_setup(config: &WfpProbeConfig, status: WfpProbe
             config.backend_driver
         ),
     }
+}
+
+fn install_windows_wfp_service_with_runner<Q, R>(
+    config: &WfpProbeConfig,
+    query_service: Q,
+    run_service_command: R,
+) -> Result<WindowsWfpInstallReport>
+where
+    Q: Fn(&str) -> Result<String>,
+    R: Fn(&[String]) -> Result<String>,
+{
+    if !config.backend_binary_path.exists() {
+        return Err(NonoError::Setup(format!(
+            "Cannot register Windows WFP service because the backend binary is missing: {}. Build nono-wfp-service first.",
+            config.backend_binary_path.display()
+        )));
+    }
+
+    let platform_state = parse_windows_service_state(&query_service(config.platform_service)?);
+    match platform_state {
+        WindowsServiceState::Running => {}
+        WindowsServiceState::Stopped => {
+            return Err(NonoError::Setup(format!(
+                "Cannot register Windows WFP service because the Base Filtering Engine service ({}) is not running.",
+                config.platform_service
+            )));
+        }
+        WindowsServiceState::Missing | WindowsServiceState::Unknown => {
+            return Err(NonoError::Setup(format!(
+                "Cannot register Windows WFP service because the Base Filtering Engine service ({}) is missing or could not be queried.",
+                config.platform_service
+            )));
+        }
+    }
+
+    let service_command = format_wfp_service_command(config);
+    let service_state = parse_windows_service_state(&query_service(config.backend_service)?);
+    if service_state != WindowsServiceState::Missing {
+        return Ok(WindowsWfpInstallReport {
+            status_label: "already installed",
+            details: format!(
+                "Windows WFP service {} is already registered. Expected startup command: {}. The placeholder service host still fails closed until the real backend is implemented.",
+                config.backend_service, service_command
+            ),
+        });
+    }
+
+    run_service_command(&build_wfp_service_create_args(config))?;
+    run_service_command(&build_wfp_service_description_args(config))?;
+
+    let registered_state = parse_windows_service_state(&query_service(config.backend_service)?);
+    if registered_state == WindowsServiceState::Missing {
+        return Err(NonoError::Setup(format!(
+            "Windows WFP service registration did not persist for {}. Expected startup command: {}.",
+            config.backend_service, service_command
+        )));
+    }
+
+    Ok(WindowsWfpInstallReport {
+        status_label: "installed",
+        details: format!(
+            "Registered Windows WFP service {} with startup command: {}. Service startup is not attempted automatically because the placeholder host still fails closed until enforcement is implemented.",
+            config.backend_service, service_command
+        ),
+    })
+}
+
+pub(crate) fn install_windows_wfp_service() -> Result<WindowsWfpInstallReport> {
+    let config = current_wfp_probe_config()?;
+    install_windows_wfp_service_with_runner(&config, run_sc_query, run_sc_command)
 }
 
 pub(crate) fn probe_windows_wfp_readiness() -> WindowsWfpReadinessReport {
@@ -1764,6 +1879,101 @@ mod tests {
             describe_wfp_probe_status_for_setup(&config, WfpProbeStatus::BackendServiceMissing);
         assert!(message.contains("Register it to launch nono-wfp-service"));
         assert!(message.contains("--service-mode"));
+    }
+
+    #[test]
+    fn test_build_wfp_service_create_args_uses_service_contract() {
+        let config = WfpProbeConfig {
+            platform_service: WINDOWS_WFP_PLATFORM_SERVICE,
+            backend_service: WINDOWS_WFP_BACKEND_SERVICE,
+            backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
+            backend_binary_path: PathBuf::from(r"C:\tools\nono-wfp-service.exe"),
+            backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
+        };
+        let args = build_wfp_service_create_args(&config);
+        let joined = args.join(" ");
+        assert!(joined.contains("create nono-wfp-service"));
+        assert!(joined.contains(r#""C:\tools\nono-wfp-service.exe" --service-mode"#));
+        assert!(joined.contains("start= demand"));
+    }
+
+    #[test]
+    fn test_install_windows_wfp_service_registers_missing_service() {
+        use std::cell::RefCell;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let binary_path = dir.path().join("nono-wfp-service.exe");
+        std::fs::write(&binary_path, b"stub").expect("write stub binary");
+        let config = WfpProbeConfig {
+            platform_service: WINDOWS_WFP_PLATFORM_SERVICE,
+            backend_service: WINDOWS_WFP_BACKEND_SERVICE,
+            backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
+            backend_binary_path: binary_path,
+            backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
+        };
+
+        let create_calls = RefCell::new(Vec::<Vec<String>>::new());
+        let backend_service_seen = RefCell::new(0usize);
+        let report = install_windows_wfp_service_with_runner(
+            &config,
+            |service| match service {
+                WINDOWS_WFP_PLATFORM_SERVICE => Ok("STATE              : 4  RUNNING".to_string()),
+                WINDOWS_WFP_BACKEND_SERVICE => {
+                    let seen = *backend_service_seen.borrow();
+                    *backend_service_seen.borrow_mut() = seen + 1;
+                    if seen == 0 {
+                        Ok("[SC] EnumQueryServicesStatus:OpenService FAILED 1060".to_string())
+                    } else {
+                        Ok("STATE              : 1  STOPPED".to_string())
+                    }
+                }
+                other => Err(NonoError::Setup(format!(
+                    "unexpected service query in test: {other}"
+                ))),
+            },
+            |args| {
+                create_calls.borrow_mut().push(args.to_vec());
+                Ok("SUCCESS".to_string())
+            },
+        )
+        .expect("service registration should succeed");
+
+        assert_eq!(report.status_label, "installed");
+        assert!(report.details.contains("--service-mode"));
+        let calls = create_calls.borrow();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0][0], "create");
+        assert_eq!(calls[1][0], "description");
+    }
+
+    #[test]
+    fn test_install_windows_wfp_service_reports_already_installed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let binary_path = dir.path().join("nono-wfp-service.exe");
+        std::fs::write(&binary_path, b"stub").expect("write stub binary");
+        let config = WfpProbeConfig {
+            platform_service: WINDOWS_WFP_PLATFORM_SERVICE,
+            backend_service: WINDOWS_WFP_BACKEND_SERVICE,
+            backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
+            backend_binary_path: binary_path,
+            backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
+        };
+
+        let report = install_windows_wfp_service_with_runner(
+            &config,
+            |service| match service {
+                WINDOWS_WFP_PLATFORM_SERVICE => Ok("STATE              : 4  RUNNING".to_string()),
+                WINDOWS_WFP_BACKEND_SERVICE => Ok("STATE              : 1  STOPPED".to_string()),
+                other => Err(NonoError::Setup(format!(
+                    "unexpected service query in test: {other}"
+                ))),
+            },
+            |_args| Err(NonoError::Setup("create should not run".to_string())),
+        )
+        .expect("existing registration should be accepted");
+
+        assert_eq!(report.status_label, "already installed");
+        assert!(report.details.contains("already registered"));
     }
 
     #[test]
