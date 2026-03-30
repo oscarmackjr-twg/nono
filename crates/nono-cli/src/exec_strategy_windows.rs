@@ -147,6 +147,12 @@ pub(crate) struct WindowsWfpInstallReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WindowsWfpDriverInstallReport {
+    pub status_label: &'static str,
+    pub details: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WindowsWfpStartReport {
     pub status_label: &'static str,
     pub details: String,
@@ -356,6 +362,29 @@ fn build_wfp_service_description_args(config: &WfpProbeConfig) -> Vec<String> {
         "description".to_string(),
         config.backend_service.to_string(),
         "Placeholder service host for the future nono Windows WFP backend. Registration is supported; runtime still fails closed until enforcement is implemented.".to_string(),
+    ]
+}
+
+fn build_wfp_driver_create_args(config: &WfpProbeConfig) -> Vec<String> {
+    vec![
+        "create".to_string(),
+        config.backend_driver.to_string(),
+        "binPath=".to_string(),
+        config.backend_driver_binary_path.display().to_string(),
+        "type=".to_string(),
+        "kernel".to_string(),
+        "start=".to_string(),
+        "demand".to_string(),
+        "DisplayName=".to_string(),
+        "nono WFP Driver".to_string(),
+    ]
+}
+
+fn build_wfp_driver_description_args(config: &WfpProbeConfig) -> Vec<String> {
+    vec![
+        "description".to_string(),
+        config.backend_driver.to_string(),
+        "Placeholder kernel-driver registration for the future nono Windows WFP backend. Registration is supported; enforcement is not implemented yet.".to_string(),
     ]
 }
 
@@ -612,6 +641,78 @@ where
 pub(crate) fn install_windows_wfp_service() -> Result<WindowsWfpInstallReport> {
     let config = current_wfp_probe_config()?;
     install_windows_wfp_service_with_runner(&config, run_sc_query, run_sc_command)
+}
+
+fn install_windows_wfp_driver_with_runner<Q, R>(
+    config: &WfpProbeConfig,
+    query_service: Q,
+    run_service_command: R,
+) -> Result<WindowsWfpDriverInstallReport>
+where
+    Q: Fn(&str) -> Result<String>,
+    R: Fn(&[String]) -> Result<String>,
+{
+    if !config.backend_driver_binary_path.exists() {
+        return Err(NonoError::Setup(format!(
+            "Cannot register Windows WFP driver because the driver binary is missing: {}. Build nono-cli so the placeholder driver artifact is staged first.",
+            config.backend_driver_binary_path.display()
+        )));
+    }
+
+    let platform_state = parse_windows_service_state(&query_service(config.platform_service)?);
+    match platform_state {
+        WindowsServiceState::Running => {}
+        WindowsServiceState::Stopped => {
+            return Err(NonoError::Setup(format!(
+                "Cannot register Windows WFP driver because the Base Filtering Engine service ({}) is not running.",
+                config.platform_service
+            )));
+        }
+        WindowsServiceState::Missing | WindowsServiceState::Unknown => {
+            return Err(NonoError::Setup(format!(
+                "Cannot register Windows WFP driver because the Base Filtering Engine service ({}) is missing or could not be queried.",
+                config.platform_service
+            )));
+        }
+    }
+
+    let driver_state = parse_windows_service_state(&query_service(config.backend_driver)?);
+    if driver_state != WindowsServiceState::Missing {
+        return Ok(WindowsWfpDriverInstallReport {
+            status_label: "already installed",
+            details: format!(
+                "Windows WFP driver {} is already registered. Expected driver binary path: {}. Driver startup is not attempted automatically.",
+                config.backend_driver,
+                config.backend_driver_binary_path.display()
+            ),
+        });
+    }
+
+    run_service_command(&build_wfp_driver_create_args(config))?;
+    run_service_command(&build_wfp_driver_description_args(config))?;
+
+    let registered_state = parse_windows_service_state(&query_service(config.backend_driver)?);
+    if registered_state == WindowsServiceState::Missing {
+        return Err(NonoError::Setup(format!(
+            "Windows WFP driver registration did not persist for {}. Expected driver binary path: {}.",
+            config.backend_driver,
+            config.backend_driver_binary_path.display()
+        )));
+    }
+
+    Ok(WindowsWfpDriverInstallReport {
+        status_label: "installed",
+        details: format!(
+            "Registered Windows WFP driver {} with binary path {}. Driver startup is not attempted automatically because this branch still does not ship a working WFP driver.",
+            config.backend_driver,
+            config.backend_driver_binary_path.display()
+        ),
+    })
+}
+
+pub(crate) fn install_windows_wfp_driver() -> Result<WindowsWfpDriverInstallReport> {
+    let config = current_wfp_probe_config()?;
+    install_windows_wfp_driver_with_runner(&config, run_sc_query, run_sc_command)
 }
 
 fn start_windows_wfp_service_with_runner<Q, R>(
@@ -2090,6 +2191,23 @@ mod tests {
     }
 
     #[test]
+    fn test_build_wfp_driver_create_args_uses_driver_contract() {
+        let config = WfpProbeConfig {
+            platform_service: WINDOWS_WFP_PLATFORM_SERVICE,
+            backend_service: WINDOWS_WFP_BACKEND_SERVICE,
+            backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
+            backend_binary_path: PathBuf::from(r"C:\tools\nono-wfp-service.exe"),
+            backend_driver_binary_path: PathBuf::from(r"C:\tools\nono-wfp-driver.sys"),
+            backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
+        };
+        let args = build_wfp_driver_create_args(&config);
+        let joined = args.join(" ");
+        assert!(joined.contains("create nono-wfp-driver"));
+        assert!(joined.contains(r"C:\tools\nono-wfp-driver.sys"));
+        assert!(joined.contains("type= kernel"));
+    }
+
+    #[test]
     fn test_build_wfp_service_start_args_uses_service_name() {
         let config = WfpProbeConfig {
             platform_service: WINDOWS_WFP_PLATFORM_SERVICE,
@@ -2182,6 +2300,90 @@ mod tests {
             |_args| Err(NonoError::Setup("create should not run".to_string())),
         )
         .expect("existing registration should be accepted");
+
+        assert_eq!(report.status_label, "already installed");
+        assert!(report.details.contains("already registered"));
+    }
+
+    #[test]
+    fn test_install_windows_wfp_driver_registers_missing_driver() {
+        use std::cell::RefCell;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let driver_binary = dir.path().join("nono-wfp-driver.sys");
+        std::fs::write(&driver_binary, b"stub").expect("write stub driver binary");
+        let config = WfpProbeConfig {
+            platform_service: WINDOWS_WFP_PLATFORM_SERVICE,
+            backend_service: WINDOWS_WFP_BACKEND_SERVICE,
+            backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
+            backend_binary_path: dir.path().join("nono-wfp-service.exe"),
+            backend_driver_binary_path: driver_binary,
+            backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
+        };
+
+        let calls = RefCell::new(Vec::<Vec<String>>::new());
+        let backend_driver_seen = RefCell::new(0usize);
+        let report = install_windows_wfp_driver_with_runner(
+            &config,
+            |service| match service {
+                WINDOWS_WFP_PLATFORM_SERVICE => Ok("STATE              : 4  RUNNING".to_string()),
+                WINDOWS_WFP_BACKEND_DRIVER => {
+                    let seen = *backend_driver_seen.borrow();
+                    *backend_driver_seen.borrow_mut() = seen + 1;
+                    if seen == 0 {
+                        Ok("[SC] EnumQueryServicesStatus:OpenService FAILED 1060".to_string())
+                    } else {
+                        Ok("STATE              : 1  STOPPED".to_string())
+                    }
+                }
+                other => Err(NonoError::Setup(format!(
+                    "unexpected service query in test: {other}"
+                ))),
+            },
+            |args| {
+                calls.borrow_mut().push(args.to_vec());
+                Ok("SUCCESS".to_string())
+            },
+        )
+        .expect("driver registration should succeed");
+
+        assert_eq!(report.status_label, "installed");
+        assert!(report.details.contains("nono-wfp-driver"));
+        assert!(report
+            .details
+            .contains("does not ship a working WFP driver"));
+        let calls = calls.borrow();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0][0], "create");
+        assert_eq!(calls[1][0], "description");
+    }
+
+    #[test]
+    fn test_install_windows_wfp_driver_reports_already_installed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let driver_binary = dir.path().join("nono-wfp-driver.sys");
+        std::fs::write(&driver_binary, b"stub").expect("write stub driver binary");
+        let config = WfpProbeConfig {
+            platform_service: WINDOWS_WFP_PLATFORM_SERVICE,
+            backend_service: WINDOWS_WFP_BACKEND_SERVICE,
+            backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
+            backend_binary_path: dir.path().join("nono-wfp-service.exe"),
+            backend_driver_binary_path: driver_binary,
+            backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
+        };
+
+        let report = install_windows_wfp_driver_with_runner(
+            &config,
+            |service| match service {
+                WINDOWS_WFP_PLATFORM_SERVICE => Ok("STATE              : 4  RUNNING".to_string()),
+                WINDOWS_WFP_BACKEND_DRIVER => Ok("STATE              : 1  STOPPED".to_string()),
+                other => Err(NonoError::Setup(format!(
+                    "unexpected service query in test: {other}"
+                ))),
+            },
+            |_args| Err(NonoError::Setup("create should not run".to_string())),
+        )
+        .expect("existing driver registration should be accepted");
 
         assert_eq!(report.status_label, "already installed");
         assert!(report.details.contains("already registered"));

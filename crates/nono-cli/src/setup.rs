@@ -10,6 +10,7 @@ use nix::libc;
 pub struct SetupRunner {
     check_only: bool,
     install_wfp_service: bool,
+    install_wfp_driver: bool,
     start_wfp_service: bool,
     generate_profiles: bool,
     show_shell_integration: bool,
@@ -22,6 +23,7 @@ impl SetupRunner {
         Self {
             check_only: args.check_only,
             install_wfp_service: args.install_wfp_service,
+            install_wfp_driver: args.install_wfp_driver,
             start_wfp_service: args.start_wfp_service,
             generate_profiles: args.profiles,
             show_shell_integration: args.shell_integration,
@@ -39,6 +41,11 @@ impl SetupRunner {
         #[cfg(target_os = "windows")]
         if !self.check_only && self.install_wfp_service {
             self.install_windows_wfp_service()?;
+        }
+
+        #[cfg(target_os = "windows")]
+        if !self.check_only && self.install_wfp_driver {
+            self.install_windows_wfp_driver()?;
         }
 
         #[cfg(target_os = "windows")]
@@ -112,6 +119,20 @@ impl SetupRunner {
         );
         let report = crate::exec_strategy::install_windows_wfp_service()?;
         println!("  * WFP service install: {}", report.status_label);
+        println!("  * {}", report.details);
+        println!();
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    fn install_windows_wfp_driver(&self) -> Result<()> {
+        println!(
+            "[{}/{}] Registering Windows WFP driver...",
+            self.install_driver_phase_index(),
+            self.total_phases()
+        );
+        let report = crate::exec_strategy::install_windows_wfp_driver()?;
+        println!("  * WFP driver install: {}", report.status_label);
         println!("  * {}", report.details);
         println!();
         Ok(())
@@ -488,6 +509,11 @@ impl SetupRunner {
         }
 
         #[cfg(target_os = "windows")]
+        if !self.check_only && self.install_wfp_driver {
+            count += 1;
+        }
+
+        #[cfg(target_os = "windows")]
         if !self.check_only && self.start_wfp_service {
             count += 1;
         }
@@ -507,7 +533,10 @@ impl SetupRunner {
     fn protection_phase_index(&self) -> usize {
         #[cfg(target_os = "windows")]
         if !self.check_only {
-            return 3 + usize::from(self.install_wfp_service) + usize::from(self.start_wfp_service);
+            return 3
+                + usize::from(self.install_wfp_service)
+                + usize::from(self.install_wfp_driver)
+                + usize::from(self.start_wfp_service);
         }
 
         3
@@ -516,7 +545,10 @@ impl SetupRunner {
     fn profiles_phase_index(&self) -> usize {
         #[cfg(target_os = "windows")]
         if !self.check_only {
-            return 4 + usize::from(self.install_wfp_service) + usize::from(self.start_wfp_service);
+            return 4
+                + usize::from(self.install_wfp_service)
+                + usize::from(self.install_wfp_driver)
+                + usize::from(self.start_wfp_service);
         }
 
         4
@@ -527,6 +559,10 @@ impl SetupRunner {
     }
 
     fn start_phase_index(&self) -> usize {
+        3 + usize::from(self.install_wfp_service) + usize::from(self.install_wfp_driver)
+    }
+
+    fn install_driver_phase_index(&self) -> usize {
         3 + usize::from(self.install_wfp_service)
     }
 }
@@ -714,6 +750,7 @@ mod tests {
         let runner = SetupRunner {
             check_only: false,
             install_wfp_service: false,
+            install_wfp_driver: false,
             start_wfp_service: false,
             generate_profiles: true,
             show_shell_integration: false,
