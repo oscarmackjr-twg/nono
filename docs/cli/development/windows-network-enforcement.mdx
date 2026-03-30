@@ -133,6 +133,12 @@ The first real probing layer is now in place for that scaffold:
   - registers the service with `sc create`
   - writes the placeholder service description
   - does **not** auto-start the service, because the placeholder host still fails closed
+- `nono setup --start-wfp-service` now performs the first explicit startup attempt flow:
+  - verifies the service is registered
+  - verifies `BFE` is running
+  - attempts `sc start nono-wfp-service`
+  - reports `already running`, `running`, or a fail-closed startup error
+  - keeps the current placeholder-host behavior explicit when startup does not stay in `RUNNING`
 - missing backend binary is treated as an early installability failure before service probing
 - this repo now ships the first backend artifact, `nono-wfp-service`, as a placeholder binary that establishes the component contract without claiming service readiness
 - after building all CLI bins, readiness can advance from `missing binary` to `missing service` / `missing driver`, and after registration it can advance again to `missing driver`

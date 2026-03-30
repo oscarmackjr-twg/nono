@@ -101,6 +101,8 @@ pub enum Commands {
   nono setup --profiles                        # Full setup with profile generation
   nono setup --check-only                      # Verify installation and sandbox support
   nono setup --install-wfp-service             # Register the Windows WFP placeholder service
+  nono setup --start-wfp-service               # Attempt to start the registered WFP placeholder service
+  nono setup --install-wfp-service --start-wfp-service  # Register, then try to start the placeholder service
   nono setup --profiles --shell-integration    # Setup with shell integration help
   nono setup -v --profiles                     # Verbose setup
 ")]
@@ -975,6 +977,10 @@ pub struct SetupArgs {
     /// Register the Windows WFP service placeholder (Windows only)
     #[arg(long, help_heading = "OPTIONS")]
     pub install_wfp_service: bool,
+
+    /// Attempt to start the registered Windows WFP service placeholder
+    #[arg(long, help_heading = "OPTIONS")]
+    pub start_wfp_service: bool,
 
     /// Generate example user profiles in ~/.config/nono/profiles/
     #[arg(long, help_heading = "OPTIONS")]
