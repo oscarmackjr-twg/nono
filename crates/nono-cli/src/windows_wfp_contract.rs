@@ -1,0 +1,19 @@
+use serde::{Deserialize, Serialize};
+
+pub const WFP_RUNTIME_PROTOCOL_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WfpRuntimeActivationRequest {
+    pub protocol_version: u32,
+    pub network_mode: String,
+    pub preferred_backend: String,
+    pub active_backend: String,
+    pub runtime_target: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WfpRuntimeActivationResponse {
+    pub protocol_version: u32,
+    pub status: String,
+    pub details: String,
+}

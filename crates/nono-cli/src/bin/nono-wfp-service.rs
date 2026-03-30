@@ -4,7 +4,13 @@
 //! backend. It establishes the expected Windows service contract without
 //! claiming working service-host or enforcement behavior yet.
 
+#[path = "../windows_wfp_contract.rs"]
+mod windows_wfp_contract;
+
 use std::process::ExitCode;
+use windows_wfp_contract::{
+    WfpRuntimeActivationRequest, WfpRuntimeActivationResponse, WFP_RUNTIME_PROTOCOL_VERSION,
+};
 
 const SERVICE_NAME: &str = "nono-wfp-service";
 const SERVICE_MODE_ARG: &str = "--service-mode";
@@ -46,8 +52,46 @@ fn run_service_mode() -> ExitCode {
     ExitCode::from(3)
 }
 
+fn build_not_implemented_activation_response(
+    request: &WfpRuntimeActivationRequest,
+) -> WfpRuntimeActivationResponse {
+    WfpRuntimeActivationResponse {
+        protocol_version: WFP_RUNTIME_PROTOCOL_VERSION,
+        status: "not-implemented".to_string(),
+        details: format!(
+            "runtime activation for {} is not implemented yet; preferred backend: {}, active backend: {}",
+            request.runtime_target, request.preferred_backend, request.active_backend
+        ),
+    }
+}
+
 fn probe_runtime_activation() -> ExitCode {
-    println!("activation=not-implemented");
+    let stdin = std::io::read_to_string(std::io::stdin());
+    let Ok(stdin) = stdin else {
+        eprintln!("nono-wfp-service: failed to read runtime activation request from stdin");
+        return ExitCode::from(2);
+    };
+    let request: WfpRuntimeActivationRequest = match serde_json::from_str(&stdin) {
+        Ok(request) => request,
+        Err(err) => {
+            eprintln!(
+                "nono-wfp-service: invalid runtime activation request payload: {}",
+                err
+            );
+            return ExitCode::from(2);
+        }
+    };
+    let response = build_not_implemented_activation_response(&request);
+    match serde_json::to_string(&response) {
+        Ok(json) => println!("{json}"),
+        Err(err) => {
+            eprintln!(
+                "nono-wfp-service: failed to serialize runtime activation response: {}",
+                err
+            );
+            return ExitCode::from(2);
+        }
+    }
     eprintln!(
         "nono-wfp-service: runtime activation handshake is not implemented yet; \
          service and driver may be registered, but WFP enforcement still fails closed"
@@ -108,6 +152,15 @@ mod tests {
 
     #[test]
     fn runtime_activation_probe_fails_closed() {
-        assert_eq!(probe_runtime_activation(), ExitCode::from(4));
+        let request = WfpRuntimeActivationRequest {
+            protocol_version: WFP_RUNTIME_PROTOCOL_VERSION,
+            network_mode: "blocked".to_string(),
+            preferred_backend: "windows-filtering-platform".to_string(),
+            active_backend: "none".to_string(),
+            runtime_target: "blocked Windows network access".to_string(),
+        };
+        let response = build_not_implemented_activation_response(&request);
+        assert_eq!(response.status, "not-implemented");
+        assert!(response.details.contains("blocked Windows network access"));
     }
 }

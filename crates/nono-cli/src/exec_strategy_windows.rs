@@ -7,14 +7,18 @@
 #[path = "exec_strategy/env_sanitization.rs"]
 mod env_sanitization;
 
+use crate::windows_wfp_contract::{
+    WfpRuntimeActivationRequest, WfpRuntimeActivationResponse, WFP_RUNTIME_PROTOCOL_VERSION,
+};
 use nono::{CapabilitySet, NonoError, Result, Sandbox};
 use std::collections::HashSet;
 use std::ffi::OsStr;
+use std::io::Write;
 use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
 use windows_sys::Win32::Security::{
@@ -138,7 +142,7 @@ struct WfpProbeConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WfpRuntimeProbeOutput {
     status_code: Option<i32>,
-    stdout: String,
+    response: WfpRuntimeActivationResponse,
     stderr: String,
 }
 
@@ -561,6 +565,24 @@ fn describe_windows_network_runtime_target(policy: &nono::WindowsNetworkPolicy) 
     }
 }
 
+fn build_wfp_runtime_activation_request(
+    policy: &nono::WindowsNetworkPolicy,
+) -> WfpRuntimeActivationRequest {
+    let network_mode = match &policy.mode {
+        nono::WindowsNetworkPolicyMode::AllowAll => "allow-all",
+        nono::WindowsNetworkPolicyMode::Blocked => "blocked",
+        nono::WindowsNetworkPolicyMode::ProxyOnly { .. } => "proxy-only",
+    };
+
+    WfpRuntimeActivationRequest {
+        protocol_version: WFP_RUNTIME_PROTOCOL_VERSION,
+        network_mode: network_mode.to_string(),
+        preferred_backend: policy.preferred_backend.label().to_string(),
+        active_backend: policy.active_backend.label().to_string(),
+        runtime_target: describe_windows_network_runtime_target(policy),
+    }
+}
+
 fn describe_wfp_probe_status_for_setup(config: &WfpProbeConfig, status: WfpProbeStatus) -> String {
     let service_command = format_wfp_service_command(config);
     match status {
@@ -794,10 +816,22 @@ fn describe_wfp_next_action_for_setup(
     }
 }
 
-fn run_wfp_runtime_probe(config: &WfpProbeConfig) -> Result<WfpRuntimeProbeOutput> {
-    let output = Command::new(&config.backend_binary_path)
+fn run_wfp_runtime_probe_with_request(
+    config: &WfpProbeConfig,
+    request: &WfpRuntimeActivationRequest,
+) -> Result<WfpRuntimeProbeOutput> {
+    let request_json = serde_json::to_vec(request).map_err(|err| {
+        NonoError::SandboxInit(format!(
+            "Failed to serialize Windows WFP runtime activation request: {}",
+            err
+        ))
+    })?;
+    let mut child = Command::new(&config.backend_binary_path)
         .arg(WINDOWS_WFP_RUNTIME_PROBE_ARG)
-        .output()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|err| {
             NonoError::SandboxInit(format!(
                 "Failed to execute Windows WFP runtime probe `{}` {}: {}",
@@ -806,10 +840,37 @@ fn run_wfp_runtime_probe(config: &WfpProbeConfig) -> Result<WfpRuntimeProbeOutpu
                 err
             ))
         })?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin.write_all(&request_json).map_err(|err| {
+            NonoError::SandboxInit(format!(
+                "Failed to write Windows WFP runtime activation request to `{}` {}: {}",
+                config.backend_binary_path.display(),
+                WINDOWS_WFP_RUNTIME_PROBE_ARG,
+                err
+            ))
+        })?;
+    }
+    let output = child.wait_with_output().map_err(|err| {
+        NonoError::SandboxInit(format!(
+            "Failed to wait for Windows WFP runtime probe `{}` {}: {}",
+            config.backend_binary_path.display(),
+            WINDOWS_WFP_RUNTIME_PROBE_ARG,
+            err
+        ))
+    })?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let response: WfpRuntimeActivationResponse = serde_json::from_str(&stdout).map_err(|err| {
+        NonoError::SandboxInit(format!(
+            "Windows WFP runtime probe returned invalid JSON (status: {:?}, stdout: {:?}): {}",
+            output.status.code(),
+            stdout,
+            err
+        ))
+    })?;
 
     Ok(WfpRuntimeProbeOutput {
         status_code: output.status.code(),
-        stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        response,
         stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
     })
 }
@@ -817,16 +878,16 @@ fn run_wfp_runtime_probe(config: &WfpProbeConfig) -> Result<WfpRuntimeProbeOutpu
 fn parse_wfp_runtime_probe_status(
     output: &WfpRuntimeProbeOutput,
 ) -> Result<WfpRuntimeActivationProbeStatus> {
-    if output.stdout.contains("activation=ready") {
+    if output.response.status == "ready" {
         return Ok(WfpRuntimeActivationProbeStatus::Ready);
     }
-    if output.stdout.contains("activation=not-implemented") {
+    if output.response.status == "not-implemented" {
         return Ok(WfpRuntimeActivationProbeStatus::NotImplemented);
     }
 
     Err(NonoError::SandboxInit(format!(
-        "Windows WFP runtime probe returned unexpected output (status: {:?}, stdout: {:?}, stderr: {:?})",
-        output.status_code, output.stdout, output.stderr
+        "Windows WFP runtime probe returned unexpected response (status: {:?}, response: {:?}, stderr: {:?})",
+        output.status_code, output.response, output.stderr
     )))
 }
 
@@ -835,11 +896,11 @@ fn describe_wfp_runtime_probe_failure(
     output: &WfpRuntimeProbeOutput,
 ) -> String {
     format!(
-        "the WFP service probe `{}` {} reported runtime activation is not implemented yet (status: {:?}, stdout: {:?}, stderr: {:?})",
+        "the WFP service probe `{}` {} reported runtime activation is not implemented yet (status: {:?}, response: {:?}, stderr: {:?})",
         config.backend_binary_path.display(),
         WINDOWS_WFP_RUNTIME_PROBE_ARG,
         output.status_code,
-        output.stdout,
+        output.response,
         output.stderr
     )
 }
@@ -1328,7 +1389,8 @@ fn install_wfp_network_backend(
                 ))
             })?;
             if status == WfpProbeStatus::Ready {
-                let probe_output = run_wfp_runtime_probe(probe_config)?;
+                let request = build_wfp_runtime_activation_request(policy);
+                let probe_output = run_wfp_runtime_probe_with_request(probe_config, &request)?;
                 return match parse_wfp_runtime_probe_status(&probe_output)? {
                     WfpRuntimeActivationProbeStatus::Ready => Err(NonoError::UnsupportedPlatform(
                         format!(
@@ -2672,10 +2734,30 @@ mod tests {
     }
 
     #[test]
+    fn test_build_wfp_runtime_activation_request_for_proxy_mode() {
+        let policy = Sandbox::windows_network_policy(&CapabilitySet::new().set_network_mode(
+            nono::NetworkMode::ProxyOnly {
+                port: 8080,
+                bind_ports: vec![8080, 9090],
+            },
+        ));
+        let request = build_wfp_runtime_activation_request(&policy);
+        assert_eq!(request.protocol_version, WFP_RUNTIME_PROTOCOL_VERSION);
+        assert_eq!(request.network_mode, "proxy-only");
+        assert_eq!(request.preferred_backend, "windows-filtering-platform");
+        assert_eq!(request.active_backend, "none");
+        assert!(request.runtime_target.contains("localhost:8080"));
+    }
+
+    #[test]
     fn test_parse_wfp_runtime_probe_status_reports_not_implemented() {
         let output = WfpRuntimeProbeOutput {
             status_code: Some(4),
-            stdout: "activation=not-implemented".to_string(),
+            response: WfpRuntimeActivationResponse {
+                protocol_version: WFP_RUNTIME_PROTOCOL_VERSION,
+                status: "not-implemented".to_string(),
+                details: "placeholder".to_string(),
+            },
             stderr: "placeholder".to_string(),
         };
         let status = parse_wfp_runtime_probe_status(&output).expect("probe output should parse");
@@ -2694,12 +2776,16 @@ mod tests {
         };
         let output = WfpRuntimeProbeOutput {
             status_code: Some(4),
-            stdout: "activation=not-implemented".to_string(),
+            response: WfpRuntimeActivationResponse {
+                protocol_version: WFP_RUNTIME_PROTOCOL_VERSION,
+                status: "not-implemented".to_string(),
+                details: "placeholder".to_string(),
+            },
             stderr: "placeholder".to_string(),
         };
         let message = describe_wfp_runtime_probe_failure(&config, &output);
         assert!(message.contains("--probe-runtime-activation"));
-        assert!(message.contains("activation=not-implemented"));
+        assert!(message.contains("not-implemented"));
     }
 
     #[test]
