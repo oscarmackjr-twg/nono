@@ -15,6 +15,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
 use windows_sys::Win32::Security::{
     CreateWellKnownSid, DuplicateTokenEx, SecurityImpersonation, SetTokenInformation,
@@ -74,6 +75,13 @@ pub struct SupervisorConfig<'a> {
     pub requested_features: Vec<&'a str>,
 }
 
+struct NetworkEnforcementGuard {
+    staged_program: PathBuf,
+    staged_dir: PathBuf,
+    inbound_rule: String,
+    outbound_rule: String,
+}
+
 struct ProcessContainment {
     job: HANDLE,
 }
@@ -107,6 +115,164 @@ impl Drop for ProcessContainment {
                 CloseHandle(self.job);
             }
         }
+    }
+}
+
+impl Drop for NetworkEnforcementGuard {
+    fn drop(&mut self) {
+        let _ = delete_firewall_rule(&self.inbound_rule);
+        let _ = delete_firewall_rule(&self.outbound_rule);
+        let _ = std::fs::remove_dir_all(&self.staged_dir);
+    }
+}
+
+fn run_netsh_firewall(args: &[&str]) -> Result<String> {
+    let output = Command::new("netsh")
+        .args(args)
+        .output()
+        .map_err(NonoError::CommandExecution)?;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    if output.status.success() {
+        Ok(stdout)
+    } else {
+        let combined = format!("{stdout}{stderr}");
+        let detail = if combined.contains("requires elevation")
+            || combined.contains("Access is denied")
+        {
+            "Windows Firewall rule changes require an elevated administrator session on this machine"
+                .to_string()
+        } else {
+            combined
+        };
+        Err(NonoError::SandboxInit(format!(
+            "Failed to apply Windows Firewall rule (args: {}): {}",
+            args.join(" "),
+            detail
+        )))
+    }
+}
+
+fn delete_firewall_rule(name: &str) -> Result<()> {
+    let rule_name = format!("name={name}");
+    let _ = run_netsh_firewall(&["advfirewall", "firewall", "delete", "rule", &rule_name]);
+    Ok(())
+}
+
+fn unique_windows_firewall_rule_suffix() -> String {
+    format!(
+        "{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    )
+}
+
+fn stage_program_for_blocked_network_launch(program: &Path) -> Result<(PathBuf, PathBuf)> {
+    let file_name = program.file_name().ok_or_else(|| {
+        NonoError::SandboxInit(format!(
+            "Failed to stage Windows blocked-network executable copy for {}",
+            program.display()
+        ))
+    })?;
+    let staged_dir = std::env::temp_dir()
+        .join("nono-net-block")
+        .join(unique_windows_firewall_rule_suffix());
+    std::fs::create_dir_all(&staged_dir).map_err(|e| {
+        NonoError::SandboxInit(format!(
+            "Failed to prepare Windows blocked-network staging directory {}: {}",
+            staged_dir.display(),
+            e
+        ))
+    })?;
+    let staged_program = staged_dir.join(file_name);
+    std::fs::copy(program, &staged_program).map_err(|e| {
+        NonoError::SandboxInit(format!(
+            "Failed to stage Windows blocked-network executable copy {} -> {}: {}",
+            program.display(),
+            staged_program.display(),
+            e
+        ))
+    })?;
+    Ok((staged_program, staged_dir))
+}
+
+fn prepare_network_enforcement(config: &ExecConfig<'_>) -> Result<Option<NetworkEnforcementGuard>> {
+    let policy = Sandbox::windows_network_policy(config.caps);
+    if !policy.is_fully_supported() {
+        return Err(NonoError::UnsupportedPlatform(format!(
+            "Windows network enforcement does not support this capability set yet ({}).",
+            policy.unsupported_messages().join(", ")
+        )));
+    }
+
+    match policy.mode {
+        nono::WindowsNetworkPolicyMode::AllowAll => Ok(None),
+        nono::WindowsNetworkPolicyMode::Blocked => {
+            match Sandbox::windows_network_launch_support(&policy, config.resolved_program) {
+                nono::WindowsNetworkLaunchSupport::Supported => {}
+                nono::WindowsNetworkLaunchSupport::UnsupportedShellHost => {
+                    return Err(NonoError::UnsupportedPlatform(format!(
+                        "Windows blocked-network enforcement currently supports standalone executable launches, not shell or interpreter hosts such as {}. \
+Use a direct executable target for the current backend subset. \
+This is a current Windows backend limitation, not permanent product behavior.",
+                        config.resolved_program.display()
+                    )));
+                }
+            }
+
+            let (staged_program, staged_dir) =
+                stage_program_for_blocked_network_launch(config.resolved_program)?;
+            let suffix = unique_windows_firewall_rule_suffix();
+            let inbound_rule = format!("nono-win-block-in-{suffix}");
+            let outbound_rule = format!("nono-win-block-out-{suffix}");
+            let program_arg = format!("program={}", staged_program.display());
+
+            if let Err(err) = run_netsh_firewall(&[
+                "advfirewall",
+                "firewall",
+                "add",
+                "rule",
+                &format!("name={outbound_rule}"),
+                "dir=out",
+                "action=block",
+                &program_arg,
+                "enable=yes",
+                "profile=any",
+            ]) {
+                let _ = std::fs::remove_dir_all(&staged_dir);
+                return Err(err);
+            }
+
+            if let Err(err) = run_netsh_firewall(&[
+                "advfirewall",
+                "firewall",
+                "add",
+                "rule",
+                &format!("name={inbound_rule}"),
+                "dir=in",
+                "action=block",
+                &program_arg,
+                "enable=yes",
+                "profile=any",
+            ]) {
+                let _ = delete_firewall_rule(&outbound_rule);
+                let _ = std::fs::remove_dir_all(&staged_dir);
+                return Err(err);
+            }
+
+            Ok(Some(NetworkEnforcementGuard {
+                staged_program,
+                staged_dir,
+                inbound_rule,
+                outbound_rule,
+            }))
+        }
+        nono::WindowsNetworkPolicyMode::ProxyOnly { .. } => Err(NonoError::UnsupportedPlatform(
+            "Windows proxy-only network enforcement is not implemented yet. This is a current Windows backend limitation, not permanent product behavior.".to_string(),
+        )),
     }
 }
 
@@ -551,19 +717,19 @@ fn create_low_integrity_primary_token() -> Result<OwnedHandle> {
 
 fn execute_direct_with_low_integrity(
     config: &ExecConfig<'_>,
+    launch_program: &Path,
     containment: &ProcessContainment,
     cmd_args: &[String],
 ) -> Result<i32> {
     let env_pairs = build_child_env(config);
     let mut environment_block = build_windows_environment_block(&env_pairs);
     let token = create_low_integrity_primary_token()?;
-    let application_name: Vec<u16> = config
-        .resolved_program
+    let application_name: Vec<u16> = launch_program
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
-    let mut command_line = build_command_line(config.resolved_program, cmd_args);
+    let mut command_line = build_command_line(launch_program, cmd_args);
     let current_dir: Vec<u16> = config
         .current_dir
         .as_os_str()
@@ -635,18 +801,20 @@ fn execute_direct_with_low_integrity(
 
 fn execute_supervised_with_low_integrity(
     config: &ExecConfig<'_>,
+    launch_program: &Path,
     containment: &ProcessContainment,
 ) -> Result<i32> {
-    let cmd_args = prepare_runtime_hardened_args(config.resolved_program, &config.command[1..]);
-    execute_direct_with_low_integrity(config, containment, &cmd_args)
+    let cmd_args = prepare_runtime_hardened_args(launch_program, &config.command[1..]);
+    execute_direct_with_low_integrity(config, launch_program, containment, &cmd_args)
 }
 
 fn execute_supervised_with_standard_token(
     config: &ExecConfig<'_>,
+    launch_program: &Path,
     containment: &ProcessContainment,
 ) -> Result<i32> {
-    let cmd_args = prepare_runtime_hardened_args(config.resolved_program, &config.command[1..]);
-    let mut cmd = Command::new(config.resolved_program);
+    let cmd_args = prepare_runtime_hardened_args(launch_program, &config.command[1..]);
+    let mut cmd = Command::new(launch_program);
     cmd.env_clear();
     cmd.current_dir(config.current_dir);
     for (key, value) in build_child_env(config) {
@@ -677,14 +845,19 @@ pub fn execute_direct(config: &ExecConfig<'_>) -> Result<i32> {
         fs_policy.rules.len(),
         fs_policy.unsupported.len()
     );
+    let network_enforcement = prepare_network_enforcement(config)?;
+    let launch_program = network_enforcement
+        .as_ref()
+        .map(|guard| guard.staged_program.as_path())
+        .unwrap_or(config.resolved_program);
 
-    let cmd_args = prepare_runtime_hardened_args(config.resolved_program, &config.command[1..]);
+    let cmd_args = prepare_runtime_hardened_args(launch_program, &config.command[1..]);
     let containment = create_process_containment()?;
     if should_use_low_integrity_windows_launch(config.caps) {
-        return execute_direct_with_low_integrity(config, &containment, &cmd_args);
+        return execute_direct_with_low_integrity(config, launch_program, &containment, &cmd_args);
     }
 
-    let mut cmd = Command::new(config.resolved_program);
+    let mut cmd = Command::new(launch_program);
     cmd.env_clear();
     cmd.current_dir(config.current_dir);
     for (key, value) in build_child_env(config) {
@@ -734,6 +907,11 @@ pub fn execute_supervised(
         &config.command[1..],
         config.current_dir,
     )?;
+    let network_enforcement = prepare_network_enforcement(config)?;
+    let launch_program = network_enforcement
+        .as_ref()
+        .map(|guard| guard.staged_program.as_path())
+        .unwrap_or(config.resolved_program);
 
     let containment = create_process_containment()?;
     tracing::debug!(
@@ -748,9 +926,9 @@ pub fn execute_supervised(
     );
 
     let exit_code = if should_use_low_integrity_windows_launch(config.caps) {
-        execute_supervised_with_low_integrity(config, &containment)?
+        execute_supervised_with_low_integrity(config, launch_program, &containment)?
     } else {
-        execute_supervised_with_standard_token(config, &containment)?
+        execute_supervised_with_standard_token(config, launch_program, &containment)?
     };
 
     tracing::debug!(

@@ -7,9 +7,10 @@ use crate::capability::CapabilitySet;
 use crate::error::{NonoError, Result};
 use crate::sandbox::{
     PreviewRuntimeStatus, SupportInfo, SupportStatus, WindowsFilesystemPolicy,
-    WindowsFilesystemRule, WindowsNetworkPolicy, WindowsNetworkPolicyMode, WindowsPreviewContext,
-    WindowsPreviewEntryPoint, WindowsUnsupportedIssue, WindowsUnsupportedIssueKind,
-    WindowsUnsupportedNetworkIssue, WindowsUnsupportedNetworkIssueKind,
+    WindowsFilesystemRule, WindowsNetworkLaunchSupport, WindowsNetworkPolicy,
+    WindowsNetworkPolicyMode, WindowsPreviewContext, WindowsPreviewEntryPoint,
+    WindowsUnsupportedIssue, WindowsUnsupportedIssueKind, WindowsUnsupportedNetworkIssue,
+    WindowsUnsupportedNetworkIssueKind,
 };
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
@@ -25,7 +26,7 @@ use windows_sys::Win32::System::SystemServices::{
 
 const WINDOWS_PREVIEW_SUPPORTED: bool = false;
 const WINDOWS_PREVIEW_DETAILS: &str =
-    "Windows preview build: command execution, setup reporting, basic process containment, and launch-time executable policy validation are partially available, but full filesystem and network sandbox enforcement are not implemented yet; full Windows support is planned for a future release.";
+    "Windows preview build: command execution, setup reporting, basic process containment, launch-time executable policy validation, and a narrow blocked-network path for standalone executables are partially available, but full filesystem and network sandbox enforcement are not implemented yet; full Windows support is planned for a future release.";
 
 pub fn apply(caps: &CapabilitySet) -> Result<()> {
     let _ = caps;
@@ -84,8 +85,11 @@ pub fn preview_runtime_status(
     }
 
     let network_policy = compile_network_policy(caps);
-    if !matches!(network_policy.mode, WindowsNetworkPolicyMode::AllowAll) {
-        reasons.push("network restrictions");
+    if matches!(
+        network_policy.mode,
+        WindowsNetworkPolicyMode::ProxyOnly { .. }
+    ) {
+        reasons.push("proxy network restrictions");
     }
     for label in network_policy.unsupported_reason_labels() {
         reasons.push(label);
@@ -183,6 +187,44 @@ pub fn compile_network_policy(caps: &CapabilitySet) -> WindowsNetworkPolicy {
     unsupported.dedup();
 
     WindowsNetworkPolicy { mode, unsupported }
+}
+
+#[must_use]
+pub fn network_launch_support(
+    policy: &WindowsNetworkPolicy,
+    resolved_program: &Path,
+) -> WindowsNetworkLaunchSupport {
+    if !policy.is_fully_supported() {
+        return WindowsNetworkLaunchSupport::Supported;
+    }
+
+    let is_shell_host = resolved_program
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| {
+            matches!(
+                name.to_ascii_lowercase().as_str(),
+                "cmd.exe"
+                    | "powershell.exe"
+                    | "pwsh.exe"
+                    | "cscript.exe"
+                    | "wscript.exe"
+                    | "mshta.exe"
+                    | "python.exe"
+                    | "py.exe"
+                    | "node.exe"
+                    | "ruby.exe"
+                    | "bash.exe"
+                    | "sh.exe"
+            )
+        })
+        .unwrap_or(false);
+
+    if matches!(policy.mode, WindowsNetworkPolicyMode::Blocked) && is_shell_host {
+        WindowsNetworkLaunchSupport::UnsupportedShellHost
+    } else {
+        WindowsNetworkLaunchSupport::Supported
+    }
 }
 
 fn normalize_windows_path(path: &Path) -> PathBuf {
@@ -1155,17 +1197,12 @@ mod tests {
     }
 
     #[test]
-    fn preview_runtime_status_blocks_network_restrictions() {
+    fn preview_runtime_status_allows_blocked_network_mode() {
         let caps = CapabilitySet::new().set_network_mode(NetworkMode::Blocked);
 
         let status =
             preview_runtime_status(&caps, Path::new("."), WindowsPreviewContext::default());
-        assert_eq!(
-            status,
-            PreviewRuntimeStatus::RequiresEnforcement {
-                reasons: vec!["network restrictions"]
-            }
-        );
+        assert_eq!(status, PreviewRuntimeStatus::AdvisoryOnly);
     }
 
     #[test]
@@ -1181,6 +1218,26 @@ mod tests {
             compile_network_policy(&CapabilitySet::new().set_network_mode(NetworkMode::Blocked));
         assert_eq!(policy.mode, WindowsNetworkPolicyMode::Blocked);
         assert!(policy.is_fully_supported());
+    }
+
+    #[test]
+    fn network_launch_support_rejects_shell_hosts_for_blocked_mode() {
+        let policy =
+            compile_network_policy(&CapabilitySet::new().set_network_mode(NetworkMode::Blocked));
+        assert_eq!(
+            network_launch_support(&policy, Path::new(r"C:\Windows\System32\cmd.exe")),
+            WindowsNetworkLaunchSupport::UnsupportedShellHost
+        );
+    }
+
+    #[test]
+    fn network_launch_support_allows_standalone_binary_for_blocked_mode() {
+        let policy =
+            compile_network_policy(&CapabilitySet::new().set_network_mode(NetworkMode::Blocked));
+        assert_eq!(
+            network_launch_support(&policy, Path::new(r"C:\tools\probe.exe")),
+            WindowsNetworkLaunchSupport::Supported
+        );
     }
 
     #[test]

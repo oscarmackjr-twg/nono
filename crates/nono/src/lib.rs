@@ -77,8 +77,9 @@ pub use sandbox::{detect_abi, DetectedAbi};
 pub use sandbox::{PreviewRuntimeStatus, Sandbox, SupportInfo, SupportStatus};
 #[cfg(target_os = "windows")]
 pub use sandbox::{
-    WindowsFilesystemPolicy, WindowsFilesystemRule, WindowsNetworkPolicy, WindowsNetworkPolicyMode,
-    WindowsPreviewContext, WindowsPreviewEntryPoint,
+    WindowsFilesystemPolicy, WindowsFilesystemRule, WindowsNetworkLaunchSupport,
+    WindowsNetworkPolicy, WindowsNetworkPolicyMode, WindowsPreviewContext,
+    WindowsPreviewEntryPoint,
 };
 pub use state::SandboxState;
 pub use supervisor::{

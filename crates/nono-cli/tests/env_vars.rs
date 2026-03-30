@@ -17,6 +17,11 @@ fn combined_output(output: &std::process::Output) -> String {
 }
 
 #[cfg(target_os = "windows")]
+fn windows_net_probe_bin() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_windows-net-probe"))
+}
+
+#[cfg(target_os = "windows")]
 fn try_set_low_integrity_label(path: &std::path::Path) -> bool {
     let Ok(output) = Command::new("icacls")
         .arg(path)
@@ -34,6 +39,57 @@ fn try_set_low_integrity_label(path: &std::path::Path) -> bool {
             "skipping low-integrity label integration test because icacls failed: {}{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
+        );
+        false
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn try_add_and_remove_windows_firewall_rule(program: &std::path::Path) -> bool {
+    let suffix = format!(
+        "{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("unix epoch")
+            .as_nanos()
+    );
+    let name = format!("nono-test-fw-{suffix}");
+    let program_arg = format!("program={}", program.display());
+
+    let add = Command::new("netsh")
+        .args([
+            "advfirewall",
+            "firewall",
+            "add",
+            "rule",
+            &format!("name={name}"),
+            "dir=out",
+            "action=block",
+            &program_arg,
+            "enable=yes",
+            "profile=any",
+        ])
+        .output();
+    let Ok(add) = add else {
+        eprintln!("skipping firewall integration test because netsh is unavailable");
+        return false;
+    };
+    let _ = Command::new("netsh")
+        .args([
+            "advfirewall",
+            "firewall",
+            "delete",
+            "rule",
+            &format!("name={name}"),
+        ])
+        .output();
+    if add.status.success() {
+        true
+    } else {
+        eprintln!(
+            "skipping firewall integration test because rule creation failed: {}{}",
+            String::from_utf8_lossy(&add.stdout),
+            String::from_utf8_lossy(&add.stderr)
         );
         false
     }
@@ -568,6 +624,139 @@ fn windows_run_redirects_temp_vars_into_writable_allowlist() {
             || normalized.contains(&format!("temp={}/", tmp_root_lower))
             || normalized.contains(&format!("temp={}", tmp_root_lower)),
         "expected TEMP inside writable allowlist, got:\n{text}"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_run_allow_all_network_probe_connects() {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind listener");
+    let port = listener.local_addr().expect("listener addr").port();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let accepted = listener.accept().is_ok();
+        let _ = tx.send(accepted);
+    });
+
+    let probe = windows_net_probe_bin();
+    let probe_dir = probe.parent().expect("probe parent");
+    let allowed = probe_dir.to_string_lossy().into_owned();
+    let workdir = probe_dir.to_string_lossy().into_owned();
+
+    let output = nono_bin()
+        .args([
+            "run",
+            "--allow",
+            &allowed,
+            "--workdir",
+            &workdir,
+            "--",
+            &probe.to_string_lossy(),
+            "--connect-port",
+            &port.to_string(),
+        ])
+        .output()
+        .expect("failed to run nono");
+
+    let text = combined_output(&output);
+    assert!(
+        output.status.success(),
+        "Windows allow-all network probe should connect successfully, output:\n{text}"
+    );
+    assert!(
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("listener result"),
+        "expected localhost listener to accept the allow-all probe"
+    );
+    handle.join().expect("listener thread");
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_run_block_net_blocks_probe_connection() {
+    let probe = windows_net_probe_bin();
+    if !try_add_and_remove_windows_firewall_rule(&probe) {
+        return;
+    }
+
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind listener");
+    let port = listener.local_addr().expect("listener addr").port();
+    listener
+        .set_nonblocking(true)
+        .expect("set listener nonblocking");
+
+    let probe_dir = probe.parent().expect("probe parent");
+    let allowed = probe_dir.to_string_lossy().into_owned();
+    let workdir = probe_dir.to_string_lossy().into_owned();
+
+    let output = nono_bin()
+        .args([
+            "run",
+            "--allow",
+            &allowed,
+            "--block-net",
+            "--workdir",
+            &workdir,
+            "--",
+            &probe.to_string_lossy(),
+            "--connect-port",
+            &port.to_string(),
+        ])
+        .output()
+        .expect("failed to run nono");
+
+    let text = combined_output(&output);
+    assert!(
+        !output.status.success(),
+        "Windows blocked-network probe should fail to connect, output:\n{text}"
+    );
+    assert!(
+        text.contains("connect failed") || text.contains("exit code 42"),
+        "expected blocked-network probe failure details, got:\n{text}"
+    );
+
+    let accept_result = listener.accept();
+    assert!(
+        accept_result.is_err(),
+        "listener should not have accepted a blocked-network connection"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_run_block_net_rejects_shell_host_launches() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+    let allowed_workspace = workspace.to_string_lossy().into_owned();
+    let workdir = workspace.to_string_lossy().into_owned();
+
+    let output = nono_bin()
+        .args([
+            "run",
+            "--allow",
+            &allowed_workspace,
+            "--allow",
+            r"C:\Windows",
+            "--block-net",
+            "--workdir",
+            &workdir,
+            "--",
+            "cmd",
+            "/c",
+            "ver",
+        ])
+        .output()
+        .expect("failed to run nono");
+
+    let text = combined_output(&output);
+    assert!(
+        !output.status.success(),
+        "Windows blocked-network execution should reject shell-host launches, output:\n{text}"
+    );
+    assert!(
+        text.contains("shell or interpreter hosts"),
+        "expected explicit shell-host unsupported message, got:\n{text}"
     );
 }
 

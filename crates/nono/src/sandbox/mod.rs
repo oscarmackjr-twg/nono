@@ -181,6 +181,15 @@ pub enum WindowsNetworkPolicyMode {
     ProxyOnly { port: u16, bind_ports: Vec<u16> },
 }
 
+/// Runtime support classification for a Windows network-enforcement launch
+/// target.
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowsNetworkLaunchSupport {
+    Supported,
+    UnsupportedShellHost,
+}
+
 /// A Windows network capability shape that the current backend does not yet
 /// enforce directly.
 #[cfg(target_os = "windows")]
@@ -569,6 +578,17 @@ impl Sandbox {
     #[must_use]
     pub fn windows_network_policy(caps: &CapabilitySet) -> WindowsNetworkPolicy {
         windows::compile_network_policy(caps)
+    }
+
+    /// Classify whether the requested Windows launch target is in the current
+    /// enforceable subset for the compiled network policy.
+    #[cfg(target_os = "windows")]
+    #[must_use]
+    pub fn windows_network_launch_support(
+        policy: &WindowsNetworkPolicy,
+        resolved_program: &Path,
+    ) -> WindowsNetworkLaunchSupport {
+        windows::network_launch_support(policy, resolved_program)
     }
 
     /// Validate whether the current Windows filesystem policy can enforce the

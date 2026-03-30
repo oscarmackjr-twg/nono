@@ -3,7 +3,7 @@ title: Windows Network Enforcement
 description: Design spike for the Windows network enforcement backend
 ---
 
-This note captures the initial `WIN-704` design spike for Windows network enforcement. It does not claim real enforcement yet. It defines the backend policy model and the implementation target so follow-on work can stay backend-owned and deterministic.
+This note now covers both the initial `WIN-704` design spike and the first implementation slice. Windows still does **not** have full network parity, but it now has a real first blocked-network backend path for a narrow subset.
 
 ## Selected Direction
 
@@ -18,7 +18,7 @@ This is the only option in scope that plausibly gives:
 - auditable deny paths
 - an upgrade path to proxy-only and richer policy shapes
 
-The spike does **not** implement WFP yet. It adds the compiled Windows network policy model that later WFP work will consume.
+The current implementation does **not** implement WFP yet. It adds the compiled Windows network policy model and the first real blocked-network path so later WFP work can replace that coarse backend cleanly.
 
 ## Why Not the Other Options
 
@@ -26,7 +26,7 @@ The spike does **not** implement WFP yet. It adds the compiled Windows network p
   Useful for routing and credential injection, but not a real enforcement primitive. A child can bypass it unless the platform blocks direct network access separately.
 
 - **Windows Firewall rule orchestration**
-  Possible for coarse experiments, but awkward for short-lived per-session rules and weaker for process-scoped semantics.
+  This is now the first implemented backend slice for `Blocked`, but only for a narrow subset. It is still awkward for short-lived per-session rules and weaker than WFP for broad process-tree semantics.
 
 - **AppContainer**
   Strong boundary, but it changes execution identity and filesystem semantics too much for the current port stage.
@@ -74,12 +74,18 @@ Recommended sequence:
 
 Today:
 
-- preview/live Windows runs still fail closed when network enforcement is required
-- backend reporting now has a real Windows network policy object behind that decision
+- `AllowAll` remains the no-enforcement path
+- `Blocked` now has a real first backend for standalone executable launches:
+  - `nono` stages a unique executable copy
+  - installs inbound/outbound Windows Firewall block rules for that staged path
+  - launches the staged path
+  - removes the rules on cleanup
+- shell and interpreter hosts such as `cmd.exe` and `powershell.exe` remain intentionally unsupported for this first backend slice because they can trampoline into unrestricted descendants
+- proxy-only and richer port filters still fail closed
 
 Later full-port work should:
 
-- install a real Windows network enforcement primitive
+- replace the coarse firewall-backed `Blocked` slice with a stronger WFP-backed primitive
 - make `AllowAll` and `Blocked` distinct in runtime behavior
 - return deterministic unsupported results for policy shapes still outside the first backend subset
 
