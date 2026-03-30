@@ -60,6 +60,11 @@ impl SetupRunner {
             self.start_windows_wfp_service()?;
         }
 
+        #[cfg(target_os = "windows")]
+        if !self.check_only && self.any_windows_wfp_action_requested() {
+            self.report_windows_wfp_post_action_status()?;
+        }
+
         // Show what nono protects
         self.show_protection_summary()?;
 
@@ -180,12 +185,20 @@ impl SetupRunner {
         println!("  * Platform: {}", info.platform);
         println!("  * Support status: {}", info.status_label());
         println!("  * {}", info.details);
-        println!("  * WFP readiness: {}", wfp.status_label);
-        println!("  * {}", wfp.details);
-        println!("  * WFP service readiness: {}", wfp.service_status_label);
-        println!("  * {}", wfp.service_details);
-        println!("  * WFP driver readiness: {}", wfp.driver_status_label);
-        println!("  * {}", wfp.driver_details);
+        print_windows_wfp_readiness_report("  * ", &wfp);
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    fn report_windows_wfp_post_action_status(&self) -> Result<()> {
+        println!(
+            "[{}/{}] Re-checking Windows WFP readiness...",
+            self.recheck_wfp_phase_index(),
+            self.total_phases()
+        );
+        let wfp = crate::exec_strategy::probe_windows_wfp_readiness();
+        print_windows_wfp_readiness_report("  * ", &wfp);
+        println!();
         Ok(())
     }
 
@@ -415,7 +428,11 @@ impl SetupRunner {
     }
 
     fn setup_profiles(&self) -> Result<()> {
-        println!("[5/{}] Setting up example profiles...", self.total_phases());
+        println!(
+            "[{}/{}] Setting up example profiles...",
+            self.setup_profiles_phase_index(),
+            self.total_phases()
+        );
 
         // Create profile directory
         let profile_dir = crate::profile::resolve_user_config_dir()?
@@ -454,7 +471,11 @@ impl SetupRunner {
     }
 
     fn show_shell_help(&self) {
-        println!("[6/{}] Shell integration...", self.total_phases());
+        println!(
+            "[{}/{}] Shell integration...",
+            self.shell_integration_phase_index(),
+            self.total_phases()
+        );
         print_shell_help_body();
     }
 
@@ -548,6 +569,11 @@ impl SetupRunner {
             count += 1;
         }
 
+        #[cfg(target_os = "windows")]
+        if !self.check_only && self.any_windows_wfp_action_requested() {
+            count += 1;
+        }
+
         if !self.check_only {
             if self.generate_profiles {
                 count += 1;
@@ -563,11 +589,17 @@ impl SetupRunner {
     fn protection_phase_index(&self) -> usize {
         #[cfg(target_os = "windows")]
         if !self.check_only {
-            return 3
+            let mut index = 3
                 + usize::from(self.install_wfp_service)
                 + usize::from(self.install_wfp_driver)
                 + usize::from(self.start_wfp_driver)
                 + usize::from(self.start_wfp_service);
+
+            if self.any_windows_wfp_action_requested() {
+                index += 1;
+            }
+
+            return index;
         }
 
         3
@@ -576,11 +608,17 @@ impl SetupRunner {
     fn profiles_phase_index(&self) -> usize {
         #[cfg(target_os = "windows")]
         if !self.check_only {
-            return 4
+            let mut index = 4
                 + usize::from(self.install_wfp_service)
                 + usize::from(self.install_wfp_driver)
                 + usize::from(self.start_wfp_driver)
                 + usize::from(self.start_wfp_service);
+
+            if self.any_windows_wfp_action_requested() {
+                index += 1;
+            }
+
+            return index;
         }
 
         4
@@ -602,6 +640,29 @@ impl SetupRunner {
 
     fn start_driver_phase_index(&self) -> usize {
         3 + usize::from(self.install_wfp_service) + usize::from(self.install_wfp_driver)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn any_windows_wfp_action_requested(&self) -> bool {
+        self.install_wfp_service
+            || self.install_wfp_driver
+            || self.start_wfp_driver
+            || self.start_wfp_service
+    }
+
+    fn recheck_wfp_phase_index(&self) -> usize {
+        3 + usize::from(self.install_wfp_service)
+            + usize::from(self.install_wfp_driver)
+            + usize::from(self.start_wfp_driver)
+            + usize::from(self.start_wfp_service)
+    }
+
+    fn setup_profiles_phase_index(&self) -> usize {
+        self.profiles_phase_index() + 1
+    }
+
+    fn shell_integration_phase_index(&self) -> usize {
+        self.profiles_phase_index() + 1 + usize::from(self.generate_profiles)
     }
 }
 
@@ -662,15 +723,26 @@ fn print_check_only_summary() {
     let wfp = crate::exec_strategy::probe_windows_wfp_readiness();
     println!("Support status: {}", info.status_label());
     println!("{}", info.details);
-    println!("WFP readiness: {}", wfp.status_label);
-    println!("{}", wfp.details);
-    println!("WFP service readiness: {}", wfp.service_status_label);
-    println!("{}", wfp.service_details);
-    println!("WFP driver readiness: {}", wfp.driver_status_label);
-    println!("{}", wfp.driver_details);
+    print_windows_wfp_readiness_report("", &wfp);
     println!("Use 'nono run --dry-run ...' to validate profiles and policy.");
     println!("Plain 'nono run -- <command>' is preview-safe direct execution only.");
     println!("Run 'nono run --help' to inspect the current command surface.");
+}
+
+#[cfg(target_os = "windows")]
+fn print_windows_wfp_readiness_report(
+    prefix: &str,
+    wfp: &crate::exec_strategy::WindowsWfpReadinessReport,
+) {
+    println!("{prefix}WFP readiness: {}", wfp.status_label);
+    println!("{prefix}{}", wfp.details);
+    println!(
+        "{prefix}WFP service readiness: {}",
+        wfp.service_status_label
+    );
+    println!("{prefix}{}", wfp.service_details);
+    println!("{prefix}WFP driver readiness: {}", wfp.driver_status_label);
+    println!("{prefix}{}", wfp.driver_details);
 }
 
 #[cfg(not(target_os = "windows"))]
