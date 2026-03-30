@@ -80,11 +80,32 @@ pub struct SupervisorConfig<'a> {
 }
 
 #[derive(Debug)]
-struct NetworkEnforcementGuard {
-    staged_program: PathBuf,
-    staged_dir: PathBuf,
-    inbound_rule: String,
-    outbound_rule: String,
+enum NetworkEnforcementGuard {
+    FirewallRules {
+        staged_program: PathBuf,
+        staged_dir: PathBuf,
+        inbound_rule: String,
+        outbound_rule: String,
+    },
+    WfpServiceManaged {
+        probe_config: WfpProbeConfig,
+        target_program: PathBuf,
+        inbound_rule: String,
+        outbound_rule: String,
+    },
+}
+
+impl NetworkEnforcementGuard {
+    fn launch_program(&self) -> &Path {
+        match self {
+            NetworkEnforcementGuard::FirewallRules { staged_program, .. } => {
+                staged_program.as_path()
+            }
+            NetworkEnforcementGuard::WfpServiceManaged { target_program, .. } => {
+                target_program.as_path()
+            }
+        }
+    }
 }
 
 trait WindowsNetworkBackend {
@@ -149,6 +170,10 @@ struct WfpRuntimeProbeOutput {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WfpRuntimeActivationProbeStatus {
     Ready,
+    AcceptedButNotEnforced,
+    EnforcedPendingCleanup,
+    CleanupSucceeded,
+    FilteringProbeSucceeded,
     NotImplemented,
 }
 
@@ -225,9 +250,28 @@ impl Drop for ProcessContainment {
 
 impl Drop for NetworkEnforcementGuard {
     fn drop(&mut self) {
-        let _ = delete_firewall_rule(&self.inbound_rule);
-        let _ = delete_firewall_rule(&self.outbound_rule);
-        cleanup_network_enforcement_staging(&self.staged_dir);
+        match self {
+            NetworkEnforcementGuard::FirewallRules {
+                staged_dir,
+                inbound_rule,
+                outbound_rule,
+                ..
+            } => {
+                let _ = delete_firewall_rule(inbound_rule);
+                let _ = delete_firewall_rule(outbound_rule);
+                cleanup_network_enforcement_staging(staged_dir);
+            }
+            NetworkEnforcementGuard::WfpServiceManaged {
+                probe_config,
+                target_program,
+                inbound_rule,
+                outbound_rule,
+            } => {
+                let request =
+                    build_wfp_runtime_cleanup_request(target_program, inbound_rule, outbound_rule);
+                let _ = run_wfp_runtime_probe_with_request(probe_config, &request);
+            }
+        }
     }
 }
 
@@ -576,10 +620,53 @@ fn build_wfp_runtime_activation_request(
 
     WfpRuntimeActivationRequest {
         protocol_version: WFP_RUNTIME_PROTOCOL_VERSION,
+        request_kind: match &policy.mode {
+            nono::WindowsNetworkPolicyMode::Blocked => "activate_blocked_mode",
+            nono::WindowsNetworkPolicyMode::AllowAll => "activate_allow_all_mode",
+            nono::WindowsNetworkPolicyMode::ProxyOnly { .. } => "activate_proxy_mode",
+        }
+        .to_string(),
         network_mode: network_mode.to_string(),
         preferred_backend: policy.preferred_backend.label().to_string(),
         active_backend: policy.active_backend.label().to_string(),
         runtime_target: describe_windows_network_runtime_target(policy),
+        target_program_path: None,
+        outbound_rule_name: None,
+        inbound_rule_name: None,
+    }
+}
+
+fn build_wfp_target_activation_request(
+    policy: &nono::WindowsNetworkPolicy,
+    target_program: &Path,
+    outbound_rule: &str,
+    inbound_rule: &str,
+) -> WfpRuntimeActivationRequest {
+    let mut request = build_wfp_runtime_activation_request(policy);
+    request.target_program_path = Some(target_program.display().to_string());
+    request.outbound_rule_name = Some(outbound_rule.to_string());
+    request.inbound_rule_name = Some(inbound_rule.to_string());
+    request
+}
+
+fn build_wfp_runtime_cleanup_request(
+    target_program: &Path,
+    inbound_rule: &str,
+    outbound_rule: &str,
+) -> WfpRuntimeActivationRequest {
+    WfpRuntimeActivationRequest {
+        protocol_version: WFP_RUNTIME_PROTOCOL_VERSION,
+        request_kind: "deactivate_blocked_mode".to_string(),
+        network_mode: "blocked".to_string(),
+        preferred_backend: "windows-filtering-platform".to_string(),
+        active_backend: "none".to_string(),
+        runtime_target: format!(
+            "blocked Windows network access for {}",
+            target_program.display()
+        ),
+        target_program_path: Some(target_program.display().to_string()),
+        outbound_rule_name: Some(outbound_rule.to_string()),
+        inbound_rule_name: Some(inbound_rule.to_string()),
     }
 }
 
@@ -881,8 +968,50 @@ fn parse_wfp_runtime_probe_status(
     if output.response.status == "ready" {
         return Ok(WfpRuntimeActivationProbeStatus::Ready);
     }
+    if output.response.status == "accepted-but-not-enforced" {
+        return Ok(WfpRuntimeActivationProbeStatus::AcceptedButNotEnforced);
+    }
+    if output.response.status == "enforced-pending-cleanup" {
+        return Ok(WfpRuntimeActivationProbeStatus::EnforcedPendingCleanup);
+    }
+    if output.response.status == "cleanup-succeeded" {
+        return Ok(WfpRuntimeActivationProbeStatus::CleanupSucceeded);
+    }
+    if output.response.status == "filtering-probe-succeeded" {
+        return Ok(WfpRuntimeActivationProbeStatus::FilteringProbeSucceeded);
+    }
     if output.response.status == "not-implemented" {
         return Ok(WfpRuntimeActivationProbeStatus::NotImplemented);
+    }
+    if output.response.status == "invalid-request" {
+        return Err(NonoError::UnsupportedPlatform(format!(
+            "Windows WFP service rejected the runtime activation request: {}",
+            output.response.details
+        )));
+    }
+    if output.response.status == "protocol-mismatch" {
+        return Err(NonoError::SandboxInit(format!(
+            "Windows WFP activation protocol mismatch: {}",
+            output.response.details
+        )));
+    }
+    if output.response.status == "prerequisites-missing" {
+        return Err(NonoError::UnsupportedPlatform(format!(
+            "Windows WFP activation prerequisites are missing: {}",
+            output.response.details
+        )));
+    }
+    if output.response.status == "filtering-probe-failed" {
+        return Err(NonoError::UnsupportedPlatform(format!(
+            "Windows WFP service could not install its blocked-mode filtering probe: {}",
+            output.response.details
+        )));
+    }
+    if output.response.status == "cleanup-failed" {
+        return Err(NonoError::UnsupportedPlatform(format!(
+            "Windows WFP service could not clean up target-attached blocked-mode enforcement: {}",
+            output.response.details
+        )));
     }
 
     Err(NonoError::SandboxInit(format!(
@@ -1349,7 +1478,7 @@ This is a current Windows backend limitation, not permanent product behavior.",
             return Err(err);
         }
 
-        Ok(Some(NetworkEnforcementGuard {
+        Ok(Some(NetworkEnforcementGuard::FirewallRules {
             staged_program,
             staged_dir,
             inbound_rule,
@@ -1366,15 +1495,16 @@ impl WindowsNetworkBackend for WfpNetworkBackend {
     fn install(
         &self,
         policy: &nono::WindowsNetworkPolicy,
-        _config: &ExecConfig<'_>,
+        config: &ExecConfig<'_>,
     ) -> Result<Option<NetworkEnforcementGuard>> {
         let probe_config = current_wfp_probe_config()?;
-        install_wfp_network_backend(policy, &probe_config)
+        install_wfp_network_backend(policy, config, &probe_config)
     }
 }
 
 fn install_wfp_network_backend(
     policy: &nono::WindowsNetworkPolicy,
+    config: &ExecConfig<'_>,
     probe_config: &WfpProbeConfig,
 ) -> Result<Option<NetworkEnforcementGuard>> {
     match &policy.mode {
@@ -1389,7 +1519,15 @@ fn install_wfp_network_backend(
                 ))
             })?;
             if status == WfpProbeStatus::Ready {
-                let request = build_wfp_runtime_activation_request(policy);
+                let suffix = unique_windows_firewall_rule_suffix();
+                let outbound_rule = format!("nono-wfp-block-out-{suffix}");
+                let inbound_rule = format!("nono-wfp-block-in-{suffix}");
+                let request = build_wfp_target_activation_request(
+                    policy,
+                    config.resolved_program,
+                    &outbound_rule,
+                    &inbound_rule,
+                );
                 let probe_output = run_wfp_runtime_probe_with_request(probe_config, &request)?;
                 return match parse_wfp_runtime_probe_status(&probe_output)? {
                     WfpRuntimeActivationProbeStatus::Ready => Err(NonoError::UnsupportedPlatform(
@@ -1405,6 +1543,31 @@ fn install_wfp_network_backend(
                             describe_windows_network_runtime_target(policy),
                             describe_wfp_runtime_probe_failure(probe_config, &probe_output),
                             policy.backend_summary()
+                        )),
+                    ),
+                    WfpRuntimeActivationProbeStatus::AcceptedButNotEnforced => Err(
+                        NonoError::UnsupportedPlatform(format!(
+                            "Windows WFP blocked-mode activation was accepted by the service host but no filtering primitive was installed yet: {}. This request remains fail-closed.",
+                            probe_output.response.details
+                        )),
+                    ),
+                    WfpRuntimeActivationProbeStatus::EnforcedPendingCleanup => Ok(Some(
+                        NetworkEnforcementGuard::WfpServiceManaged {
+                            probe_config: probe_config.clone(),
+                            target_program: config.resolved_program.to_path_buf(),
+                            inbound_rule,
+                            outbound_rule,
+                        },
+                    )),
+                    WfpRuntimeActivationProbeStatus::CleanupSucceeded => Err(
+                        NonoError::SandboxInit(
+                            "Windows WFP activation returned cleanup success during install; this is an unexpected protocol state.".to_string(),
+                        ),
+                    ),
+                    WfpRuntimeActivationProbeStatus::FilteringProbeSucceeded => Err(
+                        NonoError::UnsupportedPlatform(format!(
+                            "Windows WFP blocked-mode activation successfully exercised a service-owned filtering primitive, but it is not attached to the target process yet: {}. This request remains fail-closed.",
+                            probe_output.response.details
                         )),
                     ),
                 };
@@ -2027,7 +2190,7 @@ pub fn execute_direct(config: &ExecConfig<'_>) -> Result<i32> {
     let network_enforcement = prepare_network_enforcement(config)?;
     let launch_program = network_enforcement
         .as_ref()
-        .map(|guard| guard.staged_program.as_path())
+        .map(NetworkEnforcementGuard::launch_program)
         .unwrap_or(config.resolved_program);
 
     let cmd_args = prepare_runtime_hardened_args(launch_program, &config.command[1..]);
@@ -2089,7 +2252,7 @@ pub fn execute_supervised(
     let network_enforcement = prepare_network_enforcement(config)?;
     let launch_program = network_enforcement
         .as_ref()
-        .map(|guard| guard.staged_program.as_path())
+        .map(NetworkEnforcementGuard::launch_program)
         .unwrap_or(config.resolved_program);
 
     let containment = create_process_containment()?;
@@ -2743,6 +2906,7 @@ mod tests {
         ));
         let request = build_wfp_runtime_activation_request(&policy);
         assert_eq!(request.protocol_version, WFP_RUNTIME_PROTOCOL_VERSION);
+        assert_eq!(request.request_kind, "activate_proxy_mode");
         assert_eq!(request.network_mode, "proxy-only");
         assert_eq!(request.preferred_backend, "windows-filtering-platform");
         assert_eq!(request.active_backend, "none");
@@ -2762,6 +2926,96 @@ mod tests {
         };
         let status = parse_wfp_runtime_probe_status(&output).expect("probe output should parse");
         assert_eq!(status, WfpRuntimeActivationProbeStatus::NotImplemented);
+    }
+
+    #[test]
+    fn test_parse_wfp_runtime_probe_status_reports_accepted_but_not_enforced() {
+        let output = WfpRuntimeProbeOutput {
+            status_code: Some(4),
+            response: WfpRuntimeActivationResponse {
+                protocol_version: WFP_RUNTIME_PROTOCOL_VERSION,
+                status: "accepted-but-not-enforced".to_string(),
+                details: "placeholder".to_string(),
+            },
+            stderr: "placeholder".to_string(),
+        };
+        let status = parse_wfp_runtime_probe_status(&output).expect("probe output should parse");
+        assert_eq!(
+            status,
+            WfpRuntimeActivationProbeStatus::AcceptedButNotEnforced
+        );
+    }
+
+    #[test]
+    fn test_parse_wfp_runtime_probe_status_reports_filtering_probe_succeeded() {
+        let output = WfpRuntimeProbeOutput {
+            status_code: Some(4),
+            response: WfpRuntimeActivationResponse {
+                protocol_version: WFP_RUNTIME_PROTOCOL_VERSION,
+                status: "filtering-probe-succeeded".to_string(),
+                details: "probe ok".to_string(),
+            },
+            stderr: "placeholder".to_string(),
+        };
+        let status = parse_wfp_runtime_probe_status(&output).expect("probe output should parse");
+        assert_eq!(
+            status,
+            WfpRuntimeActivationProbeStatus::FilteringProbeSucceeded
+        );
+    }
+
+    #[test]
+    fn test_parse_wfp_runtime_probe_status_rejects_invalid_request() {
+        let output = WfpRuntimeProbeOutput {
+            status_code: Some(2),
+            response: WfpRuntimeActivationResponse {
+                protocol_version: WFP_RUNTIME_PROTOCOL_VERSION,
+                status: "invalid-request".to_string(),
+                details: "unsupported WFP runtime activation request kind `activate_proxy_mode`"
+                    .to_string(),
+            },
+            stderr: "placeholder".to_string(),
+        };
+        let err = parse_wfp_runtime_probe_status(&output).expect_err("invalid request should fail");
+        assert!(err
+            .to_string()
+            .contains("service rejected the runtime activation request"));
+    }
+
+    #[test]
+    fn test_parse_wfp_runtime_probe_status_reports_missing_prerequisites() {
+        let output = WfpRuntimeProbeOutput {
+            status_code: Some(3),
+            response: WfpRuntimeActivationResponse {
+                protocol_version: WFP_RUNTIME_PROTOCOL_VERSION,
+                status: "prerequisites-missing".to_string(),
+                details: "driver artifact missing".to_string(),
+            },
+            stderr: "placeholder".to_string(),
+        };
+        let err = parse_wfp_runtime_probe_status(&output)
+            .expect_err("missing prerequisites should fail closed");
+        assert!(err
+            .to_string()
+            .contains("activation prerequisites are missing"));
+    }
+
+    #[test]
+    fn test_parse_wfp_runtime_probe_status_reports_filtering_probe_failed() {
+        let output = WfpRuntimeProbeOutput {
+            status_code: Some(4),
+            response: WfpRuntimeActivationResponse {
+                protocol_version: WFP_RUNTIME_PROTOCOL_VERSION,
+                status: "filtering-probe-failed".to_string(),
+                details: "access denied".to_string(),
+            },
+            stderr: "placeholder".to_string(),
+        };
+        let err =
+            parse_wfp_runtime_probe_status(&output).expect_err("failed probe should fail closed");
+        assert!(err
+            .to_string()
+            .contains("could not install its blocked-mode filtering probe"));
     }
 
     #[test]
@@ -3279,8 +3533,18 @@ mod tests {
             backend_driver_binary_path: driver_binary,
             backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
         };
+        let command = vec![r"C:\tools\probe.exe".to_string()];
+        let resolved_program = PathBuf::from(r"C:\tools\probe.exe");
+        let config = ExecConfig {
+            command: &command,
+            resolved_program: &resolved_program,
+            caps: &caps,
+            env_vars: Vec::new(),
+            cap_file: None,
+            current_dir: dir.path(),
+        };
 
-        let err = install_wfp_network_backend(&policy, &probe_config)
+        let err = install_wfp_network_backend(&policy, &config, &probe_config)
             .expect_err("missing service registration should fail closed");
         let message = err.to_string();
         assert!(message.contains("Run `nono setup --install-wfp-service` first"));

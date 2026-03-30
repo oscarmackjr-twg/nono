@@ -128,7 +128,17 @@ That keeps setup, readiness, and live WFP activation failures aligned without fa
 
 `nono setup --check-only` now also prints a single `Next action:` line derived from that same lifecycle state, so setup guidance and live activation failures point at the same recovery step.
 
-When the service and driver both probe as present, the Windows runtime now performs a first explicit backend handshake by running `nono-wfp-service --probe-runtime-activation` with a JSON activation request over stdio. The service returns a structured JSON response. That transport still answers `not-implemented` today, so live WFP activation remains fail-closed, but the failure now comes from an explicit backend protocol check rather than only static readiness.
+When the service and driver both probe as present, the Windows runtime now performs a first explicit backend handshake by running `nono-wfp-service --probe-runtime-activation` with a JSON activation request over stdio. The first concrete request path is `activate_blocked_mode`.
+
+That service-owned blocked-mode workflow now:
+- validates the request kind and protocol version
+- re-checks local backend layout inside the service host
+- performs a first backend-owned blocked-mode activation attempt
+- returns a structured activation state
+
+Today, `activate_blocked_mode` installs target-attached firewall deny rules through the service host and returns `enforced-pending-cleanup` when that install succeeds. That means the activation decision and the first real OS filtering action now live inside the service host. The runtime still fails closed because this path is not yet backed by real WFP filtering or durable target attachment beyond the current service-managed firewall-rule slice. Unsupported request kinds are rejected explicitly, and missing local prerequisites return a distinct fail-closed state.
+
+The next backend-owned step is now partially in place: `activate_blocked_mode` attempts a transient firewall deny-rule probe inside `nono-wfp-service` itself. That gives the service a real OS filtering attempt to execute and verify. The runtime still fails closed because that probe is not attached to the target process and does not provide real WFP enforcement, but the activation path no longer stops at pure validation.
 
 The first real probing layer is now in place for that scaffold:
 
