@@ -8,7 +8,6 @@ use crate::error::{NonoError, Result};
 use crate::supervisor::types::{SupervisorMessage, SupervisorResponse};
 use getrandom::fill as random_fill;
 use sha2::{Digest, Sha256};
-use std::ffi::c_void;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
@@ -279,7 +278,7 @@ fn finalize_server_connection(server_handle: HANDLE, pipe_name: &str) -> Result<
         let err = std::io::Error::last_os_error();
         if err.raw_os_error() != Some(ERROR_PIPE_CONNECTED as i32) {
             // SAFETY: `server_handle` is a live handle that must be reclaimed on error.
-            drop(unsafe { OwnedHandle::from_raw_handle(server_handle as *mut c_void) });
+            drop(unsafe { OwnedHandle::from_raw_handle(server_handle) });
             return Err(NonoError::SandboxInit(format!(
                 "Failed to accept Windows supervisor pipe connection on {pipe_name}: {err}. \
 Ensure the child process received the correct pipe name and startup token."
@@ -343,7 +342,7 @@ Ensure the parent process is listening before the child attempts to connect."
 fn file_from_handle(handle: HANDLE) -> File {
     // SAFETY: `handle` is a valid owned Windows handle returned by a Win32 API
     // in this module. Converting it into `OwnedHandle` transfers ownership to Rust.
-    let owned = unsafe { OwnedHandle::from_raw_handle(handle as *mut c_void) };
+    let owned = unsafe { OwnedHandle::from_raw_handle(handle) };
     File::from(owned)
 }
 

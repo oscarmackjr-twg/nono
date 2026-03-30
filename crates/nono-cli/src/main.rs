@@ -3519,7 +3519,7 @@ mod tests {
             .expect("allow path");
         let flags = ExecutionFlags {
             strategy: exec_strategy::ExecStrategy::Direct,
-            workdir: workdir,
+            workdir,
             rollback: false,
             no_rollback: false,
             no_rollback_prompt: false,

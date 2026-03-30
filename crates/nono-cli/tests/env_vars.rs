@@ -103,6 +103,9 @@ fn expected_windows_runtime_root(seed_dir: &std::path::Path) -> std::path::PathB
     let local_low_root = std::env::var_os("LOCALAPPDATA")
         .map(std::path::PathBuf::from)
         .and_then(|local| local.parent().map(|root| root.join("LocalLow")));
+    let managed_root = seed_dir.join(".nono-runtime-low");
+    let managed_root_ready =
+        managed_root.exists() && nono::Sandbox::windows_supports_direct_writable_dir(&managed_root);
     if low_root
         .as_ref()
         .is_some_and(|prefix| seed_dir.starts_with(prefix))
@@ -111,11 +114,8 @@ fn expected_windows_runtime_root(seed_dir: &std::path::Path) -> std::path::PathB
             .is_some_and(|prefix| seed_dir.starts_with(prefix))
     {
         seed_dir.join(".nono-runtime")
-    } else if {
-        let managed_root = seed_dir.join(".nono-runtime-low");
-        managed_root.exists() && nono::Sandbox::windows_supports_direct_writable_dir(&managed_root)
-    } {
-        seed_dir.join(".nono-runtime-low")
+    } else if managed_root_ready {
+        managed_root
     } else {
         low_root
             .unwrap_or_else(|| seed_dir.join(".nono-runtime-low"))
