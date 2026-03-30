@@ -75,6 +75,7 @@ pub struct SupervisorConfig<'a> {
     pub requested_features: Vec<&'a str>,
 }
 
+#[derive(Debug)]
 struct NetworkEnforcementGuard {
     staged_program: PathBuf,
     staged_dir: PathBuf,
@@ -122,7 +123,7 @@ impl Drop for NetworkEnforcementGuard {
     fn drop(&mut self) {
         let _ = delete_firewall_rule(&self.inbound_rule);
         let _ = delete_firewall_rule(&self.outbound_rule);
-        let _ = std::fs::remove_dir_all(&self.staged_dir);
+        cleanup_network_enforcement_staging(&self.staged_dir);
     }
 }
 
@@ -136,21 +137,29 @@ fn run_netsh_firewall(args: &[&str]) -> Result<String> {
     if output.status.success() {
         Ok(stdout)
     } else {
-        let combined = format!("{stdout}{stderr}");
-        let detail = if combined.contains("requires elevation")
-            || combined.contains("Access is denied")
-        {
-            "Windows Firewall rule changes require an elevated administrator session on this machine"
-                .to_string()
-        } else {
-            combined
-        };
-        Err(NonoError::SandboxInit(format!(
-            "Failed to apply Windows Firewall rule (args: {}): {}",
-            args.join(" "),
-            detail
-        )))
+        Err(classify_netsh_firewall_failure(
+            args,
+            &format!("{stdout}{stderr}"),
+        ))
     }
+}
+
+fn classify_netsh_firewall_failure(args: &[&str], output: &str) -> NonoError {
+    let detail = if output.contains("requires elevation") || output.contains("Access is denied") {
+        "Windows blocked-network enforcement currently uses temporary Windows Firewall rules and requires an elevated administrator session on this machine. The long-term Windows backend target is WFP.".to_string()
+    } else if output.trim().is_empty() {
+        "Windows Firewall did not return diagnostic output. The current blocked-network backend uses temporary Windows Firewall rules; the long-term backend target is WFP.".to_string()
+    } else {
+        format!(
+            "{} (current backend: Windows Firewall rules; preferred backend: WFP)",
+            output.trim()
+        )
+    };
+    NonoError::SandboxInit(format!(
+        "Failed to apply Windows blocked-network rule (args: {}): {}",
+        args.join(" "),
+        detail
+    ))
 }
 
 fn delete_firewall_rule(name: &str) -> Result<()> {
@@ -199,26 +208,37 @@ fn stage_program_for_blocked_network_launch(program: &Path) -> Result<(PathBuf, 
     Ok((staged_program, staged_dir))
 }
 
+fn cleanup_network_enforcement_staging(staged_dir: &Path) {
+    let _ = std::fs::remove_dir_all(staged_dir);
+}
+
 fn prepare_network_enforcement(config: &ExecConfig<'_>) -> Result<Option<NetworkEnforcementGuard>> {
     let policy = Sandbox::windows_network_policy(config.caps);
     if !policy.is_fully_supported() {
         return Err(NonoError::UnsupportedPlatform(format!(
-            "Windows network enforcement does not support this capability set yet ({}).",
-            policy.unsupported_messages().join(", ")
+            "Windows network enforcement does not support this capability set yet ({}, {}).",
+            policy.unsupported_messages().join(", "),
+            policy.backend_summary()
         )));
     }
 
-    match policy.mode {
-        nono::WindowsNetworkPolicyMode::AllowAll => Ok(None),
-        nono::WindowsNetworkPolicyMode::Blocked => {
+    let mode = policy.mode.clone();
+    let active_backend = policy.active_backend;
+
+    match (mode, active_backend) {
+        (nono::WindowsNetworkPolicyMode::AllowAll, nono::WindowsNetworkBackendKind::None) => {
+            Ok(None)
+        }
+        (nono::WindowsNetworkPolicyMode::Blocked, nono::WindowsNetworkBackendKind::FirewallRules) => {
             match Sandbox::windows_network_launch_support(&policy, config.resolved_program) {
                 nono::WindowsNetworkLaunchSupport::Supported => {}
                 nono::WindowsNetworkLaunchSupport::UnsupportedShellHost => {
                     return Err(NonoError::UnsupportedPlatform(format!(
                         "Windows blocked-network enforcement currently supports standalone executable launches, not shell or interpreter hosts such as {}. \
 Use a direct executable target for the current backend subset. \
+This limitation comes from the current Windows Firewall-rule backend; the long-term backend target is WFP. \
 This is a current Windows backend limitation, not permanent product behavior.",
-                        config.resolved_program.display()
+                        config.resolved_program.display(),
                     )));
                 }
             }
@@ -242,7 +262,7 @@ This is a current Windows backend limitation, not permanent product behavior.",
                 "enable=yes",
                 "profile=any",
             ]) {
-                let _ = std::fs::remove_dir_all(&staged_dir);
+                cleanup_network_enforcement_staging(&staged_dir);
                 return Err(err);
             }
 
@@ -259,7 +279,7 @@ This is a current Windows backend limitation, not permanent product behavior.",
                 "profile=any",
             ]) {
                 let _ = delete_firewall_rule(&outbound_rule);
-                let _ = std::fs::remove_dir_all(&staged_dir);
+                cleanup_network_enforcement_staging(&staged_dir);
                 return Err(err);
             }
 
@@ -270,9 +290,23 @@ This is a current Windows backend limitation, not permanent product behavior.",
                 outbound_rule,
             }))
         }
-        nono::WindowsNetworkPolicyMode::ProxyOnly { .. } => Err(NonoError::UnsupportedPlatform(
-            "Windows proxy-only network enforcement is not implemented yet. This is a current Windows backend limitation, not permanent product behavior.".to_string(),
-        )),
+        (nono::WindowsNetworkPolicyMode::Blocked, nono::WindowsNetworkBackendKind::None) => Err(
+            NonoError::UnsupportedPlatform(format!(
+                "Windows blocked-network enforcement has no active backend for this launch yet ({}). The preferred backend is WFP.",
+                policy.backend_summary()
+            )),
+        ),
+        (nono::WindowsNetworkPolicyMode::ProxyOnly { .. }, _) => Err(
+            NonoError::UnsupportedPlatform(format!(
+                "Windows proxy-only network enforcement is not implemented yet ({}). This is a current Windows backend limitation, not permanent product behavior.",
+                policy.backend_summary()
+            )),
+        ),
+        (_, active_backend) => Err(NonoError::UnsupportedPlatform(format!(
+            "Windows network enforcement does not have an applicable active backend for this policy ({}, active backend: {}).",
+            policy.backend_summary(),
+            active_backend.label()
+        ))),
     }
 }
 
@@ -1175,5 +1209,67 @@ mod tests {
             .expect("allow path");
 
         assert!(should_use_low_integrity_windows_launch(&caps));
+    }
+
+    #[test]
+    fn test_classify_netsh_firewall_failure_reports_elevation_actionably() {
+        let err = classify_netsh_firewall_failure(
+            &["advfirewall", "firewall", "add", "rule"],
+            "The requested operation requires elevation (Run as administrator).\r\n",
+        );
+
+        let message = err.to_string();
+        assert!(message.contains("requires an elevated administrator session"));
+        assert!(message.contains("long-term Windows backend target is WFP"));
+    }
+
+    #[test]
+    fn test_classify_netsh_firewall_failure_preserves_generic_output() {
+        let err = classify_netsh_firewall_failure(
+            &["advfirewall", "firewall", "add", "rule"],
+            "Some other firewall failure",
+        );
+
+        let message = err.to_string();
+        assert!(message.contains("Some other firewall failure"));
+        assert!(message.contains("current backend: Windows Firewall rules"));
+        assert!(message.contains("preferred backend: WFP"));
+    }
+
+    #[test]
+    fn test_cleanup_network_enforcement_staging_removes_staged_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let staged_dir = dir.path().join("staged");
+        std::fs::create_dir_all(&staged_dir).expect("mkdir");
+        std::fs::write(staged_dir.join("probe.exe"), b"probe").expect("write");
+
+        cleanup_network_enforcement_staging(&staged_dir);
+
+        assert!(!staged_dir.exists(), "staged directory should be removed");
+    }
+
+    #[test]
+    fn test_prepare_network_enforcement_rejects_blocked_backend_without_active_backend() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let current_dir = dir.path().join("workspace");
+        std::fs::create_dir_all(&current_dir).expect("mkdir");
+        let mut caps = CapabilitySet::new().set_network_mode(nono::NetworkMode::Blocked);
+        caps.add_tcp_connect_port(443);
+        let command = vec![r"C:\tools\probe.exe".to_string()];
+        let resolved_program = PathBuf::from(r"C:\tools\probe.exe");
+        let config = ExecConfig {
+            command: &command,
+            resolved_program: &resolved_program,
+            caps: &caps,
+            env_vars: Vec::new(),
+            cap_file: None,
+            current_dir: &current_dir,
+        };
+
+        let err = prepare_network_enforcement(&config)
+            .expect_err("unsupported blocked-network shape should fail clearly");
+        let message = err.to_string();
+        assert!(message.contains("does not support this capability set yet"));
+        assert!(message.contains("preferred backend: windows-filtering-platform"));
     }
 }

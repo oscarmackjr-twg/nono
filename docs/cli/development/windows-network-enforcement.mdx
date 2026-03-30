@@ -18,7 +18,7 @@ This is the only option in scope that plausibly gives:
 - auditable deny paths
 - an upgrade path to proxy-only and richer policy shapes
 
-The current implementation does **not** implement WFP yet. It adds the compiled Windows network policy model and the first real blocked-network path so later WFP work can replace that coarse backend cleanly.
+The current implementation does **not** implement WFP yet. It adds the compiled Windows network policy model, records both the preferred backend (`WFP`) and the currently active backend for the narrow supported subset, and keeps the first real blocked-network path isolated so later WFP work can replace that coarse backend cleanly.
 
 ## Why Not the Other Options
 
@@ -80,6 +80,9 @@ Today:
   - installs inbound/outbound Windows Firewall block rules for that staged path
   - launches the staged path
   - removes the rules on cleanup
+- that blocked-network slice now reports clearer backend-owned diagnostics:
+  - elevation failures explicitly call out the current Windows Firewall-rule backend
+  - unsupported shapes explain that WFP is the preferred long-term backend even when no active backend is available yet
 - shell and interpreter hosts such as `cmd.exe` and `powershell.exe` remain intentionally unsupported for this first backend slice because they can trampoline into unrestricted descendants
 - proxy-only and richer port filters still fail closed
 
@@ -88,6 +91,17 @@ Later full-port work should:
 - replace the coarse firewall-backed `Blocked` slice with a stronger WFP-backed primitive
 - make `AllowAll` and `Blocked` distinct in runtime behavior
 - return deterministic unsupported results for policy shapes still outside the first backend subset
+
+## WFP Scaffold Boundary
+
+The current backend contract now carries two backend states per compiled Windows network policy:
+
+- `preferred backend`
+  This is the long-term Windows target. For `Blocked` and `ProxyOnly`, it is `windows-filtering-platform`.
+- `active backend`
+  This is what the current runtime can actually install today. For the narrow supported `Blocked` subset, it is `windows-firewall-rules`. Unsupported shapes keep `active backend: none`.
+
+That means later WFP work can replace the active backend without changing the higher-level `WindowsNetworkPolicy` contract again.
 
 ## Real Blockers
 

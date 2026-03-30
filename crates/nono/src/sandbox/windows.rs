@@ -7,10 +7,10 @@ use crate::capability::CapabilitySet;
 use crate::error::{NonoError, Result};
 use crate::sandbox::{
     PreviewRuntimeStatus, SupportInfo, SupportStatus, WindowsFilesystemPolicy,
-    WindowsFilesystemRule, WindowsNetworkLaunchSupport, WindowsNetworkPolicy,
-    WindowsNetworkPolicyMode, WindowsPreviewContext, WindowsPreviewEntryPoint,
-    WindowsUnsupportedIssue, WindowsUnsupportedIssueKind, WindowsUnsupportedNetworkIssue,
-    WindowsUnsupportedNetworkIssueKind,
+    WindowsFilesystemRule, WindowsNetworkBackendKind, WindowsNetworkLaunchSupport,
+    WindowsNetworkPolicy, WindowsNetworkPolicyMode, WindowsPreviewContext,
+    WindowsPreviewEntryPoint, WindowsUnsupportedIssue, WindowsUnsupportedIssueKind,
+    WindowsUnsupportedNetworkIssue, WindowsUnsupportedNetworkIssueKind,
 };
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
@@ -186,7 +186,28 @@ pub fn compile_network_policy(caps: &CapabilitySet) -> WindowsNetworkPolicy {
     unsupported.sort_by(|left, right| left.kind.cmp(&right.kind));
     unsupported.dedup();
 
-    WindowsNetworkPolicy { mode, unsupported }
+    let preferred_backend = match mode {
+        WindowsNetworkPolicyMode::AllowAll => WindowsNetworkBackendKind::None,
+        WindowsNetworkPolicyMode::Blocked | WindowsNetworkPolicyMode::ProxyOnly { .. } => {
+            WindowsNetworkBackendKind::Wfp
+        }
+    };
+    let active_backend = match mode {
+        WindowsNetworkPolicyMode::AllowAll => WindowsNetworkBackendKind::None,
+        WindowsNetworkPolicyMode::Blocked if unsupported.is_empty() => {
+            WindowsNetworkBackendKind::FirewallRules
+        }
+        WindowsNetworkPolicyMode::Blocked | WindowsNetworkPolicyMode::ProxyOnly { .. } => {
+            WindowsNetworkBackendKind::None
+        }
+    };
+
+    WindowsNetworkPolicy {
+        mode,
+        unsupported,
+        preferred_backend,
+        active_backend,
+    }
 }
 
 #[must_use]
@@ -1225,6 +1246,8 @@ mod tests {
         let policy = compile_network_policy(&CapabilitySet::new());
         assert_eq!(policy.mode, WindowsNetworkPolicyMode::AllowAll);
         assert!(policy.is_fully_supported());
+        assert_eq!(policy.preferred_backend, WindowsNetworkBackendKind::None);
+        assert_eq!(policy.active_backend, WindowsNetworkBackendKind::None);
     }
 
     #[test]
@@ -1233,6 +1256,11 @@ mod tests {
             compile_network_policy(&CapabilitySet::new().set_network_mode(NetworkMode::Blocked));
         assert_eq!(policy.mode, WindowsNetworkPolicyMode::Blocked);
         assert!(policy.is_fully_supported());
+        assert_eq!(policy.preferred_backend, WindowsNetworkBackendKind::Wfp);
+        assert_eq!(
+            policy.active_backend,
+            WindowsNetworkBackendKind::FirewallRules
+        );
     }
 
     #[test]
@@ -1272,6 +1300,8 @@ mod tests {
                 "port-level connect filtering"
             ]
         );
+        assert_eq!(policy.preferred_backend, WindowsNetworkBackendKind::Wfp);
+        assert_eq!(policy.active_backend, WindowsNetworkBackendKind::None);
     }
 
     #[test]

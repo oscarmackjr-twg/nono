@@ -194,6 +194,15 @@ pub enum WindowsNetworkLaunchSupport {
     UnsupportedShellHost,
 }
 
+/// Windows backend selection for a given network enforcement shape.
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowsNetworkBackendKind {
+    None,
+    FirewallRules,
+    Wfp,
+}
+
 /// A Windows network capability shape that the current backend does not yet
 /// enforce directly.
 #[cfg(target_os = "windows")]
@@ -260,6 +269,10 @@ pub struct WindowsNetworkPolicy {
     /// Network capability shapes that are intentionally not in the first
     /// enforceable subset.
     pub unsupported: Vec<WindowsUnsupportedNetworkIssue>,
+    /// The long-term backend this policy shape is targeting.
+    pub preferred_backend: WindowsNetworkBackendKind,
+    /// The backend slice the current runtime can actually apply today.
+    pub active_backend: WindowsNetworkBackendKind,
 }
 
 #[cfg(target_os = "windows")]
@@ -291,6 +304,27 @@ impl WindowsNetworkPolicy {
         messages.sort();
         messages.dedup();
         messages
+    }
+
+    #[must_use]
+    pub fn backend_summary(&self) -> String {
+        format!(
+            "preferred backend: {}, active backend: {}",
+            self.preferred_backend.label(),
+            self.active_backend.label()
+        )
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsNetworkBackendKind {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::FirewallRules => "windows-firewall-rules",
+            Self::Wfp => "windows-filtering-platform",
+        }
     }
 }
 
