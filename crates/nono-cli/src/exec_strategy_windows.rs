@@ -536,6 +536,16 @@ fn build_child_env(config: &ExecConfig<'_>) -> Vec<(String, String)> {
                 "COMPOSER_CACHE_DIR",
                 "GRADLE_USER_HOME",
                 "MAVEN_USER_HOME",
+                "AWS_SHARED_CREDENTIALS_FILE",
+                "AWS_CONFIG_FILE",
+                "AZURE_CONFIG_DIR",
+                "KUBECONFIG",
+                "DOCKER_CONFIG",
+                "CLOUDSDK_CONFIG",
+                "GIT_CONFIG_GLOBAL",
+                "GNUPGHOME",
+                "TF_CLI_CONFIG_FILE",
+                "TF_DATA_DIR",
             ],
         ) {
             env_pairs.push((key, value));

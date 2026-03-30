@@ -1740,6 +1740,14 @@ impl WindowsRuntimeLayout {
         insert_dir("composer_cache", &["composer-cache"]);
         insert_dir("gradle_home", &["gradle-home"]);
         insert_dir("maven_home", &["maven-home"]);
+        insert_dir("aws", &["cloud", "aws"]);
+        insert_dir("azure", &["cloud", "azure"]);
+        insert_dir("kube", &["cloud", "kube"]);
+        insert_dir("docker", &["cloud", "docker"]);
+        insert_dir("gcloud", &["cloud", "gcloud"]);
+        insert_dir("terraform", &["cloud", "terraform"]);
+        insert_dir("git", &["git"]);
+        insert_dir("gnupg", &["gnupg"]);
         insert_dir("xdg_config", &["xdg", "config"]);
         insert_dir("xdg_data", &["xdg", "data"]);
 
@@ -1980,6 +1988,11 @@ fn prepare_windows_runtime_env_vars(
         ("COMPOSER_CACHE_DIR", "composer_cache"),
         ("GRADLE_USER_HOME", "gradle_home"),
         ("MAVEN_USER_HOME", "maven_home"),
+        ("AZURE_CONFIG_DIR", "azure"),
+        ("DOCKER_CONFIG", "docker"),
+        ("CLOUDSDK_CONFIG", "gcloud"),
+        ("GNUPGHOME", "gnupg"),
+        ("TF_DATA_DIR", "terraform"),
     ] {
         env.push((
             key.to_string(),
@@ -2000,6 +2013,17 @@ fn prepare_windows_runtime_env_vars(
         ),
         ("PYTHONHISTFILE", layout.file("history", "python_history")),
         ("SQLITE_HISTORY", layout.file("history", "sqlite_history")),
+        (
+            "AWS_SHARED_CREDENTIALS_FILE",
+            layout.file("aws", "credentials"),
+        ),
+        ("AWS_CONFIG_FILE", layout.file("aws", "config")),
+        ("KUBECONFIG", layout.file("kube", "config")),
+        ("GIT_CONFIG_GLOBAL", layout.file("git", "config")),
+        (
+            "TF_CLI_CONFIG_FILE",
+            layout.file("terraform", "terraform.rc"),
+        ),
     ] {
         env.push((key.to_string(), file_path.to_string_lossy().into_owned()));
     }

@@ -836,7 +836,7 @@ fn windows_run_redirects_profile_state_vars_into_writable_allowlist() {
             "--",
             "cmd",
             "/c",
-            "echo PATH=%PATH% PATHEXT=%PATHEXT% COMSPEC=%COMSPEC% SystemRoot=%SystemRoot% windir=%windir% SystemDrive=%SystemDrive% NoDefaultCurrentDirectoryInExePath=%NoDefaultCurrentDirectoryInExePath% APPDATA=%APPDATA% LOCALAPPDATA=%LOCALAPPDATA% HOME=%HOME% USERPROFILE=%USERPROFILE% XDG_CONFIG_HOME=%XDG_CONFIG_HOME% XDG_DATA_HOME=%XDG_DATA_HOME% PROGRAMDATA=%PROGRAMDATA% ALLUSERSPROFILE=%ALLUSERSPROFILE% PUBLIC=%PUBLIC% ProgramFiles=%ProgramFiles% ProgramFiles(x86)=%ProgramFiles(x86)% ProgramW6432=%ProgramW6432% CommonProgramFiles=%CommonProgramFiles% CommonProgramFiles(x86)=%CommonProgramFiles(x86)% CommonProgramW6432=%CommonProgramW6432% OneDrive=%OneDrive% INETCACHE=%INETCACHE% INETCOOKIES=%INETCOOKIES% INETHISTORY=%INETHISTORY% PSModulePath=%PSModulePath% PSModuleAnalysisCachePath=%PSModuleAnalysisCachePath% CARGO_HOME=%CARGO_HOME% RUSTUP_HOME=%RUSTUP_HOME% DOTNET_CLI_HOME=%DOTNET_CLI_HOME% NUGET_PACKAGES=%NUGET_PACKAGES% NUGET_HTTP_CACHE_PATH=%NUGET_HTTP_CACHE_PATH% NUGET_PLUGINS_CACHE_PATH=%NUGET_PLUGINS_CACHE_PATH% ChocolateyInstall=%ChocolateyInstall% ChocolateyToolsLocation=%ChocolateyToolsLocation% VCPKG_ROOT=%VCPKG_ROOT% NPM_CONFIG_CACHE=%NPM_CONFIG_CACHE% YARN_CACHE_FOLDER=%YARN_CACHE_FOLDER% PIP_CACHE_DIR=%PIP_CACHE_DIR% PIP_BUILD_TRACKER=%PIP_BUILD_TRACKER% PYTHONPYCACHEPREFIX=%PYTHONPYCACHEPREFIX% PYTHONUSERBASE=%PYTHONUSERBASE% GOCACHE=%GOCACHE% GOMODCACHE=%GOMODCACHE% GOPATH=%GOPATH% HISTFILE=%HISTFILE% LESSHISTFILE=%LESSHISTFILE% NODE_REPL_HISTORY=%NODE_REPL_HISTORY% PYTHONHISTFILE=%PYTHONHISTFILE% SQLITE_HISTORY=%SQLITE_HISTORY% IPYTHONDIR=%IPYTHONDIR% GEM_HOME=%GEM_HOME% GEM_PATH=%GEM_PATH% BUNDLE_USER_HOME=%BUNDLE_USER_HOME% BUNDLE_USER_CACHE=%BUNDLE_USER_CACHE% BUNDLE_USER_CONFIG=%BUNDLE_USER_CONFIG% COMPOSER_HOME=%COMPOSER_HOME% COMPOSER_CACHE_DIR=%COMPOSER_CACHE_DIR% GRADLE_USER_HOME=%GRADLE_USER_HOME% MAVEN_USER_HOME=%MAVEN_USER_HOME%",
+            "set",
         ])
         .output()
         .expect("failed to run nono");
@@ -933,6 +933,16 @@ fn windows_run_redirects_profile_state_vars_into_writable_allowlist() {
         "composer_cache_dir=",
         "gradle_user_home=",
         "maven_user_home=",
+        "aws_shared_credentials_file=",
+        "aws_config_file=",
+        "azure_config_dir=",
+        "kubeconfig=",
+        "docker_config=",
+        "cloudsdk_config=",
+        "git_config_global=",
+        "gnupghome=",
+        "tf_cli_config_file=",
+        "tf_data_dir=",
     ] {
         assert!(
             normalized.contains(&format!("{key}{runtime_root_lower}\\"))
@@ -951,7 +961,10 @@ fn windows_run_filters_host_toolchain_home_vars_without_runtime_dir() {
         .env("RUSTUP_HOME", r"C:\host-rustup")
         .env("NUGET_PACKAGES", r"C:\host-nuget")
         .env("DOTNET_CLI_HOME", r"C:\host-dotnet")
-        .env("PSModuleAnalysisCachePath", r"C:\host-psmodule-analysis\cache")
+        .env(
+            "PSModuleAnalysisCachePath",
+            r"C:\host-psmodule-analysis\cache",
+        )
         .env("ChocolateyInstall", r"C:\ProgramData\chocolatey")
         .env("VCPKG_ROOT", r"C:\vcpkg")
         .env("NUGET_HTTP_CACHE_PATH", r"C:\host-nuget-http")
@@ -980,12 +993,23 @@ fn windows_run_filters_host_toolchain_home_vars_without_runtime_dir() {
         .env("COMPOSER_CACHE_DIR", r"C:\host-composer\cache")
         .env("GRADLE_USER_HOME", r"C:\host-gradle")
         .env("MAVEN_USER_HOME", r"C:\host-maven")
+        .env("AWS_SHARED_CREDENTIALS_FILE", r"C:\host-aws\credentials")
+        .env("AWS_CONFIG_FILE", r"C:\host-aws\config")
+        .env("AZURE_CONFIG_DIR", r"C:\host-azure")
+        .env("KUBECONFIG", r"C:\host-kube\config")
+        .env("DOCKER_CONFIG", r"C:\host-docker")
+        .env("CLOUDSDK_CONFIG", r"C:\host-gcloud")
+        .env("GIT_CONFIG_GLOBAL", r"C:\host-git\config")
+        .env("GNUPGHOME", r"C:\host-gnupg")
+        .env("TF_CLI_CONFIG_FILE", r"C:\host-terraform\terraform.rc")
+        .env("TF_DATA_DIR", r"C:\host-terraform\data")
         .args([
             "run",
             "--",
             "cmd",
+            "/v:on",
             "/c",
-            "echo CARGO_HOME=%CARGO_HOME% RUSTUP_HOME=%RUSTUP_HOME% NUGET_PACKAGES=%NUGET_PACKAGES% DOTNET_CLI_HOME=%DOTNET_CLI_HOME% PSModuleAnalysisCachePath=%PSModuleAnalysisCachePath% NUGET_HTTP_CACHE_PATH=%NUGET_HTTP_CACHE_PATH% NUGET_PLUGINS_CACHE_PATH=%NUGET_PLUGINS_CACHE_PATH% ChocolateyInstall=%ChocolateyInstall% VCPKG_ROOT=%VCPKG_ROOT% NPM_CONFIG_CACHE=%NPM_CONFIG_CACHE% YARN_CACHE_FOLDER=%YARN_CACHE_FOLDER% PIP_CACHE_DIR=%PIP_CACHE_DIR% PIP_BUILD_TRACKER=%PIP_BUILD_TRACKER% PYTHONPYCACHEPREFIX=%PYTHONPYCACHEPREFIX% PYTHONUSERBASE=%PYTHONUSERBASE% GOCACHE=%GOCACHE% GOMODCACHE=%GOMODCACHE% GOPATH=%GOPATH% HISTFILE=%HISTFILE% LESSHISTFILE=%LESSHISTFILE% NODE_REPL_HISTORY=%NODE_REPL_HISTORY% PYTHONHISTFILE=%PYTHONHISTFILE% SQLITE_HISTORY=%SQLITE_HISTORY% IPYTHONDIR=%IPYTHONDIR% GEM_HOME=%GEM_HOME% GEM_PATH=%GEM_PATH% BUNDLE_USER_HOME=%BUNDLE_USER_HOME% BUNDLE_USER_CACHE=%BUNDLE_USER_CACHE% BUNDLE_USER_CONFIG=%BUNDLE_USER_CONFIG% COMPOSER_HOME=%COMPOSER_HOME% COMPOSER_CACHE_DIR=%COMPOSER_CACHE_DIR% GRADLE_USER_HOME=%GRADLE_USER_HOME% MAVEN_USER_HOME=%MAVEN_USER_HOME%",
+            "for %v in (CARGO_HOME RUSTUP_HOME NUGET_PACKAGES DOTNET_CLI_HOME PSModuleAnalysisCachePath NUGET_HTTP_CACHE_PATH NUGET_PLUGINS_CACHE_PATH ChocolateyInstall VCPKG_ROOT NPM_CONFIG_CACHE YARN_CACHE_FOLDER PIP_CACHE_DIR PIP_BUILD_TRACKER PYTHONPYCACHEPREFIX PYTHONUSERBASE GOCACHE GOMODCACHE GOPATH HISTFILE LESSHISTFILE NODE_REPL_HISTORY PYTHONHISTFILE SQLITE_HISTORY IPYTHONDIR GEM_HOME GEM_PATH BUNDLE_USER_HOME BUNDLE_USER_CACHE BUNDLE_USER_CONFIG COMPOSER_HOME COMPOSER_CACHE_DIR GRADLE_USER_HOME MAVEN_USER_HOME AWS_SHARED_CREDENTIALS_FILE AWS_CONFIG_FILE AZURE_CONFIG_DIR KUBECONFIG DOCKER_CONFIG CLOUDSDK_CONFIG GIT_CONFIG_GLOBAL GNUPGHOME TF_CLI_CONFIG_FILE TF_DATA_DIR) do @echo %v=!%v!",
         ])
         .output()
         .expect("failed to run nono");
@@ -1030,6 +1054,16 @@ fn windows_run_filters_host_toolchain_home_vars_without_runtime_dir() {
         "composer_cache_dir=",
         "gradle_user_home=",
         "maven_user_home=",
+        "aws_shared_credentials_file=",
+        "aws_config_file=",
+        "azure_config_dir=",
+        "kubeconfig=",
+        "docker_config=",
+        "cloudsdk_config=",
+        "git_config_global=",
+        "gnupghome=",
+        "tf_cli_config_file=",
+        "tf_data_dir=",
     ] {
         assert!(
             normalized.contains(key),
