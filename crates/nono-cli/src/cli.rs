@@ -373,6 +373,9 @@ pub struct PolicyShowArgs {
     /// Show raw paths before expansion (e.g., $HOME instead of /Users/luke)
     #[arg(long)]
     pub raw: bool,
+    /// Output format: 'profile' (default) or 'manifest' (capability manifest JSON)
+    #[arg(long, value_name = "FORMAT")]
+    pub format: Option<String>,
 }
 
 #[derive(Parser, Debug)]

@@ -428,6 +428,14 @@ fn cmd_show(args: PolicyShowArgs) -> Result<()> {
     let raw_extends = profile::load_profile_extends(&args.profile);
     let profile = profile::load_profile(&args.profile)?;
 
+    if args.format.as_deref() == Some("manifest") {
+        let workdir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let manifest = resolve_to_manifest(&profile, &workdir)?;
+        let json = manifest.to_json()?;
+        println!("{json}");
+        return Ok(());
+    }
+
     if args.json {
         let val = profile_to_json(&args.profile, &profile, &raw_extends);
         println!("{}", to_json(&val)?);
@@ -1844,6 +1852,274 @@ fn cmd_validate(args: PolicyValidateArgs) -> Result<()> {
         );
         Err(NonoError::ProfileParse("validation failed".into()))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Profile → Manifest compilation
+// ---------------------------------------------------------------------------
+
+/// Compile a resolved profile into a capability manifest.
+///
+/// This produces a fully-resolved, portable manifest with absolute paths.
+/// Environment variables (`~`, `$HOME`, `$TMPDIR`, etc.) are expanded.
+fn resolve_to_manifest(
+    prof: &Profile,
+    workdir: &std::path::Path,
+) -> Result<nono::manifest::CapabilityManifest> {
+    use nono::manifest;
+
+    // Helper: expand a path template and convert to string for the manifest
+    let expand = |tmpl: &str| -> Result<String> {
+        let expanded = profile::expand_vars(tmpl, workdir)?;
+        Ok(expanded.to_string_lossy().into_owned())
+    };
+
+    // Filesystem
+    let mut grants = Vec::new();
+    let mut deny = Vec::new();
+
+    // Directory grants
+    for p in &prof.filesystem.allow {
+        grants.push(make_fs_grant(
+            &expand(p)?,
+            manifest::AccessMode::Readwrite,
+            false,
+        )?);
+    }
+    for p in &prof.filesystem.read {
+        grants.push(make_fs_grant(
+            &expand(p)?,
+            manifest::AccessMode::Read,
+            false,
+        )?);
+    }
+    for p in &prof.filesystem.write {
+        grants.push(make_fs_grant(
+            &expand(p)?,
+            manifest::AccessMode::Write,
+            false,
+        )?);
+    }
+    // File grants
+    for p in &prof.filesystem.allow_file {
+        grants.push(make_fs_grant(
+            &expand(p)?,
+            manifest::AccessMode::Readwrite,
+            true,
+        )?);
+    }
+    for p in &prof.filesystem.read_file {
+        grants.push(make_fs_grant(
+            &expand(p)?,
+            manifest::AccessMode::Read,
+            true,
+        )?);
+    }
+    for p in &prof.filesystem.write_file {
+        grants.push(make_fs_grant(
+            &expand(p)?,
+            manifest::AccessMode::Write,
+            true,
+        )?);
+    }
+    // Policy patch paths
+    for p in &prof.policy.add_allow_read {
+        grants.push(make_fs_grant(
+            &expand(p)?,
+            manifest::AccessMode::Read,
+            false,
+        )?);
+    }
+    for p in &prof.policy.add_allow_write {
+        grants.push(make_fs_grant(
+            &expand(p)?,
+            manifest::AccessMode::Write,
+            false,
+        )?);
+    }
+    for p in &prof.policy.add_allow_readwrite {
+        grants.push(make_fs_grant(
+            &expand(p)?,
+            manifest::AccessMode::Readwrite,
+            false,
+        )?);
+    }
+    // Deny paths from policy patches
+    for p in &prof.policy.add_deny_access {
+        let expanded = expand(p)?;
+        deny.push(manifest::FsDeny {
+            path: expanded
+                .parse()
+                .map_err(|e| NonoError::ConfigParse(format!("invalid deny path: {e}")))?,
+        });
+    }
+
+    let filesystem = if grants.is_empty() && deny.is_empty() {
+        None
+    } else {
+        Some(manifest::Filesystem { grants, deny })
+    };
+
+    // Network
+    let network_mode = if prof.network.block {
+        manifest::NetworkMode::Blocked
+    } else if prof.network.resolved_network_profile().is_some()
+        || !prof.network.allow_domain.is_empty()
+        || !prof.network.credentials.is_empty()
+        || !prof.network.custom_credentials.is_empty()
+    {
+        manifest::NetworkMode::Proxy
+    } else {
+        manifest::NetworkMode::Unrestricted
+    };
+
+    let network = Some(manifest::Network {
+        mode: network_mode,
+        allow_domains: prof.network.allow_domain.clone(),
+        endpoints: Vec::new(),
+        dns: true,
+        ports: if prof.network.listen_port.is_empty() && prof.network.open_port.is_empty() {
+            None
+        } else {
+            Some(manifest::PortConfig {
+                connect: Vec::new(),
+                bind: prof
+                    .network
+                    .listen_port
+                    .iter()
+                    .filter_map(|p| std::num::NonZeroU64::new(u64::from(*p)))
+                    .collect(),
+                localhost: prof
+                    .network
+                    .open_port
+                    .iter()
+                    .filter_map(|p| std::num::NonZeroU64::new(u64::from(*p)))
+                    .collect(),
+            })
+        },
+    });
+
+    // Process
+    let signal_mode = match prof.security.signal_mode {
+        Some(profile::ProfileSignalMode::Isolated) | None => manifest::SignalMode::Isolated,
+        Some(profile::ProfileSignalMode::AllowSameSandbox) => {
+            manifest::SignalMode::AllowSameSandbox
+        }
+        Some(profile::ProfileSignalMode::AllowAll) => manifest::SignalMode::AllowAll,
+    };
+    let process_info_mode = match prof.security.process_info_mode {
+        Some(profile::ProfileProcessInfoMode::Isolated) | None => {
+            manifest::ProcessInfoMode::Isolated
+        }
+        Some(profile::ProfileProcessInfoMode::AllowSameSandbox) => {
+            manifest::ProcessInfoMode::AllowSameSandbox
+        }
+        Some(profile::ProfileProcessInfoMode::AllowAll) => manifest::ProcessInfoMode::AllowAll,
+    };
+    let ipc_mode = match prof.security.ipc_mode {
+        Some(profile::ProfileIpcMode::SharedMemoryOnly) | None => {
+            manifest::IpcMode::SharedMemoryOnly
+        }
+        Some(profile::ProfileIpcMode::Full) => manifest::IpcMode::Full,
+    };
+
+    let process = Some(manifest::Process {
+        allowed_commands: prof.security.allowed_commands.clone(),
+        blocked_commands: prof.policy.add_deny_commands.clone(),
+        exec_strategy: manifest::ExecStrategy::Monitor,
+        signal_mode,
+        process_info_mode,
+        ipc_mode,
+    });
+
+    // Rollback
+    let rollback =
+        if prof.rollback.exclude_patterns.is_empty() && prof.rollback.exclude_globs.is_empty() {
+            None
+        } else {
+            Some(manifest::Rollback {
+                enabled: false,
+                exclude_patterns: prof.rollback.exclude_patterns.clone(),
+                exclude_globs: prof.rollback.exclude_globs.clone(),
+            })
+        };
+
+    // Credentials (custom_credentials from profile → manifest credentials)
+    let mut credentials = Vec::new();
+    for (name, cred) in &prof.network.custom_credentials {
+        let inject_mode = match cred.inject_mode {
+            profile::InjectMode::Header => manifest::InjectMode::Header,
+            profile::InjectMode::UrlPath => manifest::InjectMode::UrlPath,
+            profile::InjectMode::QueryParam => manifest::InjectMode::QueryParam,
+            profile::InjectMode::BasicAuth => manifest::InjectMode::BasicAuth,
+        };
+
+        let endpoint_rules: Vec<manifest::EndpointRule> = cred
+            .endpoint_rules
+            .iter()
+            .filter_map(|r| {
+                let method = r.method.parse().ok()?;
+                let path = r.path.parse().ok()?;
+                Some(manifest::EndpointRule { method, path })
+            })
+            .collect();
+
+        credentials.push(manifest::Credential {
+            name: name
+                .parse()
+                .map_err(|e| NonoError::ConfigParse(format!("invalid credential name: {e}")))?,
+            upstream: cred
+                .upstream
+                .parse()
+                .map_err(|e| NonoError::ConfigParse(format!("invalid credential upstream: {e}")))?,
+            source: cred
+                .credential_key
+                .parse()
+                .map_err(|e| NonoError::ConfigParse(format!("invalid credential source: {e}")))?,
+            inject: Some(manifest::CredentialInject {
+                mode: inject_mode,
+                header: cred.inject_header.clone(),
+                format: cred.credential_format.clone(),
+                path_pattern: cred.path_pattern.clone(),
+                path_replacement: cred.path_replacement.clone(),
+                query_param_name: cred.query_param_name.clone(),
+            }),
+            endpoint_rules,
+        });
+    }
+
+    let version = "0.1.0"
+        .parse()
+        .map_err(|e| NonoError::ConfigParse(format!("version parse error: {e}")))?;
+
+    Ok(manifest::CapabilityManifest {
+        version,
+        schema: Some("https://nono.dev/schemas/capability-manifest.schema.json".to_string()),
+        filesystem,
+        network,
+        process,
+        rollback,
+        credentials,
+    })
+}
+
+/// Helper to construct an `FsGrant` from an expanded path string.
+fn make_fs_grant(
+    path: &str,
+    access: nono::manifest::AccessMode,
+    is_file: bool,
+) -> Result<nono::manifest::FsGrant> {
+    Ok(nono::manifest::FsGrant {
+        path: path
+            .parse()
+            .map_err(|e| NonoError::ConfigParse(format!("invalid grant path: {e}")))?,
+        access,
+        type_: if is_file {
+            nono::manifest::FsEntryType::File
+        } else {
+            nono::manifest::FsEntryType::Directory
+        },
+    })
 }
 
 // ---------------------------------------------------------------------------
