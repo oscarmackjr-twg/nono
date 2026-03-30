@@ -232,8 +232,11 @@ fn normalize_path(path: &str) -> String {
     // Strip query string
     let path = path.split('?').next().unwrap_or(path);
 
-    // Percent-decode to prevent bypass via encoded segments
-    let decoded = urlencoding::decode(path).unwrap_or_else(|_| path.into());
+    // Percent-decode to prevent bypass via encoded segments.
+    // Use decode_binary + from_utf8_lossy so invalid UTF-8 sequences
+    // (e.g., %FF) become U+FFFD instead of falling back to the raw path.
+    let binary = urlencoding::decode_binary(path.as_bytes());
+    let decoded = String::from_utf8_lossy(&binary);
 
     // Collapse double slashes by splitting on '/' and filtering empties,
     // then rejoin. This also strips trailing slash.
@@ -568,6 +571,19 @@ mod tests {
         // %69ssues = "issues"
         assert!(compiled.is_allowed("GET", "/repos/myrepo/%69ssues"));
         assert!(!compiled.is_allowed("GET", "/repos/myrepo/%70ulls"));
+    }
+
+    #[test]
+    fn test_endpoint_rule_percent_encoded_invalid_utf8() {
+        // Security: invalid UTF-8 percent sequences must not fall back to
+        // the raw path (which could bypass rules). Lossy decoding replaces
+        // invalid bytes with U+FFFD, so the path won't match real segments.
+        let rule = EndpointRule {
+            method: "GET".to_string(),
+            path: "/api/projects".to_string(),
+        };
+        // %FF is not valid UTF-8 — must not match "/api/projects"
+        assert!(!check(&rule, "GET", "/api/%FFprojects"));
     }
 
     #[test]
