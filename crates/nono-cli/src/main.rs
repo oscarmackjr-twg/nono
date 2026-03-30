@@ -1847,6 +1847,19 @@ fn try_prepare_low_integrity_runtime_root(
 }
 
 #[cfg(target_os = "windows")]
+fn try_set_low_integrity_label(path: &std::path::Path) -> bool {
+    let Ok(output) = Command::new("icacls")
+        .arg(path)
+        .args(["/setintegritylevel", "(OI)(CI)L"])
+        .output()
+    else {
+        return false;
+    };
+
+    output.status.success()
+}
+
+#[cfg(target_os = "windows")]
 fn prepare_windows_runtime_env_vars(
     runtime_state_dir: Option<&std::path::Path>,
 ) -> Result<Vec<(String, String)>> {
@@ -1882,6 +1895,15 @@ fn prepare_windows_runtime_env_vars(
     };
     let layout = WindowsRuntimeLayout::new(runtime_root);
     layout.ensure_dirs()?;
+    if !Sandbox::windows_supports_direct_writable_dir(&layout.runtime_root)
+        && layout
+            .runtime_root
+            .to_string_lossy()
+            .to_ascii_lowercase()
+            .contains("\\temp\\low\\")
+    {
+        let _ = try_set_low_integrity_label(&layout.runtime_root);
+    }
 
     if !Sandbox::windows_supports_direct_writable_dir(&layout.runtime_root) {
         return Err(NonoError::SandboxInit(format!(

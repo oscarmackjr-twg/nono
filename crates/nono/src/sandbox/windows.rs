@@ -250,6 +250,25 @@ fn normalize_windows_path(path: &Path) -> PathBuf {
     normalized
 }
 
+fn windows_paths_start_with_case_insensitive(path: &Path, prefix: &Path) -> bool {
+    let mut path_components = path.components();
+    let mut prefix_components = prefix.components();
+
+    loop {
+        match (path_components.next(), prefix_components.next()) {
+            (_, None) => return true,
+            (None, Some(_)) => return false,
+            (Some(path_component), Some(prefix_component)) => {
+                let path_component = path_component.as_os_str().to_string_lossy();
+                let prefix_component = prefix_component.as_os_str().to_string_lossy();
+                if !path_component.eq_ignore_ascii_case(&prefix_component) {
+                    return false;
+                }
+            }
+        }
+    }
+}
+
 fn low_integrity_runtime_prefixes() -> Vec<PathBuf> {
     let mut prefixes = Vec::new();
     let Some(local_appdata) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) else {
@@ -264,11 +283,7 @@ fn low_integrity_runtime_prefixes() -> Vec<PathBuf> {
         prefixes.push(normalize_windows_path(&appdata_root.join("LocalLow")));
     }
 
-    prefixes.retain(|prefix| {
-        prefix.exists()
-            && low_integrity_label_rid(prefix)
-                .is_some_and(|rid| rid <= SECURITY_MANDATORY_LOW_RID as u32)
-    });
+    prefixes.retain(|prefix| prefix.exists());
     prefixes.sort();
     prefixes.dedup();
     prefixes
@@ -388,7 +403,7 @@ pub fn is_low_integrity_compatible_dir(path: &Path) -> bool {
 
     if low_integrity_runtime_prefixes()
         .into_iter()
-        .any(|prefix| normalized.starts_with(prefix))
+        .any(|prefix| windows_paths_start_with_case_insensitive(&normalized, &prefix))
     {
         return true;
     }
