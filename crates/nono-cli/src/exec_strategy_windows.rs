@@ -267,9 +267,13 @@ impl Drop for NetworkEnforcementGuard {
                 inbound_rule,
                 outbound_rule,
             } => {
-                let request =
-                    build_wfp_runtime_cleanup_request(target_program, inbound_rule, outbound_rule);
-                let _ = run_wfp_runtime_probe_with_request(probe_config, &request);
+                let _ = cleanup_wfp_service_managed_enforcement_with_runner(
+                    probe_config,
+                    target_program,
+                    inbound_rule,
+                    outbound_rule,
+                    run_wfp_runtime_probe_with_request,
+                );
             }
         }
     }
@@ -667,6 +671,31 @@ fn build_wfp_runtime_cleanup_request(
         target_program_path: Some(target_program.display().to_string()),
         outbound_rule_name: Some(outbound_rule.to_string()),
         inbound_rule_name: Some(inbound_rule.to_string()),
+    }
+}
+
+fn cleanup_wfp_service_managed_enforcement_with_runner<R>(
+    probe_config: &WfpProbeConfig,
+    target_program: &Path,
+    inbound_rule: &str,
+    outbound_rule: &str,
+    run_probe: R,
+) -> Result<()>
+where
+    R: Fn(&WfpProbeConfig, &WfpRuntimeActivationRequest) -> Result<WfpRuntimeProbeOutput>,
+{
+    let request = build_wfp_runtime_cleanup_request(target_program, inbound_rule, outbound_rule);
+    let output = run_probe(probe_config, &request)?;
+    match parse_wfp_runtime_probe_status(&output)? {
+        WfpRuntimeActivationProbeStatus::CleanupSucceeded => Ok(()),
+        WfpRuntimeActivationProbeStatus::Ready
+        | WfpRuntimeActivationProbeStatus::AcceptedButNotEnforced
+        | WfpRuntimeActivationProbeStatus::EnforcedPendingCleanup
+        | WfpRuntimeActivationProbeStatus::FilteringProbeSucceeded
+        | WfpRuntimeActivationProbeStatus::NotImplemented => Err(NonoError::SandboxInit(format!(
+            "Windows WFP cleanup returned an unexpected activation state: {:?}",
+            output.response
+        ))),
     }
 }
 
@@ -2914,6 +2943,22 @@ mod tests {
     }
 
     #[test]
+    fn test_build_wfp_runtime_cleanup_request_carries_target_and_rules() {
+        let request = build_wfp_runtime_cleanup_request(
+            Path::new(r"C:\tools\target.exe"),
+            "nono-in",
+            "nono-out",
+        );
+        assert_eq!(request.request_kind, "deactivate_blocked_mode");
+        assert_eq!(
+            request.target_program_path.as_deref(),
+            Some(r"C:\tools\target.exe")
+        );
+        assert_eq!(request.inbound_rule_name.as_deref(), Some("nono-in"));
+        assert_eq!(request.outbound_rule_name.as_deref(), Some("nono-out"));
+    }
+
+    #[test]
     fn test_parse_wfp_runtime_probe_status_reports_not_implemented() {
         let output = WfpRuntimeProbeOutput {
             status_code: Some(4),
@@ -3016,6 +3061,43 @@ mod tests {
         assert!(err
             .to_string()
             .contains("could not install its blocked-mode filtering probe"));
+    }
+
+    #[test]
+    fn test_cleanup_wfp_service_managed_enforcement_with_runner_sends_deactivate_request() {
+        let probe_config = WfpProbeConfig {
+            platform_service: WINDOWS_WFP_PLATFORM_SERVICE,
+            backend_service: WINDOWS_WFP_BACKEND_SERVICE,
+            backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
+            backend_binary_path: PathBuf::from(r"C:\tools\nono-wfp-service.exe"),
+            backend_driver_binary_path: PathBuf::from(r"C:\tools\nono-wfp-driver.sys"),
+            backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
+        };
+        let result = cleanup_wfp_service_managed_enforcement_with_runner(
+            &probe_config,
+            Path::new(r"C:\tools\target.exe"),
+            "nono-in",
+            "nono-out",
+            |_cfg, request| {
+                assert_eq!(request.request_kind, "deactivate_blocked_mode");
+                assert_eq!(
+                    request.target_program_path.as_deref(),
+                    Some(r"C:\tools\target.exe")
+                );
+                assert_eq!(request.inbound_rule_name.as_deref(), Some("nono-in"));
+                assert_eq!(request.outbound_rule_name.as_deref(), Some("nono-out"));
+                Ok(WfpRuntimeProbeOutput {
+                    status_code: Some(0),
+                    response: WfpRuntimeActivationResponse {
+                        protocol_version: WFP_RUNTIME_PROTOCOL_VERSION,
+                        status: "cleanup-succeeded".to_string(),
+                        details: "ok".to_string(),
+                    },
+                    stderr: String::new(),
+                })
+            },
+        );
+        assert!(result.is_ok());
     }
 
     #[test]

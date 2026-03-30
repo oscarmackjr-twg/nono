@@ -129,6 +129,17 @@ fn build_cleanup_failed_response(
     }
 }
 
+fn annotate_fallback_details(
+    mut response: WfpRuntimeActivationResponse,
+    fallback_reason: &str,
+) -> WfpRuntimeActivationResponse {
+    response.details = format!(
+        "attempted WFP backend path first but {}. Fallback result: {}",
+        fallback_reason, response.details
+    );
+    response
+}
+
 fn build_filtering_probe_failed_response(
     request: &WfpRuntimeActivationRequest,
     details: String,
@@ -181,6 +192,16 @@ fn validate_target_request_fields(
         })
     })?;
     Ok((target_program, outbound_rule, inbound_rule))
+}
+
+fn attempt_true_wfp_blocked_mode_activation(
+    request: &WfpRuntimeActivationRequest,
+) -> Result<WfpRuntimeActivationResponse, String> {
+    let _ = request;
+    Err(
+        "no true Windows Filtering Platform installation primitive is available in this build"
+            .to_string(),
+    )
 }
 
 fn build_target_firewall_add_args(
@@ -361,7 +382,13 @@ fn activate_blocked_mode(request: &WfpRuntimeActivationRequest) -> WfpRuntimeAct
             driver_binary_path.display()
         ));
     }
-    activate_target_attached_blocked_mode_with_runner(request, run_netsh_command)
+    match attempt_true_wfp_blocked_mode_activation(request) {
+        Ok(response) => response,
+        Err(reason) => annotate_fallback_details(
+            activate_target_attached_blocked_mode_with_runner(request, run_netsh_command),
+            &reason,
+        ),
+    }
 }
 
 fn probe_runtime_activation() -> ExitCode {
@@ -566,5 +593,28 @@ mod tests {
         });
         assert_eq!(response.status, "filtering-probe-failed");
         assert!(response.details.contains("access denied"));
+    }
+
+    #[test]
+    fn fallback_annotation_mentions_wfp_path_first() {
+        let request = WfpRuntimeActivationRequest {
+            protocol_version: WFP_RUNTIME_PROTOCOL_VERSION,
+            request_kind: "activate_blocked_mode".to_string(),
+            network_mode: "blocked".to_string(),
+            preferred_backend: "windows-filtering-platform".to_string(),
+            active_backend: "none".to_string(),
+            runtime_target: "blocked Windows network access".to_string(),
+            target_program_path: Some(r"C:\tools\target.exe".to_string()),
+            outbound_rule_name: Some("nono-test-out".to_string()),
+            inbound_rule_name: Some("nono-test-in".to_string()),
+        };
+        let response = annotate_fallback_details(
+            build_enforced_pending_cleanup_response(&request, "ok".to_string()),
+            "wfp primitive unavailable",
+        );
+        assert!(response
+            .details
+            .contains("attempted WFP backend path first"));
+        assert!(response.details.contains("wfp primitive unavailable"));
     }
 }

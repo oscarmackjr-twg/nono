@@ -138,7 +138,9 @@ That service-owned blocked-mode workflow now:
 
 Today, `activate_blocked_mode` installs target-attached firewall deny rules through the service host and returns `enforced-pending-cleanup` when that install succeeds. That means the activation decision and the first real OS filtering action now live inside the service host. The runtime still fails closed because this path is not yet backed by real WFP filtering or durable target attachment beyond the current service-managed firewall-rule slice. Unsupported request kinds are rejected explicitly, and missing local prerequisites return a distinct fail-closed state.
 
-The next backend-owned step is now partially in place: `activate_blocked_mode` attempts a transient firewall deny-rule probe inside `nono-wfp-service` itself. That gives the service a real OS filtering attempt to execute and verify. The runtime still fails closed because that probe is not attached to the target process and does not provide real WFP enforcement, but the activation path no longer stops at pure validation.
+The next backend-owned step is now more complete: `activate_blocked_mode` first attempts a true WFP backend path inside `nono-wfp-service`. Because the real WFP installation primitive is still unavailable in this build, the service explicitly falls back to a service-managed firewall-rule path under the same activation contract.
+
+That fallback now installs target-attached firewall deny rules for the actual blocked-mode executable and keeps cleanup under service ownership through a matching `deactivate_blocked_mode` request. The runtime still fails closed because this is not real WFP enforcement, but the activation path now uses the actual target path rather than only a service-local probe.
 
 The first real probing layer is now in place for that scaffold:
 
