@@ -51,6 +51,7 @@ use colored::Colorize;
 use nono::{AccessMode, CapabilitySet, FsCapability, NonoError, Result, Sandbox};
 use profile::WorkdirAccess;
 use std::ffi::OsString;
+use std::process::Command;
 use std::sync::Mutex;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -1649,6 +1650,39 @@ fn windows_runtime_state_dir(
 }
 
 #[cfg(target_os = "windows")]
+fn try_prepare_low_integrity_runtime_root(
+    runtime_state_dir: &std::path::Path,
+) -> Result<Option<std::path::PathBuf>> {
+    let managed_root = runtime_state_dir.join(".nono-runtime-low");
+    std::fs::create_dir_all(&managed_root).map_err(|e| {
+        NonoError::SandboxInit(format!(
+            "Failed to prepare Windows managed runtime root {}: {}",
+            managed_root.display(),
+            e
+        ))
+    })?;
+
+    let output = Command::new("icacls")
+        .arg(&managed_root)
+        .args(["/setintegritylevel", "(OI)(CI)L"])
+        .output();
+
+    let Ok(output) = output else {
+        return Ok(None);
+    };
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    if Sandbox::windows_supports_direct_writable_dir(&managed_root) {
+        Ok(Some(managed_root))
+    } else {
+        Ok(None)
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn prepare_windows_runtime_env_vars(
     runtime_state_dir: Option<&std::path::Path>,
 ) -> Result<Vec<(String, String)>> {
@@ -1695,6 +1729,8 @@ fn prepare_windows_runtime_env_vars(
 
     let runtime_root = if Sandbox::windows_supports_direct_writable_dir(runtime_state_dir) {
         runtime_state_dir.join(".nono-runtime")
+    } else if let Some(managed_root) = try_prepare_low_integrity_runtime_root(runtime_state_dir)? {
+        managed_root
     } else {
         std::env::var_os("LOCALAPPDATA")
             .map(std::path::PathBuf::from)

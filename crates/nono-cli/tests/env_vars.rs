@@ -55,6 +55,11 @@ fn expected_windows_runtime_root(seed_dir: &std::path::Path) -> std::path::PathB
             .is_some_and(|prefix| seed_dir.starts_with(prefix))
     {
         seed_dir.join(".nono-runtime")
+    } else if {
+        let managed_root = seed_dir.join(".nono-runtime-low");
+        managed_root.exists() && nono::Sandbox::windows_supports_direct_writable_dir(&managed_root)
+    } {
+        seed_dir.join(".nono-runtime-low")
     } else {
         low_root
             .unwrap_or_else(|| seed_dir.join(".nono-runtime-low"))
@@ -563,6 +568,63 @@ fn windows_run_redirects_temp_vars_into_writable_allowlist() {
             || normalized.contains(&format!("temp={}/", tmp_root_lower))
             || normalized.contains(&format!("temp={}", tmp_root_lower)),
         "expected TEMP inside writable allowlist, got:\n{text}"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_run_prefers_managed_low_integrity_runtime_root_inside_allowlist() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let probe = dir.path().join("label-probe");
+    std::fs::create_dir_all(&probe).expect("mkdir probe");
+    if !try_set_low_integrity_label(&probe) {
+        return;
+    }
+
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+    let allowed = dir.path().to_string_lossy().into_owned();
+    let workdir = workspace.to_string_lossy().into_owned();
+
+    let output = nono_bin()
+        .args([
+            "run",
+            "--allow",
+            &allowed,
+            "--workdir",
+            &workdir,
+            "--",
+            "cmd",
+            "/c",
+            "echo redirected>%TMP%\\managed-root.txt",
+        ])
+        .output()
+        .expect("failed to run nono");
+
+    let text = combined_output(&output);
+    assert!(
+        output.status.success(),
+        "Windows preview should allow writes into a managed low-integrity runtime root inside the allowlist, output:\n{text}"
+    );
+
+    let runtime_root = workspace.join(".nono-runtime-low");
+    assert!(
+        nono::Sandbox::windows_supports_direct_writable_dir(&runtime_root),
+        "expected managed runtime root {} to be low-integrity-compatible",
+        runtime_root.display()
+    );
+
+    let probe_file = runtime_root.join("tmp").join("managed-root.txt");
+    assert!(
+        probe_file.exists(),
+        "expected runtime-owned write at {}",
+        probe_file.display()
+    );
+    assert_eq!(
+        std::fs::read_to_string(&probe_file)
+            .expect("read managed runtime root probe")
+            .trim(),
+        "redirected"
     );
 }
 
