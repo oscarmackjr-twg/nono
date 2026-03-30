@@ -17,6 +17,29 @@ fn combined_output(output: &std::process::Output) -> String {
 }
 
 #[cfg(target_os = "windows")]
+fn try_set_low_integrity_label(path: &std::path::Path) -> bool {
+    let Ok(output) = Command::new("icacls")
+        .arg(path)
+        .args(["/setintegritylevel", "(OI)(CI)L"])
+        .output()
+    else {
+        eprintln!("skipping low-integrity label integration test because icacls is unavailable");
+        return false;
+    };
+
+    if output.status.success() {
+        true
+    } else {
+        eprintln!(
+            "skipping low-integrity label integration test because icacls failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        false
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn expected_windows_runtime_root(seed_dir: &std::path::Path) -> std::path::PathBuf {
     let low_root = std::env::var_os("LOCALAPPDATA")
         .map(std::path::PathBuf::from)
@@ -1005,6 +1028,53 @@ fn windows_run_allows_direct_write_inside_locallow_allowlisted_dir() {
 
     let _ = std::fs::remove_file(&probe);
     let _ = std::fs::remove_dir_all(&workspace);
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_run_allows_direct_write_inside_dynamically_labeled_low_integrity_dir() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let workspace = dir.path().join("dynamically-labeled-low");
+    std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+    if !try_set_low_integrity_label(&workspace) {
+        return;
+    }
+
+    let allowed = workspace.to_string_lossy().into_owned();
+    let workdir = workspace.to_string_lossy().into_owned();
+
+    let output = nono_bin()
+        .args([
+            "run",
+            "--allow",
+            &allowed,
+            "--workdir",
+            &workdir,
+            "--",
+            "cmd",
+            "/c",
+            "echo dynamic> dynamic-write.txt",
+        ])
+        .output()
+        .expect("failed to run nono");
+
+    let text = combined_output(&output);
+    assert!(
+        output.status.success(),
+        "Windows preview should allow direct writes inside dynamically low-integrity-labeled dirs, output:\n{text}"
+    );
+    let probe = workspace.join("dynamic-write.txt");
+    assert!(
+        probe.exists(),
+        "expected direct write at {}",
+        probe.display()
+    );
+    assert_eq!(
+        std::fs::read_to_string(&probe)
+            .expect("read direct write")
+            .trim(),
+        "dynamic"
+    );
 }
 
 #[cfg(target_os = "windows")]

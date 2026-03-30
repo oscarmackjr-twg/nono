@@ -10,7 +10,17 @@ use crate::sandbox::{
     WindowsFilesystemRule, WindowsPreviewContext, WindowsPreviewEntryPoint,
     WindowsUnsupportedIssue, WindowsUnsupportedIssueKind,
 };
+use std::os::windows::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
+use windows_sys::Win32::Foundation::LocalFree;
+use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
+use windows_sys::Win32::Security::{
+    GetAce, GetSidSubAuthority, GetSidSubAuthorityCount, ACE_HEADER, ACL,
+    LABEL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SYSTEM_MANDATORY_LABEL_ACE,
+};
+use windows_sys::Win32::System::SystemServices::{
+    SECURITY_MANDATORY_LOW_RID, SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+};
 
 const WINDOWS_PREVIEW_SUPPORTED: bool = false;
 const WINDOWS_PREVIEW_DETAILS: &str =
@@ -185,16 +195,129 @@ fn low_integrity_runtime_prefixes() -> Vec<PathBuf> {
     prefixes
 }
 
+struct OwnedSecurityDescriptor(PSECURITY_DESCRIPTOR);
+
+impl Drop for OwnedSecurityDescriptor {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                // SAFETY: The security descriptor was allocated by
+                // GetNamedSecurityInfoW and must be released with LocalFree.
+                let _ = LocalFree(self.0 as _);
+            }
+        }
+    }
+}
+
+fn low_integrity_label_rid(path: &Path) -> Option<u32> {
+    let wide_path: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut sacl: *mut ACL = std::ptr::null_mut();
+    let mut security_descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+
+    let status = unsafe {
+        // SAFETY: `wide_path` is a valid nul-terminated UTF-16 buffer, and
+        // the output pointers refer to live local storage for the duration of
+        // the call.
+        GetNamedSecurityInfoW(
+            wide_path.as_ptr(),
+            SE_FILE_OBJECT,
+            LABEL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut sacl,
+            &mut security_descriptor,
+        )
+    };
+    if status != 0 {
+        return None;
+    }
+    let _security_descriptor = OwnedSecurityDescriptor(security_descriptor);
+
+    if sacl.is_null() {
+        return None;
+    }
+
+    let ace_count = unsafe {
+        // SAFETY: `sacl` is populated by GetNamedSecurityInfoW on success.
+        (*sacl).AceCount
+    };
+
+    for index in 0..ace_count {
+        let mut ace = std::ptr::null_mut();
+        let ok = unsafe {
+            // SAFETY: `sacl` is a valid ACL pointer and `ace` is a valid
+            // out-pointer for the duration of the call.
+            GetAce(sacl, u32::from(index), &mut ace)
+        };
+        if ok == 0 || ace.is_null() {
+            continue;
+        }
+
+        let header = unsafe {
+            // SAFETY: `ace` points to a valid ACE entry returned by GetAce.
+            &*(ace as *const ACE_HEADER)
+        };
+        if u32::from(header.AceType) != SYSTEM_MANDATORY_LABEL_ACE_TYPE {
+            continue;
+        }
+
+        let label_ace = unsafe {
+            // SAFETY: We already checked the ACE type and can interpret the
+            // returned bytes as a SYSTEM_MANDATORY_LABEL_ACE.
+            &*(ace as *const SYSTEM_MANDATORY_LABEL_ACE)
+        };
+        let sid = (&label_ace.SidStart as *const u32).cast_mut().cast();
+        let subauthority_count = unsafe {
+            // SAFETY: `sid` points to the SID embedded in the label ACE.
+            GetSidSubAuthorityCount(sid)
+        };
+        if subauthority_count.is_null() {
+            continue;
+        }
+        let subauthority_count = unsafe { *subauthority_count };
+        if subauthority_count == 0 {
+            continue;
+        }
+
+        let rid = unsafe {
+            // SAFETY: The SID has at least one subauthority, so the final RID
+            // pointer is valid for the lifetime of the ACE buffer.
+            GetSidSubAuthority(sid, u32::from(subauthority_count) - 1)
+        };
+        if rid.is_null() {
+            continue;
+        }
+
+        return Some(unsafe { *rid });
+    }
+
+    None
+}
+
 #[must_use]
 pub fn is_low_integrity_compatible_dir(path: &Path) -> bool {
-    let normalized = path
-        .canonicalize()
-        .map(|path| normalize_windows_path(&path))
-        .unwrap_or_else(|_| normalize_windows_path(path));
+    let canonical = path.canonicalize().ok();
+    let normalized = canonical
+        .as_ref()
+        .map(|path| normalize_windows_path(path))
+        .unwrap_or_else(|| normalize_windows_path(path));
 
-    low_integrity_runtime_prefixes()
+    if low_integrity_runtime_prefixes()
         .into_iter()
         .any(|prefix| normalized.starts_with(prefix))
+    {
+        return true;
+    }
+
+    canonical
+        .as_deref()
+        .and_then(low_integrity_label_rid)
+        .is_some_and(|rid| rid <= SECURITY_MANDATORY_LOW_RID as u32)
 }
 
 #[must_use]
@@ -948,7 +1071,30 @@ pub fn runtime_state_dir(policy: &WindowsFilesystemPolicy, current_dir: &Path) -
 mod tests {
     use super::*;
     use crate::{AccessMode, CapabilitySet, CapabilitySource, FsCapability, NetworkMode};
+    use std::process::Command;
     use tempfile::tempdir;
+
+    fn try_set_low_integrity_label(path: &Path) -> bool {
+        let Ok(output) = Command::new("icacls")
+            .arg(path)
+            .args(["/setintegritylevel", "(OI)(CI)L"])
+            .output()
+        else {
+            eprintln!("skipping low-integrity label test because icacls is unavailable");
+            return false;
+        };
+
+        if output.status.success() {
+            true
+        } else {
+            eprintln!(
+                "skipping low-integrity label test because icacls failed: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            false
+        }
+    }
 
     #[test]
     fn preview_scaffold_reports_consistent_unsupported_status() {
@@ -1218,6 +1364,18 @@ mod tests {
     fn low_integrity_compatible_dir_rejects_normal_tempdir() {
         let dir = tempdir().expect("tempdir");
         assert!(!is_low_integrity_compatible_dir(dir.path()));
+    }
+
+    #[test]
+    fn low_integrity_compatible_dir_matches_dynamically_labeled_directory() {
+        let dir = tempdir().expect("tempdir");
+        let labeled = dir.path().join("labeled-low");
+        std::fs::create_dir_all(&labeled).expect("mkdir");
+        if !try_set_low_integrity_label(&labeled) {
+            return;
+        }
+
+        assert!(is_low_integrity_compatible_dir(&labeled));
     }
 
     #[test]

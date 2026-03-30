@@ -488,8 +488,9 @@ impl Sandbox {
 
     /// Return whether a Windows directory is directly writable by the current
     /// low-integrity restricted-launch path without mutating the directory's
-    /// label. This is currently limited to known low-integrity-compatible
-    /// roots such as `%LOCALAPPDATA%\\Temp\\Low`.
+    /// label. This includes known low-integrity-compatible roots such as
+    /// `%LOCALAPPDATA%\\Temp\\Low` plus directories that already carry a
+    /// compatible low-integrity label.
     #[cfg(target_os = "windows")]
     #[must_use]
     pub fn windows_supports_direct_writable_dir(path: &Path) -> bool {
