@@ -103,7 +103,8 @@ pub enum Commands {
   nono setup --install-wfp-service             # Register the Windows WFP placeholder service
   nono setup --install-wfp-driver              # Register the Windows WFP placeholder driver
   nono setup --start-wfp-service               # Attempt to start the registered WFP placeholder service
-  nono setup --install-wfp-service --install-wfp-driver --start-wfp-service  # Register the placeholder components, then try to start the service
+  nono setup --start-wfp-driver                # Attempt to start the registered WFP placeholder driver
+  nono setup --install-wfp-service --install-wfp-driver --start-wfp-driver --start-wfp-service  # Register the placeholder components, then try to start them
   nono setup --profiles --shell-integration    # Setup with shell integration help
   nono setup -v --profiles                     # Verbose setup
 ")]
@@ -986,6 +987,10 @@ pub struct SetupArgs {
     /// Attempt to start the registered Windows WFP service placeholder
     #[arg(long, help_heading = "OPTIONS")]
     pub start_wfp_service: bool,
+
+    /// Attempt to start the registered Windows WFP placeholder driver
+    #[arg(long, help_heading = "OPTIONS")]
+    pub start_wfp_driver: bool,
 
     /// Generate example user profiles in ~/.config/nono/profiles/
     #[arg(long, help_heading = "OPTIONS")]

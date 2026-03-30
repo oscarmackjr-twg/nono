@@ -140,6 +140,12 @@ The first real probing layer is now in place for that scaffold:
   - registers `nono-wfp-driver` with `sc create ... type= kernel`
   - writes a placeholder driver description
   - does **not** auto-start the driver, because this branch still does not ship a working WFP driver
+- `nono setup --start-wfp-driver` now performs the first explicit driver startup attempt flow:
+  - verifies the driver is registered
+  - verifies `BFE` is running
+  - attempts `sc start nono-wfp-driver`
+  - reports `already running`, `running`, or a fail-closed startup error
+  - keeps the current placeholder-driver behavior explicit when startup does not stay in `RUNNING`
 - `nono setup --start-wfp-service` now performs the first explicit startup attempt flow:
   - verifies the service is registered
   - verifies `BFE` is running
