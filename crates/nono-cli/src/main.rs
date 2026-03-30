@@ -1721,8 +1721,10 @@ impl WindowsRuntimeLayout {
         insert_dir("chocolatey", &["chocolatey"]);
         insert_dir("vcpkg", &["vcpkg"]);
         insert_dir("npm_cache", &["npm-cache"]);
+        insert_dir("npm", &["npm"]);
         insert_dir("yarn_cache", &["yarn-cache"]);
         insert_dir("pip_cache", &["pip-cache"]);
+        insert_dir("pip_config", &["pip-config"]);
         insert_dir("pip_build_tracker", &["pip-build-tracker"]);
         insert_dir("python_pycache", &["python-pycache"]);
         insert_dir("python_user_base", &["python-user-base"]);
@@ -1749,7 +1751,10 @@ impl WindowsRuntimeLayout {
         insert_dir("git", &["git"]);
         insert_dir("gnupg", &["gnupg"]);
         insert_dir("xdg_config", &["xdg", "config"]);
+        insert_dir("xdg_cache", &["xdg", "cache"]);
         insert_dir("xdg_data", &["xdg", "data"]);
+        insert_dir("xdg_state", &["xdg", "state"]);
+        insert_dir("ripgrep", &["ripgrep"]);
 
         Self { runtime_root, dirs }
     }
@@ -1943,7 +1948,9 @@ fn prepare_windows_runtime_env_vars(
         ("APPDATA", "appdata_roaming"),
         ("LOCALAPPDATA", "appdata_local"),
         ("XDG_CONFIG_HOME", "xdg_config"),
+        ("XDG_CACHE_HOME", "xdg_cache"),
         ("XDG_DATA_HOME", "xdg_data"),
+        ("XDG_STATE_HOME", "xdg_state"),
         ("PROGRAMDATA", "programdata"),
         ("ALLUSERSPROFILE", "programdata"),
         ("PUBLIC", "public"),
@@ -1984,6 +1991,7 @@ fn prepare_windows_runtime_env_vars(
         ("BUNDLE_USER_HOME", "bundler_home"),
         ("BUNDLE_USER_CACHE", "bundler_cache"),
         ("BUNDLE_USER_CONFIG", "bundler_config"),
+        ("BUNDLE_APP_CONFIG", "bundler_config"),
         ("COMPOSER_HOME", "composer_home"),
         ("COMPOSER_CACHE_DIR", "composer_cache"),
         ("GRADLE_USER_HOME", "gradle_home"),
@@ -2020,6 +2028,9 @@ fn prepare_windows_runtime_env_vars(
         ("AWS_CONFIG_FILE", layout.file("aws", "config")),
         ("KUBECONFIG", layout.file("kube", "config")),
         ("GIT_CONFIG_GLOBAL", layout.file("git", "config")),
+        ("NPM_CONFIG_USERCONFIG", layout.file("npm", "npmrc")),
+        ("PIP_CONFIG_FILE", layout.file("pip_config", "pip.ini")),
+        ("RIPGREP_CONFIG_PATH", layout.file("ripgrep", "ripgreprc")),
         (
             "TF_CLI_CONFIG_FILE",
             layout.file("terraform", "terraform.rc"),

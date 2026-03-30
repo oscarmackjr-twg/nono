@@ -884,7 +884,9 @@ fn windows_run_redirects_profile_state_vars_into_writable_allowlist() {
         "home=",
         "userprofile=",
         "xdg_config_home=",
+        "xdg_cache_home=",
         "xdg_data_home=",
+        "xdg_state_home=",
         "programdata=",
         "allusersprofile=",
         "public=",
@@ -910,8 +912,10 @@ fn windows_run_redirects_profile_state_vars_into_writable_allowlist() {
         "chocolateytoolslocation=",
         "vcpkg_root=",
         "npm_config_cache=",
+        "npm_config_userconfig=",
         "yarn_cache_folder=",
         "pip_cache_dir=",
+        "pip_config_file=",
         "pip_build_tracker=",
         "pythonpycacheprefix=",
         "pythonuserbase=",
@@ -929,10 +933,12 @@ fn windows_run_redirects_profile_state_vars_into_writable_allowlist() {
         "bundle_user_home=",
         "bundle_user_cache=",
         "bundle_user_config=",
+        "bundle_app_config=",
         "composer_home=",
         "composer_cache_dir=",
         "gradle_user_home=",
         "maven_user_home=",
+        "ripgrep_config_path=",
         "aws_shared_credentials_file=",
         "aws_config_file=",
         "azure_config_dir=",
@@ -965,13 +971,17 @@ fn windows_run_filters_host_toolchain_home_vars_without_runtime_dir() {
             "PSModuleAnalysisCachePath",
             r"C:\host-psmodule-analysis\cache",
         )
+        .env("XDG_CACHE_HOME", r"C:\host-xdg\cache")
+        .env("XDG_STATE_HOME", r"C:\host-xdg\state")
         .env("ChocolateyInstall", r"C:\ProgramData\chocolatey")
         .env("VCPKG_ROOT", r"C:\vcpkg")
         .env("NUGET_HTTP_CACHE_PATH", r"C:\host-nuget-http")
         .env("NUGET_PLUGINS_CACHE_PATH", r"C:\host-nuget-plugins")
         .env("NPM_CONFIG_CACHE", r"C:\host-npm")
+        .env("NPM_CONFIG_USERCONFIG", r"C:\host-npm\npmrc")
         .env("YARN_CACHE_FOLDER", r"C:\host-yarn")
         .env("PIP_CACHE_DIR", r"C:\host-pip")
+        .env("PIP_CONFIG_FILE", r"C:\host-pip\pip.ini")
         .env("PIP_BUILD_TRACKER", r"C:\host-pip-build-tracker")
         .env("PYTHONPYCACHEPREFIX", r"C:\host-python-pycache")
         .env("PYTHONUSERBASE", r"C:\host-python-userbase")
@@ -989,10 +999,12 @@ fn windows_run_filters_host_toolchain_home_vars_without_runtime_dir() {
         .env("BUNDLE_USER_HOME", r"C:\host-bundler\home")
         .env("BUNDLE_USER_CACHE", r"C:\host-bundler\cache")
         .env("BUNDLE_USER_CONFIG", r"C:\host-bundler\config")
+        .env("BUNDLE_APP_CONFIG", r"C:\host-bundler\app-config")
         .env("COMPOSER_HOME", r"C:\host-composer\home")
         .env("COMPOSER_CACHE_DIR", r"C:\host-composer\cache")
         .env("GRADLE_USER_HOME", r"C:\host-gradle")
         .env("MAVEN_USER_HOME", r"C:\host-maven")
+        .env("RIPGREP_CONFIG_PATH", r"C:\host-ripgrep\ripgreprc")
         .env("AWS_SHARED_CREDENTIALS_FILE", r"C:\host-aws\credentials")
         .env("AWS_CONFIG_FILE", r"C:\host-aws\config")
         .env("AZURE_CONFIG_DIR", r"C:\host-azure")
@@ -1009,7 +1021,7 @@ fn windows_run_filters_host_toolchain_home_vars_without_runtime_dir() {
             "cmd",
             "/v:on",
             "/c",
-            "for %v in (CARGO_HOME RUSTUP_HOME NUGET_PACKAGES DOTNET_CLI_HOME PSModuleAnalysisCachePath NUGET_HTTP_CACHE_PATH NUGET_PLUGINS_CACHE_PATH ChocolateyInstall VCPKG_ROOT NPM_CONFIG_CACHE YARN_CACHE_FOLDER PIP_CACHE_DIR PIP_BUILD_TRACKER PYTHONPYCACHEPREFIX PYTHONUSERBASE GOCACHE GOMODCACHE GOPATH HISTFILE LESSHISTFILE NODE_REPL_HISTORY PYTHONHISTFILE SQLITE_HISTORY IPYTHONDIR GEM_HOME GEM_PATH BUNDLE_USER_HOME BUNDLE_USER_CACHE BUNDLE_USER_CONFIG COMPOSER_HOME COMPOSER_CACHE_DIR GRADLE_USER_HOME MAVEN_USER_HOME AWS_SHARED_CREDENTIALS_FILE AWS_CONFIG_FILE AZURE_CONFIG_DIR KUBECONFIG DOCKER_CONFIG CLOUDSDK_CONFIG GIT_CONFIG_GLOBAL GNUPGHOME TF_CLI_CONFIG_FILE TF_DATA_DIR) do @echo %v=!%v!",
+            "for %v in (CARGO_HOME RUSTUP_HOME NUGET_PACKAGES DOTNET_CLI_HOME PSModuleAnalysisCachePath XDG_CACHE_HOME XDG_STATE_HOME NUGET_HTTP_CACHE_PATH NUGET_PLUGINS_CACHE_PATH ChocolateyInstall VCPKG_ROOT NPM_CONFIG_CACHE NPM_CONFIG_USERCONFIG YARN_CACHE_FOLDER PIP_CACHE_DIR PIP_CONFIG_FILE PIP_BUILD_TRACKER PYTHONPYCACHEPREFIX PYTHONUSERBASE GOCACHE GOMODCACHE GOPATH HISTFILE LESSHISTFILE NODE_REPL_HISTORY PYTHONHISTFILE SQLITE_HISTORY IPYTHONDIR GEM_HOME GEM_PATH BUNDLE_USER_HOME BUNDLE_USER_CACHE BUNDLE_USER_CONFIG BUNDLE_APP_CONFIG COMPOSER_HOME COMPOSER_CACHE_DIR GRADLE_USER_HOME MAVEN_USER_HOME RIPGREP_CONFIG_PATH AWS_SHARED_CREDENTIALS_FILE AWS_CONFIG_FILE AZURE_CONFIG_DIR KUBECONFIG DOCKER_CONFIG CLOUDSDK_CONFIG GIT_CONFIG_GLOBAL GNUPGHOME TF_CLI_CONFIG_FILE TF_DATA_DIR) do @echo %v=!%v!",
         ])
         .output()
         .expect("failed to run nono");
@@ -1026,13 +1038,17 @@ fn windows_run_filters_host_toolchain_home_vars_without_runtime_dir() {
         "nuget_packages=",
         "dotnet_cli_home=",
         "psmoduleanalysiscachepath=",
+        "xdg_cache_home=",
+        "xdg_state_home=",
         "nuget_http_cache_path=",
         "nuget_plugins_cache_path=",
         "chocolateyinstall=",
         "vcpkg_root=",
         "npm_config_cache=",
+        "npm_config_userconfig=",
         "yarn_cache_folder=",
         "pip_cache_dir=",
+        "pip_config_file=",
         "pip_build_tracker=",
         "pythonpycacheprefix=",
         "pythonuserbase=",
@@ -1050,10 +1066,12 @@ fn windows_run_filters_host_toolchain_home_vars_without_runtime_dir() {
         "bundle_user_home=",
         "bundle_user_cache=",
         "bundle_user_config=",
+        "bundle_app_config=",
         "composer_home=",
         "composer_cache_dir=",
         "gradle_user_home=",
         "maven_user_home=",
+        "ripgrep_config_path=",
         "aws_shared_credentials_file=",
         "aws_config_file=",
         "azure_config_dir=",
