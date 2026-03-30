@@ -138,6 +138,10 @@ struct WfpProbeConfig {
 pub(crate) struct WindowsWfpReadinessReport {
     pub status_label: &'static str,
     pub details: String,
+    pub service_status_label: &'static str,
+    pub service_details: String,
+    pub driver_status_label: &'static str,
+    pub driver_details: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -583,6 +587,143 @@ fn describe_wfp_probe_status_for_setup(config: &WfpProbeConfig, status: WfpProbe
     }
 }
 
+fn describe_wfp_service_status_for_setup(
+    config: &WfpProbeConfig,
+    status: WfpProbeStatus,
+) -> (&'static str, String) {
+    let service_command = format_wfp_service_command(config);
+    match status {
+        WfpProbeStatus::Ready => (
+            "ready",
+            format!(
+                "WFP backend service {} is present and running. Expected startup command: {}.",
+                config.backend_service, service_command
+            ),
+        ),
+        WfpProbeStatus::BackendBinaryMissing => (
+            "missing binary",
+            format!(
+                "WFP backend service binary is missing: {}. Expected service registration name: {}. Expected startup command: {}.",
+                config.backend_binary_path.display(),
+                config.backend_service,
+                service_command
+            ),
+        ),
+        WfpProbeStatus::PlatformServiceMissing => (
+            "blocked by bfe",
+            format!(
+                "WFP backend service readiness is blocked because the Base Filtering Engine service ({}) is missing or could not be queried.",
+                config.platform_service
+            ),
+        ),
+        WfpProbeStatus::PlatformServiceStopped => (
+            "blocked by bfe",
+            format!(
+                "WFP backend service readiness is blocked because the Base Filtering Engine service ({}) is not running.",
+                config.platform_service
+            ),
+        ),
+        WfpProbeStatus::BackendServiceMissing => (
+            "not registered",
+            format!(
+                "WFP backend service is not registered: {}. Register it to launch {} with: {}.",
+                config.backend_service, config.backend_service, service_command
+            ),
+        ),
+        WfpProbeStatus::BackendServiceStopped => (
+            "stopped",
+            format!(
+                "WFP backend service is registered but not running: {}. Its expected startup command remains: {}.",
+                config.backend_service, service_command
+            ),
+        ),
+        WfpProbeStatus::BackendDriverBinaryMissing
+        | WfpProbeStatus::BackendDriverMissing
+        | WfpProbeStatus::BackendDriverStopped => (
+            "ready",
+            format!(
+                "WFP backend service {} is present and running. Expected startup command: {}.",
+                config.backend_service, service_command
+            ),
+        ),
+    }
+}
+
+fn describe_wfp_driver_status_for_setup(
+    config: &WfpProbeConfig,
+    status: WfpProbeStatus,
+) -> (&'static str, String) {
+    match status {
+        WfpProbeStatus::Ready => (
+            "ready",
+            format!(
+                "WFP backend driver {} is present and running from binary {}.",
+                config.backend_driver,
+                config.backend_driver_binary_path.display()
+            ),
+        ),
+        WfpProbeStatus::BackendBinaryMissing => (
+            "blocked by service",
+            format!(
+                "WFP backend driver readiness is blocked until the service binary {} is available.",
+                config.backend_binary_path.display()
+            ),
+        ),
+        WfpProbeStatus::PlatformServiceMissing => (
+            "blocked by bfe",
+            format!(
+                "WFP backend driver readiness is blocked because the Base Filtering Engine service ({}) is missing or could not be queried.",
+                config.platform_service
+            ),
+        ),
+        WfpProbeStatus::PlatformServiceStopped => (
+            "blocked by bfe",
+            format!(
+                "WFP backend driver readiness is blocked because the Base Filtering Engine service ({}) is not running.",
+                config.platform_service
+            ),
+        ),
+        WfpProbeStatus::BackendServiceMissing => (
+            "blocked by service",
+            format!(
+                "WFP backend driver readiness is blocked until the service {} is registered.",
+                config.backend_service
+            ),
+        ),
+        WfpProbeStatus::BackendServiceStopped => (
+            "blocked by service",
+            format!(
+                "WFP backend driver readiness is blocked until the service {} is running.",
+                config.backend_service
+            ),
+        ),
+        WfpProbeStatus::BackendDriverBinaryMissing => (
+            "missing binary",
+            format!(
+                "WFP backend driver binary is missing: {}. Expected driver registration name: {}.",
+                config.backend_driver_binary_path.display(),
+                config.backend_driver
+            ),
+        ),
+        WfpProbeStatus::BackendDriverMissing => (
+            "not registered",
+            format!(
+                "WFP backend driver is not registered: {}. Expected driver binary: {}.",
+                config.backend_driver,
+                config.backend_driver_binary_path.display()
+            ),
+        ),
+        WfpProbeStatus::BackendDriverStopped => (
+            "stopped",
+            format!(
+                "WFP backend driver is registered but not running: {}. Expected driver binary: {}.",
+                config.backend_driver,
+                config.backend_driver_binary_path.display()
+            ),
+        ),
+    }
+}
+
 fn install_windows_wfp_service_with_runner<Q, R>(
     config: &WfpProbeConfig,
     query_service: Q,
@@ -889,27 +1030,45 @@ pub(crate) fn probe_windows_wfp_readiness() -> WindowsWfpReadinessReport {
         return WindowsWfpReadinessReport {
             status_label: "probe failed",
             details: "Failed to resolve expected WFP backend component paths from the current executable layout.".to_string(),
+            service_status_label: "probe failed",
+            service_details: "Failed to resolve expected WFP backend service component paths from the current executable layout.".to_string(),
+            driver_status_label: "probe failed",
+            driver_details: "Failed to resolve expected WFP backend driver component paths from the current executable layout.".to_string(),
         };
     };
 
     match probe_wfp_backend_status_with_config(&config) {
-        Ok(status) => WindowsWfpReadinessReport {
-            status_label: match status {
-                WfpProbeStatus::Ready => "ready",
-                WfpProbeStatus::BackendBinaryMissing => "missing binary",
-                WfpProbeStatus::PlatformServiceMissing => "missing bfe",
-                WfpProbeStatus::PlatformServiceStopped => "bfe stopped",
-                WfpProbeStatus::BackendServiceMissing => "missing service",
-                WfpProbeStatus::BackendServiceStopped => "service stopped",
-                WfpProbeStatus::BackendDriverBinaryMissing => "missing driver binary",
-                WfpProbeStatus::BackendDriverMissing => "driver not registered",
-                WfpProbeStatus::BackendDriverStopped => "driver stopped",
-            },
-            details: describe_wfp_probe_status_for_setup(&config, status),
-        },
+        Ok(status) => {
+            let (service_status_label, service_details) =
+                describe_wfp_service_status_for_setup(&config, status);
+            let (driver_status_label, driver_details) =
+                describe_wfp_driver_status_for_setup(&config, status);
+            WindowsWfpReadinessReport {
+                status_label: match status {
+                    WfpProbeStatus::Ready => "ready",
+                    WfpProbeStatus::BackendBinaryMissing => "missing binary",
+                    WfpProbeStatus::PlatformServiceMissing => "missing bfe",
+                    WfpProbeStatus::PlatformServiceStopped => "bfe stopped",
+                    WfpProbeStatus::BackendServiceMissing => "missing service",
+                    WfpProbeStatus::BackendServiceStopped => "service stopped",
+                    WfpProbeStatus::BackendDriverBinaryMissing => "missing driver binary",
+                    WfpProbeStatus::BackendDriverMissing => "driver not registered",
+                    WfpProbeStatus::BackendDriverStopped => "driver stopped",
+                },
+                details: describe_wfp_probe_status_for_setup(&config, status),
+                service_status_label,
+                service_details,
+                driver_status_label,
+                driver_details,
+            }
+        }
         Err(err) => WindowsWfpReadinessReport {
             status_label: "probe failed",
             details: format!("Failed to probe Windows WFP readiness: {err}"),
+            service_status_label: "probe failed",
+            service_details: format!("Failed to probe Windows WFP service readiness: {err}"),
+            driver_status_label: "probe failed",
+            driver_details: format!("Failed to probe Windows WFP driver readiness: {err}"),
         },
     }
 }
@@ -2241,6 +2400,54 @@ mod tests {
         );
         assert!(message.contains(r"C:\tools\nono-wfp-driver.sys"));
         assert!(message.contains("Expected driver registration name"));
+    }
+
+    #[test]
+    fn test_describe_wfp_service_status_for_setup_reports_missing_service() {
+        let config = WfpProbeConfig {
+            platform_service: WINDOWS_WFP_PLATFORM_SERVICE,
+            backend_service: WINDOWS_WFP_BACKEND_SERVICE,
+            backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
+            backend_binary_path: PathBuf::from(r"C:\tools\nono-wfp-service.exe"),
+            backend_driver_binary_path: PathBuf::from(r"C:\tools\nono-wfp-driver.sys"),
+            backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
+        };
+        let (label, details) =
+            describe_wfp_service_status_for_setup(&config, WfpProbeStatus::BackendServiceMissing);
+        assert_eq!(label, "not registered");
+        assert!(details.contains("Register it to launch"));
+    }
+
+    #[test]
+    fn test_describe_wfp_driver_status_for_setup_reports_blocked_by_service() {
+        let config = WfpProbeConfig {
+            platform_service: WINDOWS_WFP_PLATFORM_SERVICE,
+            backend_service: WINDOWS_WFP_BACKEND_SERVICE,
+            backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
+            backend_binary_path: PathBuf::from(r"C:\tools\nono-wfp-service.exe"),
+            backend_driver_binary_path: PathBuf::from(r"C:\tools\nono-wfp-driver.sys"),
+            backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
+        };
+        let (label, details) =
+            describe_wfp_driver_status_for_setup(&config, WfpProbeStatus::BackendServiceMissing);
+        assert_eq!(label, "blocked by service");
+        assert!(details.contains("blocked until the service"));
+    }
+
+    #[test]
+    fn test_describe_wfp_driver_status_for_setup_reports_not_registered() {
+        let config = WfpProbeConfig {
+            platform_service: WINDOWS_WFP_PLATFORM_SERVICE,
+            backend_service: WINDOWS_WFP_BACKEND_SERVICE,
+            backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
+            backend_binary_path: PathBuf::from(r"C:\tools\nono-wfp-service.exe"),
+            backend_driver_binary_path: PathBuf::from(r"C:\tools\nono-wfp-driver.sys"),
+            backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
+        };
+        let (label, details) =
+            describe_wfp_driver_status_for_setup(&config, WfpProbeStatus::BackendDriverMissing);
+        assert_eq!(label, "not registered");
+        assert!(details.contains("nono-wfp-driver"));
     }
 
     #[test]

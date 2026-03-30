@@ -182,6 +182,10 @@ impl SetupRunner {
         println!("  * {}", info.details);
         println!("  * WFP readiness: {}", wfp.status_label);
         println!("  * {}", wfp.details);
+        println!("  * WFP service readiness: {}", wfp.service_status_label);
+        println!("  * {}", wfp.service_details);
+        println!("  * WFP driver readiness: {}", wfp.driver_status_label);
+        println!("  * {}", wfp.driver_details);
         Ok(())
     }
 
@@ -660,6 +664,10 @@ fn print_check_only_summary() {
     println!("{}", info.details);
     println!("WFP readiness: {}", wfp.status_label);
     println!("{}", wfp.details);
+    println!("WFP service readiness: {}", wfp.service_status_label);
+    println!("{}", wfp.service_details);
+    println!("WFP driver readiness: {}", wfp.driver_status_label);
+    println!("{}", wfp.driver_details);
     println!("Use 'nono run --dry-run ...' to validate profiles and policy.");
     println!("Plain 'nono run -- <command>' is preview-safe direct execution only.");
     println!("Run 'nono run --help' to inspect the current command surface.");
