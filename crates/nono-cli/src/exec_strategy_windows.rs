@@ -2936,6 +2936,103 @@ mod tests {
     }
 
     #[test]
+    fn test_handle_windows_supervisor_message_rejects_duplicate_request_ids() {
+        let (mut parent, mut child) =
+            nono::SupervisorSocket::pair().expect("supervisor socket pair");
+        let mut seen_request_ids = HashSet::new();
+        let mut audit_log = Vec::new();
+        seen_request_ids.insert("req-dup".to_string());
+
+        child
+            .send_message(&nono::supervisor::SupervisorMessage::Request(
+                nono::CapabilityRequest {
+                    request_id: "req-dup".to_string(),
+                    path: PathBuf::from(r"C:\duplicate.txt"),
+                    access: nono::AccessMode::Read,
+                    reason: None,
+                    child_pid: 7,
+                    session_id: "win-1101-dup".to_string(),
+                },
+            ))
+            .expect("send request");
+        let msg = parent.recv_message().expect("recv request");
+
+        handle_windows_supervisor_message(
+            &mut parent,
+            msg,
+            &TestGrantBackend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen_request_ids,
+            &mut audit_log,
+        )
+        .expect("handle duplicate request");
+
+        match child.recv_response().expect("recv response") {
+            nono::supervisor::SupervisorResponse::Decision {
+                decision, grant, ..
+            } => {
+                assert!(decision.is_denied());
+                assert!(grant.is_none());
+                match decision {
+                    nono::ApprovalDecision::Denied { reason } => {
+                        assert!(reason.contains("Duplicate request_id"));
+                    }
+                    other => panic!("unexpected decision: {other:?}"),
+                }
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+        assert_eq!(audit_log.len(), 1);
+        assert!(audit_log[0].decision.is_denied());
+    }
+
+    #[test]
+    fn test_handle_windows_supervisor_message_reports_open_url_limitation() {
+        let (mut parent, mut child) =
+            nono::SupervisorSocket::pair().expect("supervisor socket pair");
+        let mut seen_request_ids = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        child
+            .send_message(&nono::supervisor::SupervisorMessage::OpenUrl(
+                nono::supervisor::UrlOpenRequest {
+                    request_id: "req-open-url".to_string(),
+                    url: "https://example.com".to_string(),
+                    child_pid: 7,
+                    session_id: "win-1101-open-url".to_string(),
+                },
+            ))
+            .expect("send request");
+        let msg = parent.recv_message().expect("recv request");
+
+        handle_windows_supervisor_message(
+            &mut parent,
+            msg,
+            &TestGrantBackend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen_request_ids,
+            &mut audit_log,
+        )
+        .expect("handle open url request");
+
+        match child.recv_response().expect("recv response") {
+            nono::supervisor::SupervisorResponse::UrlOpened {
+                success,
+                error,
+                request_id,
+            } => {
+                assert_eq!(request_id, "req-open-url");
+                assert!(!success);
+                let error = error.expect("error");
+                assert!(error.contains("delegated browser-open flows"));
+                assert!(error.contains("attached supervisor control channel"));
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+        assert!(audit_log.is_empty());
+    }
+
+    #[test]
     fn test_windows_supervisor_runtime_shutdown_on_drop() {
         let supervisor = SupervisorConfig {
             session_id: "drop-session",

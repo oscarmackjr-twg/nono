@@ -3,7 +3,7 @@ title: Windows Preview Validation
 description: Validation checklist for Windows preview packaging and runtime behavior
 ---
 
-Use this checklist before handing a Windows preview build to a pilot user or marking a release candidate as preview-ready.
+Use this checklist before handing a Windows build to a pilot user or marking a release candidate as ready for broader validation.
 
 ## Packaging Validation
 
@@ -33,9 +33,9 @@ nono run -- cmd /c echo hello
 Expected results:
 
 - `--help` and `--version` succeed.
-- `setup --check-only` succeeds and reports Windows preview support as partial.
+- `setup --check-only` succeeds and reports the current Windows supported subset and readiness details.
 - dry-run output reports command and capability state without implying enforcement.
-- plain `run -- cmd /c ...` succeeds with preview-safe messaging.
+- plain `run -- cmd /c ...` succeeds with current Windows supported-subset messaging.
 
 ## Guardrail Validation
 
@@ -59,9 +59,13 @@ Expected results:
 On pull requests or mainline pushes, confirm:
 
 - the `Windows Build` job ran on `windows-latest`
+- the `Windows Smoke` job ran on `windows-latest`
+- the `Windows Integration` job ran on `windows-latest`
+- the `Windows Security` job ran on `windows-latest`
 - `windows-build.log` is available as an artifact
 - `windows-smoke.log` is available as an artifact
-- `windows-env.log` is available as an artifact
+- `windows-integration.log` is available as an artifact
+- `windows-security.log` is available as an artifact
 
 These logs are the baseline comparison set for pilot bug reports.
 
@@ -74,3 +78,5 @@ The Windows preview is ready for pilot distribution when:
 - unsupported enforcement-dependent flows fail loudly and consistently
 - CI Windows logs are available for debugging
 - Apps & Features uninstall works for both MSI scopes
+
+For the formal release-candidate gate, use the [Windows Release Candidate Checklist](/cli/development/windows-release-candidate-checklist).

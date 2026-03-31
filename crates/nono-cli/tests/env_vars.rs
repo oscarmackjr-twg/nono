@@ -415,8 +415,10 @@ fn windows_run_executes_basic_command() {
         "expected child stdout from cmd /c echo hello, got:\n{text}"
     );
     assert!(
-        text.contains("basic Windows process containment"),
-        "expected preview warning in output, got:\n{text}"
+        text.contains(
+            "currently supported enforced subset for filesystem and blocked-network policy"
+        ),
+        "expected current Windows supported-subset warning in output, got:\n{text}"
     );
 }
 

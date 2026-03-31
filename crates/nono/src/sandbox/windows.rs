@@ -1219,6 +1219,43 @@ mod tests {
     use std::process::Command;
     use tempfile::tempdir;
 
+    fn try_create_symlink_file(link: &Path, target: &Path) -> bool {
+        match std::os::windows::fs::symlink_file(target, link) {
+            Ok(()) => true,
+            Err(err) => {
+                eprintln!("skipping symlink escape test because symlink creation failed: {err}");
+                false
+            }
+        }
+    }
+
+    fn try_create_junction(link: &Path, target: &Path) -> bool {
+        let Ok(output) = Command::new("cmd")
+            .args([
+                "/c",
+                "mklink",
+                "/J",
+                &link.to_string_lossy(),
+                &target.to_string_lossy(),
+            ])
+            .output()
+        else {
+            eprintln!("skipping junction escape test because cmd/mklink is unavailable");
+            return false;
+        };
+
+        if output.status.success() {
+            true
+        } else {
+            eprintln!(
+                "skipping junction escape test because mklink /J failed: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            false
+        }
+    }
+
     fn try_set_low_integrity_label(path: &Path) -> bool {
         let Ok(output) = Command::new("icacls")
             .arg(path)
@@ -1491,6 +1528,22 @@ mod tests {
     }
 
     #[test]
+    fn normalize_windows_path_strips_unc_verbatim_prefix() {
+        assert_eq!(
+            normalize_windows_path(Path::new(r"\\?\UNC\server\share\dir\file.txt")),
+            PathBuf::from(r"\\server\share\dir\file.txt")
+        );
+    }
+
+    #[test]
+    fn windows_paths_start_with_case_insensitive_matches_drive_case() {
+        assert!(windows_paths_start_with_case_insensitive(
+            Path::new(r"c:\Users\OMACK\Nono\workspace"),
+            Path::new(r"C:\users\omack\nono")
+        ));
+    }
+
+    #[test]
     fn validate_launch_paths_accepts_supported_executable() {
         let dir = tempdir().expect("tempdir");
         let bin_dir = dir.path().join("bin");
@@ -1685,6 +1738,88 @@ mod tests {
             err.to_string().contains("absolute path argument")
                 || err.to_string().contains("file argument")
         );
+    }
+
+    #[test]
+    fn validate_command_args_rejects_relative_parent_escape_outside_policy() {
+        let dir = tempdir().expect("tempdir");
+        let allowed = dir.path().join("allowed");
+        let workspace = allowed.join("workspace");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+        std::fs::create_dir_all(&outside).expect("mkdir outside");
+        let outside_file = outside.join("outside.txt");
+        std::fs::write(&outside_file, "hello").expect("write file");
+
+        let caps = CapabilitySet::new()
+            .allow_path(&allowed, AccessMode::ReadWrite)
+            .expect("allow path");
+        let policy = compile_filesystem_policy(&caps);
+        let args = vec![
+            "/c".to_string(),
+            "type".to_string(),
+            r"..\..\outside\outside.txt".to_string(),
+        ];
+
+        let err = validate_command_args(&policy, Path::new("cmd.exe"), &args, &workspace)
+            .expect_err("parent-dir escape should fail validation");
+        assert!(err.to_string().contains("file argument"));
+    }
+
+    #[test]
+    fn validate_command_args_rejects_symlink_escape_inside_policy() {
+        let dir = tempdir().expect("tempdir");
+        let allowed = dir.path().join("allowed");
+        let workspace = allowed.join("workspace");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+        std::fs::create_dir_all(&outside).expect("mkdir outside");
+        let outside_file = outside.join("secret.txt");
+        std::fs::write(&outside_file, "secret").expect("write outside file");
+        let link = workspace.join("inside-link.txt");
+        if !try_create_symlink_file(&link, &outside_file) {
+            return;
+        }
+
+        let caps = CapabilitySet::new()
+            .allow_path(&allowed, AccessMode::ReadWrite)
+            .expect("allow path");
+        let policy = compile_filesystem_policy(&caps);
+        let args = vec![link.to_string_lossy().into_owned()];
+
+        let err = validate_command_args(&policy, Path::new("more.com"), &args, &workspace)
+            .expect_err("symlink escape should fail validation");
+        assert!(err.to_string().contains("absolute path argument"));
+    }
+
+    #[test]
+    fn validate_command_args_rejects_junction_escape_inside_policy() {
+        let dir = tempdir().expect("tempdir");
+        let allowed = dir.path().join("allowed");
+        let workspace = allowed.join("workspace");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+        std::fs::create_dir_all(&outside).expect("mkdir outside");
+        let outside_file = outside.join("secret.txt");
+        std::fs::write(&outside_file, "secret").expect("write outside file");
+        let junction = workspace.join("outside-link");
+        if !try_create_junction(&junction, &outside) {
+            return;
+        }
+
+        let caps = CapabilitySet::new()
+            .allow_path(&allowed, AccessMode::ReadWrite)
+            .expect("allow path");
+        let policy = compile_filesystem_policy(&caps);
+        let args = vec![
+            "/c".to_string(),
+            "type".to_string(),
+            r"outside-link\secret.txt".to_string(),
+        ];
+
+        let err = validate_command_args(&policy, Path::new("cmd.exe"), &args, &workspace)
+            .expect_err("junction escape should fail validation");
+        assert!(err.to_string().contains("file argument"));
     }
 
     #[test]
