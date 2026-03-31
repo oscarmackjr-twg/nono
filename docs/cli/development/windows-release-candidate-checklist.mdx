@@ -39,6 +39,33 @@ Confirm:
 - `SHA256SUMS.txt` includes the Windows zip and MSI checksums
 - machine and user MSI artifacts match the documented scope strategy in [Windows Installer Strategy](/cli/development/windows-installer-strategy)
 
+## Signature Gate
+
+Verify Authenticode signatures on all Windows release artifacts. Run these commands on the downloaded release artifacts or on the artifacts from `artifact_staging/` on the build runner:
+
+```powershell
+# Verify the binary
+(Get-AuthenticodeSignature -FilePath "nono.exe").SignatureStatus
+# Expected: Valid
+
+# Verify the machine MSI
+(Get-AuthenticodeSignature -FilePath "nono-vX.Y.Z-x86_64-pc-windows-msvc-machine.msi").SignatureStatus
+# Expected: Valid
+
+# Verify the user MSI
+(Get-AuthenticodeSignature -FilePath "nono-vX.Y.Z-x86_64-pc-windows-msvc-user.msi").SignatureStatus
+# Expected: Valid
+```
+
+Confirm:
+
+- [ ] `nono.exe` — `Get-AuthenticodeSignature` returns `SignatureStatus : Valid`
+- [ ] `nono-vX.Y.Z-x86_64-pc-windows-msvc-machine.msi` — `Get-AuthenticodeSignature` returns `SignatureStatus : Valid`
+- [ ] `nono-vX.Y.Z-x86_64-pc-windows-msvc-user.msi` — `Get-AuthenticodeSignature` returns `SignatureStatus : Valid`
+- [ ] the `.zip` artifact contains the signed `nono.exe` (confirm by extracting and running `Get-AuthenticodeSignature`)
+
+Any result other than `Valid` (`NotSigned`, `HashMismatch`, `UnknownError`) means the artifact must not be promoted to a release. See [Windows Signing Guide](/cli/development/windows-signing-guide) for troubleshooting.
+
 ## Runtime Gate
 
 Run on a clean Windows machine or VM:
@@ -108,3 +135,4 @@ The Windows release candidate gate is complete when:
 - unsupported Windows flows fail explicitly
 - upgrade and uninstall behavior are validated
 - the current repair-disabled MSI contract is validated and documented
+- Windows artifact signatures are verified — all three artifacts (`nono.exe`, machine MSI, user MSI) return `SignatureStatus : Valid` via `Get-AuthenticodeSignature`
