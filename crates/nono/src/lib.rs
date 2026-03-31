@@ -83,8 +83,11 @@ pub use sandbox::{
     WindowsSupervisorFeatureKind, WindowsSupervisorSupport,
 };
 pub use state::SandboxState;
+#[cfg(target_os = "windows")]
+pub use supervisor::BrokerTargetProcess;
 pub use supervisor::{
-    ApprovalBackend, ApprovalDecision, CapabilityRequest, SupervisorSocket, UrlOpenRequest,
+    ApprovalBackend, ApprovalDecision, CapabilityRequest, GrantedResourceKind, ResourceGrant,
+    ResourceTransferKind, SupervisorSocket, UrlOpenRequest,
 };
 pub use trust::{
     Enforcement, IncludePatterns, Publisher, SignerIdentity, TrustPolicy, VerificationOutcome,

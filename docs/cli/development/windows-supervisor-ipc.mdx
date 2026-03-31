@@ -103,11 +103,18 @@ privileged open.
 This decision only chooses the Windows IPC foundation. It does **not** claim
 that full Windows supervised execution or sandbox enforcement already exists.
 
-Initial follow-on implementation should focus on:
+Current implementation now provides:
 
 - a `SupervisorSocket` replacement backed by named pipes
 - Windows-safe framing and request/response transport
-- process-launch wiring for pipe name, token, and child process handle
-- stubbed handle-transfer plumbing for future approval flows
+- process-launch wiring for pipe name and child process handle ownership
+- explicit resource-grant metadata in supervisor responses
+- Windows `DuplicateHandle` helper plumbing for brokered file handles
+
+Still intentionally deferred until later supervisor work:
+
+- live runtime capability expansion over that transport
+- child-side consumption of brokered handles for active approval flows
+- broader resource kinds beyond file-handle brokering
 
 Later stories can then layer real supervisor behavior on top of that transport.

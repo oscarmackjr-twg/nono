@@ -1671,6 +1671,7 @@ fn handle_supervisor_message(
                     decision: ApprovalDecision::Denied {
                         reason: reason.to_string(),
                     },
+                    grant: None,
                 };
                 return sock.send_response(&response);
             }
@@ -1821,6 +1822,7 @@ fn handle_supervisor_message(
                                 decision: ApprovalDecision::Denied {
                                     reason: format!("Failed to send file descriptor: {e}"),
                                 },
+                                grant: None,
                             };
                             return sock.send_response(&response);
                         }
@@ -1832,6 +1834,7 @@ fn handle_supervisor_message(
                             decision: ApprovalDecision::Denied {
                                 reason: format!("Supervisor failed to open path: {e}"),
                             },
+                            grant: None,
                         };
                         return sock.send_response(&response);
                     }
@@ -1842,6 +1845,13 @@ fn handle_supervisor_message(
             let response = SupervisorResponse::Decision {
                 request_id: request.request_id,
                 decision,
+                grant: if matches!(decision, ApprovalDecision::Granted) {
+                    Some(nono::ResourceGrant::sideband_file_descriptor(
+                        request.access,
+                    ))
+                } else {
+                    None
+                },
             };
             sock.send_response(&response)?;
         }

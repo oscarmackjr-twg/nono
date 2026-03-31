@@ -2,10 +2,11 @@
 //!
 //! Windows does not support Unix domain sockets or `SCM_RIGHTS`. The initial
 //! supervisor scaffold uses a per-session duplex named pipe as the control
-//! channel. Resource passing is intentionally left for later work.
+//! channel. Approved resource transfer uses explicit handle brokering metadata
+//! plus `DuplicateHandle` into the child process.
 
 use crate::error::{NonoError, Result};
-use crate::supervisor::types::{SupervisorMessage, SupervisorResponse};
+use crate::supervisor::types::{ResourceGrant, SupervisorMessage, SupervisorResponse};
 use getrandom::fill as random_fill;
 use sha2::{Digest, Sha256};
 use std::fs::File;
@@ -13,8 +14,8 @@ use std::io::{Read, Write};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
 use windows_sys::Win32::Foundation::{
-    ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE,
-    HANDLE, INVALID_HANDLE_VALUE,
+    DuplicateHandle, DUPLICATE_SAME_ACCESS, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY,
+    ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
@@ -23,6 +24,7 @@ use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, CreatePipe, DisconnectNamedPipe, WaitNamedPipeW,
     PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
+use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
 /// Length prefix size: 4 bytes (u32 big-endian)
 const LENGTH_PREFIX_SIZE: usize = 4;
@@ -40,6 +42,12 @@ pub struct SupervisorSocket {
     writer: File,
     transport_name: String,
     disconnect_on_drop: bool,
+}
+
+/// Windows process target for brokered handle duplication.
+#[derive(Debug, Clone, Copy)]
+pub struct BrokerTargetProcess {
+    handle: HANDLE,
 }
 
 impl SupervisorSocket {
@@ -173,6 +181,72 @@ impl SupervisorSocket {
             .map_err(|e| NonoError::SandboxInit(format!("Failed to read message payload: {e}")))?;
         Ok(payload)
     }
+}
+
+impl BrokerTargetProcess {
+    /// Use the current process as the duplication target.
+    #[must_use]
+    pub fn current() -> Self {
+        Self {
+            handle: unsafe {
+                // SAFETY: `GetCurrentProcess` returns a valid pseudo-handle for
+                // the current process and requires no explicit cleanup.
+                GetCurrentProcess()
+            },
+        }
+    }
+
+    /// Construct a target wrapper from an existing live process handle.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure the handle refers to a live process and remains
+    /// valid for the duration of the brokering call.
+    #[must_use]
+    pub unsafe fn from_raw_handle(handle: HANDLE) -> Self {
+        Self { handle }
+    }
+
+    fn raw(self) -> HANDLE {
+        self.handle
+    }
+}
+
+/// Duplicate an opened file handle into the target process and describe it in
+/// the supervisor response contract.
+pub fn broker_file_handle_to_process(
+    file: &File,
+    target_process: BrokerTargetProcess,
+    access: crate::capability::AccessMode,
+) -> Result<ResourceGrant> {
+    let mut duplicated: HANDLE = std::ptr::null_mut();
+    let source_handle = file.as_raw_handle() as HANDLE;
+
+    // SAFETY: `source_handle` comes from a live `File`, the current process is
+    // the source process, `target_process` was wrapped by the caller from a
+    // live process handle, and `duplicated` points to writable storage.
+    let ok = unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            source_handle,
+            target_process.raw(),
+            &mut duplicated,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
+        )
+    };
+    if ok == 0 || duplicated.is_null() {
+        return Err(NonoError::SandboxInit(format!(
+            "Failed to duplicate Windows handle into supervised child: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    Ok(ResourceGrant::duplicated_windows_file_handle(
+        duplicated as usize as u64,
+        access,
+    ))
 }
 
 impl Drop for SupervisorSocket {
@@ -376,7 +450,8 @@ mod tests {
     use super::*;
     use crate::capability::AccessMode;
     use crate::supervisor::types::{
-        ApprovalDecision, CapabilityRequest, SupervisorMessage, SupervisorResponse,
+        ApprovalDecision, CapabilityRequest, ResourceTransferKind, SupervisorMessage,
+        SupervisorResponse,
     };
     use std::path::PathBuf;
     #[test]
@@ -413,6 +488,10 @@ mod tests {
             .send_response(&SupervisorResponse::Decision {
                 request_id: "req-001".to_string(),
                 decision: ApprovalDecision::Granted,
+                grant: Some(ResourceGrant::duplicated_windows_file_handle(
+                    0x1234,
+                    AccessMode::Read,
+                )),
             })
             .expect("Failed to send response");
 
@@ -421,9 +500,16 @@ mod tests {
             SupervisorResponse::Decision {
                 request_id,
                 decision,
+                grant,
             } => {
                 assert_eq!(request_id, "req-001");
                 assert!(decision.is_granted());
+                let grant = grant.expect("grant metadata should be present");
+                assert_eq!(
+                    grant.transfer,
+                    ResourceTransferKind::DuplicatedWindowsHandle
+                );
+                assert_eq!(grant.raw_handle, Some(0x1234));
             }
             other => panic!("Expected Decision, got {other:?}"),
         }
@@ -454,5 +540,29 @@ mod tests {
                 || message.contains("Ensure the parent process is listening")
                 || message.contains("Timed out waiting for Windows supervisor pipe")
         );
+    }
+
+    #[test]
+    fn test_broker_file_handle_to_process_duplicates_handle() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("broker.txt");
+        std::fs::write(&path, b"hello").expect("write file");
+        let file = File::open(&path).expect("open file");
+
+        let grant =
+            broker_file_handle_to_process(&file, BrokerTargetProcess::current(), AccessMode::Read)
+                .expect("duplicate handle into current process");
+        assert_eq!(
+            grant.transfer,
+            ResourceTransferKind::DuplicatedWindowsHandle
+        );
+        let raw_handle = grant.raw_handle.expect("raw handle");
+        assert_ne!(raw_handle, 0);
+
+        unsafe {
+            // SAFETY: The duplicated handle value came from `DuplicateHandle`
+            // above and has not been wrapped or closed yet.
+            windows_sys::Win32::Foundation::CloseHandle(raw_handle as usize as HANDLE);
+        }
     }
 }
