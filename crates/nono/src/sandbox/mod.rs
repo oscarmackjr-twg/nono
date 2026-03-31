@@ -172,7 +172,7 @@ impl WindowsSupervisorFeatureKind {
                 "Windows supervised execution does not implement runtime capability expansion yet"
             }
             Self::RuntimeTrustInterception => {
-                "Windows supervised execution does not implement runtime trust interception yet"
+                "Windows runtime trust interception is not available yet. Pre-exec trust verification still runs, but Windows supervised child processes do not have an attached file-open mediation channel for runtime interception."
             }
         }
     }
@@ -213,6 +213,19 @@ impl WindowsSupervisorSupport {
         labels.sort_unstable();
         labels.dedup();
         labels
+    }
+
+    #[must_use]
+    pub fn unsupported_feature_descriptions(&self) -> Vec<&'static str> {
+        let mut descriptions: Vec<_> = self
+            .unsupported
+            .iter()
+            .copied()
+            .map(WindowsSupervisorFeatureKind::description)
+            .collect();
+        descriptions.sort_unstable();
+        descriptions.dedup();
+        descriptions
     }
 
     #[must_use]

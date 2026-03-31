@@ -50,6 +50,8 @@ nono trust verify --all
 
 When you run `nono run`, the pre-exec scan automatically verifies all files matching the policy before the agent launches.
 
+On Windows, this startup verification is the currently supported trust boundary. Runtime trust interception inside supervised child execution is not yet available because Windows supervised child processes do not yet have an attached file-open mediation channel.
+
 ## CLI Commands
 
 ### nono trust init

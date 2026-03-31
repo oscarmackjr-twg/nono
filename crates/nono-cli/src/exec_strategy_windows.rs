@@ -2078,7 +2078,7 @@ fn handle_windows_supervisor_message(
             request_id: url_request.request_id,
             success: false,
             error: Some(
-                "Windows supervised URL opening is not active through the Windows event loop yet"
+                "Windows delegated browser-open flows are not available yet. Windows supervised child processes do not have an attached supervisor control channel for open-url requests."
                     .to_string(),
             ),
         }),
@@ -2598,15 +2598,17 @@ pub fn execute_supervised(
         supervisor.approval_backend.backend_name()
     );
     let unsupported = supervisor.support.unsupported_feature_labels();
+    let unsupported_details = supervisor.support.unsupported_feature_descriptions();
     let supported = supervisor.support.supported_feature_labels();
     if !unsupported.is_empty() {
         return Err(NonoError::UnsupportedPlatform(format!(
             "Windows supervised execution initialized the control channel \
-             (session: {}, transport: {}), but these supervised features are not implemented yet: {}. \
-             Supported Windows supervised features currently: {}.",
+             (session: {}, transport: {}), but these supervised features are not available yet: {}. \
+             Details: {}. Supported Windows supervised features currently: {}.",
             supervisor.session_id,
             runtime.transport_name(),
             unsupported.join(", "),
+            unsupported_details.join(" | "),
             if supported.is_empty() {
                 "none".to_string()
             } else {
@@ -2742,7 +2744,8 @@ mod tests {
         assert!(message.contains("initialized the control channel"));
         assert!(message.contains("transport:"));
         assert!(message.contains("rollback snapshots"));
-        assert!(message.contains("not implemented yet"));
+        assert!(message.contains("not available yet"));
+        assert!(message.contains("proxy filtering"));
     }
 
     #[test]

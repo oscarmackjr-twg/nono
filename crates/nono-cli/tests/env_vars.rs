@@ -2299,6 +2299,58 @@ fn windows_setup_check_only_reports_live_profile_subset() {
 
 #[cfg(target_os = "windows")]
 #[test]
+fn windows_open_url_helper_reports_documented_limitation() {
+    let output = nono_bin()
+        .args(["open-url-helper", "https://example.com"])
+        .output()
+        .expect("failed to run nono open-url-helper");
+
+    let text = combined_output(&output);
+    assert!(
+        !output.status.success(),
+        "Windows open-url-helper should fail closed, output:\n{text}"
+    );
+    assert!(
+        text.contains("Windows delegated browser-open flows are not available yet."),
+        "expected documented delegated-open limitation, got:\n{text}"
+    );
+    assert!(
+        text.contains("attached supervisor control channel"),
+        "expected explicit child-transport limitation, got:\n{text}"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_allow_launch_services_reports_macos_only_limitation() {
+    let output = nono_bin()
+        .args([
+            "run",
+            "--profile",
+            "default",
+            "--allow-launch-services",
+            "--",
+            "cmd",
+            "/c",
+            "echo",
+            "test",
+        ])
+        .output()
+        .expect("failed to run nono with --allow-launch-services");
+
+    let text = combined_output(&output);
+    assert!(
+        !output.status.success(),
+        "Windows --allow-launch-services should fail closed, output:\n{text}"
+    );
+    assert!(
+        text.contains("--allow-launch-services is only supported on macOS"),
+        "expected explicit macOS-only limitation, got:\n{text}"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
 fn windows_run_blocks_live_block_net_without_enforcement() {
     let output = nono_bin()
         .args(["run", "--block-net", "--", "cmd", "/c", "echo", "test"])

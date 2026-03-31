@@ -351,7 +351,8 @@ fn run_open_url_helper(args: OpenUrlHelperArgs) -> Result<()> {
 #[cfg(target_os = "windows")]
 fn run_open_url_helper(_args: OpenUrlHelperArgs) -> Result<()> {
     Err(NonoError::UnsupportedPlatform(
-        "open-url-helper is not implemented on Windows yet".to_string(),
+        "Windows delegated browser-open flows are not available yet. The Windows sandboxed child does not have an attached supervisor control channel for open-url-helper requests. Use supported direct execution flows instead."
+            .to_string(),
     ))
 }
 
