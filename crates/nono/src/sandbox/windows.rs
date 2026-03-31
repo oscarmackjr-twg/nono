@@ -148,9 +148,9 @@ Use `nono run -- <command>` for supported execution or `nono shell --dry-run` to
                 .to_string(),
         )),
         WindowsPreviewEntryPoint::Wrap => Err(NonoError::UnsupportedPlatform(
-            "Windows preview does not support `nono wrap` live execution yet because one-way wrap enforcement is not implemented. \
-Use `nono run -- <command>` for preview direct execution or `--dry-run` to inspect policy. \
-This is a preview limitation, not permanent product behavior."
+            "Windows does not support live `nono wrap` execution. \
+One-way wrap/apply mode is a permanent unsupported Windows mode for the current product boundary. \
+Use `nono run -- <command>` for supported execution or `nono wrap --dry-run` to inspect wrap policy."
                 .to_string(),
         )),
     }

@@ -2474,7 +2474,26 @@ fn windows_run_supervised_rollback_block_net_uses_promoted_wfp_backend() {
 
 #[cfg(target_os = "windows")]
 #[test]
-fn windows_wrap_reports_preview_limitation() {
+fn windows_wrap_help_reports_documented_limitation() {
+    let output = nono_bin()
+        .args(["wrap", "--help"])
+        .output()
+        .expect("failed to run nono wrap --help");
+
+    let text = combined_output(&output);
+    assert!(
+        output.status.success(),
+        "Windows wrap help should succeed, output:\n{text}"
+    );
+    assert!(
+        text.contains("Windows does not support live `nono wrap` execution."),
+        "expected documented Windows wrap limitation in help output, got:\n{text}"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_wrap_reports_documented_limitation() {
     let output = nono_bin()
         .args(["wrap", "--", "cmd", "/c", "echo", "test"])
         .output()
@@ -2483,10 +2502,14 @@ fn windows_wrap_reports_preview_limitation() {
     let text = combined_output(&output);
     assert!(
         !output.status.success(),
-        "Windows preview wrap should fail loudly, output:\n{text}"
+        "Windows wrap should fail closed, output:\n{text}"
     );
     assert!(
-        text.contains("does not support `nono wrap` live execution"),
+        text.contains("Windows does not support live `nono wrap` execution."),
         "expected explicit wrap limitation, got:\n{text}"
+    );
+    assert!(
+        text.contains("Use `nono run -- <command>`"),
+        "expected actionable alternative in wrap limitation message, got:\n{text}"
     );
 }

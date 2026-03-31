@@ -79,6 +79,8 @@ Apply sandbox and exec into command. nono disappears from the process tree — n
 nono wrap [OPTIONS] -- <COMMAND> [ARGS...]
 ```
 
+On Windows, live `nono wrap` execution is not supported. Use `nono wrap --dry-run` to inspect the resolved wrap policy or `nono run -- <command>` for supported execution.
+
 <Note>
   `nono wrap` does not support proxy flags (`--network-profile`, `--allow-domain`, `--credential`, `--upstream-proxy`, `--upstream-bypass`). The network proxy requires a parent process. Use `nono run` instead.
 </Note>

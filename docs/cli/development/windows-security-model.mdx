@@ -176,6 +176,7 @@ The live Windows launch path is now also shared intentionally across direct and 
 - unsupported direct or supervised restrictions fail with backend-owned diagnostics instead of caller-specific fallback wording
 - built-in profile-backed runs now use that same backend-owned path too: supported profiles such as the current `default` subset can run live, while profiles that still depend on unsupported Windows controls fail intentionally with backend reason labels instead of a generic “profiles are preview-only” block
 - Windows `shell` mode is now an explicit product limitation rather than an accidental stub: `nono shell --dry-run` remains available for policy inspection, but live interactive shell launch stays unsupported on Windows because the current backend does not provide a credible interactive-shell enforcement boundary
+- Windows `wrap` mode is now treated the same way: `nono wrap --dry-run` remains available for inspection, but live one-way wrap/apply execution stays unsupported on Windows because the current backend does not provide a credible one-shot enforcement model that matches the product contract
 
 ## Windows State and Trust Storage
 

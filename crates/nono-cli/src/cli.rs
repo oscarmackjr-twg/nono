@@ -31,6 +31,21 @@ const SHELL_AFTER_HELP: &str = "\x1b[1mEXAMPLES\x1b[0m
   nono shell --allow . --shell /bin/zsh        # Override shell binary
 ";
 
+#[cfg(target_os = "windows")]
+const WRAP_AFTER_HELP: &str = "\x1b[1mEXAMPLES\x1b[0m
+  nono wrap --dry-run -- cmd /c echo hello    # Inspect wrap policy without launching
+
+\x1b[1mWINDOWS\x1b[0m
+  Windows does not support live `nono wrap` execution.
+  Use `nono run -- <command>` for supported execution,
+  or `nono wrap --dry-run ...` to inspect wrap policy.";
+
+#[cfg(not(target_os = "windows"))]
+const WRAP_AFTER_HELP: &str = "\x1b[1mEXAMPLES\x1b[0m
+  nono wrap --allow . -- cargo build           # Sandbox and exec into cargo build
+  nono wrap --profile developer -- cargo test  # Use a named profile
+";
+
 /// nono - The opposite of YOLO
 ///
 /// A capability-based shell for running untrusted AI agents and processes.
@@ -173,10 +188,7 @@ pub enum Commands {
 
 {all-args}
 {after-help}")]
-    #[command(after_help = "\x1b[1mEXAMPLES\x1b[0m
-  nono wrap --allow . -- cargo build           # Sandbox and exec into cargo build
-  nono wrap --profile developer -- cargo test  # Use a named profile
-")]
+    #[command(after_help = WRAP_AFTER_HELP)]
     Wrap(Box<WrapArgs>),
 
     // ── Exploration & debugging ─────────────────────────────────────────

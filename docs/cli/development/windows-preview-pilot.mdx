@@ -44,12 +44,12 @@ Available now:
 - `nono run --dry-run ...`
 - `nono run -- <command>` for preview-safe direct execution
 
-Intentionally blocked in preview when real enforcement would be implied:
+Intentionally blocked in preview when real enforcement would be implied, or when Windows has an explicit unsupported live mode:
 
 - live profile-backed restricted runs
 - live `--block-net` or equivalent enforcement-dependent controls
 - `nono shell`
-- `nono wrap`
+- `nono wrap` (documented unsupported Windows live mode)
 - full supervised enforcement
 
 The preview is for startup, config, dry-run, and direct execution path validation. It is not a claim of full Windows sandbox parity.
