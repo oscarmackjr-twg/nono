@@ -2160,6 +2160,48 @@ fn windows_run_smoke_validates_stdout_stderr_and_exit_code() {
 
 #[cfg(target_os = "windows")]
 #[test]
+fn windows_shell_help_reports_documented_limitation() {
+    let output = nono_bin()
+        .args(["shell", "--help"])
+        .output()
+        .expect("failed to run nono shell --help");
+
+    let text = combined_output(&output);
+    assert!(
+        output.status.success(),
+        "Windows shell help should succeed, output:\n{text}"
+    );
+    assert!(
+        text.contains("Windows does not support live `nono shell` execution."),
+        "expected documented Windows shell limitation in help output, got:\n{text}"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_shell_live_reports_documented_limitation() {
+    let output = nono_bin()
+        .args(["shell"])
+        .output()
+        .expect("failed to run nono shell");
+
+    let text = combined_output(&output);
+    assert!(
+        !output.status.success(),
+        "Windows shell live execution should fail closed, output:\n{text}"
+    );
+    assert!(
+        text.contains("Windows does not support live `nono shell` execution."),
+        "expected explicit Windows shell limitation message, got:\n{text}"
+    );
+    assert!(
+        text.contains("Use `nono run -- <command>`"),
+        "expected actionable alternative in shell limitation message, got:\n{text}"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
 fn windows_run_live_default_profile_executes_command() {
     let output = nono_bin()
         .args([

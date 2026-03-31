@@ -15,6 +15,22 @@ const CLI_ABOUT: &str = "A capability-based shell for running untrusted AI agent
 #[cfg(not(target_os = "windows"))]
 const CLI_ABOUT: &str = "A capability-based shell for running untrusted AI agents and processes\nwith OS-enforced filesystem and network isolation.";
 
+#[cfg(target_os = "windows")]
+const SHELL_AFTER_HELP: &str = "\x1b[1mEXAMPLES\x1b[0m
+  nono shell --dry-run --allow .              # Inspect shell policy without launching
+
+\x1b[1mWINDOWS\x1b[0m
+  Windows does not support live `nono shell` execution.
+  Use `nono run -- <command>` for supported direct execution,
+  or `nono run --dry-run ...` to inspect policy.";
+
+#[cfg(not(target_os = "windows"))]
+const SHELL_AFTER_HELP: &str = "\x1b[1mEXAMPLES\x1b[0m
+  nono shell --allow .                         # Shell with read/write to current dir
+  nono shell --profile claude-code             # Use a named profile
+  nono shell --allow . --shell /bin/zsh        # Override shell binary
+";
+
 /// nono - The opposite of YOLO
 ///
 /// A capability-based shell for running untrusted AI agents and processes.
@@ -143,11 +159,7 @@ pub enum Commands {
 
 {all-args}
 {after-help}")]
-    #[command(after_help = "\x1b[1mEXAMPLES\x1b[0m
-  nono shell --allow .                         # Shell with read/write to current dir
-  nono shell --profile claude-code             # Use a named profile
-  nono shell --allow . --shell /bin/zsh        # Override shell binary
-")]
+    #[command(after_help = SHELL_AFTER_HELP)]
     Shell(Box<ShellArgs>),
 
     /// Apply sandbox and exec into command (nono disappears).

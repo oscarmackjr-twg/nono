@@ -142,9 +142,9 @@ This is a preview limitation, not permanent product behavior.",
             Ok(())
         }
         WindowsPreviewEntryPoint::Shell => Err(NonoError::UnsupportedPlatform(
-            "Windows preview does not support `nono shell` live execution yet because interactive shell enforcement is not implemented. \
-Use `nono run -- <command>` for preview direct execution or `--dry-run` to inspect policy. \
-This is a preview limitation, not permanent product behavior."
+            "Windows does not support live `nono shell` execution. \
+Interactive shell hosts are a permanent unsupported Windows mode for the current product boundary. \
+Use `nono run -- <command>` for supported execution or `nono shell --dry-run` to inspect shell policy."
                 .to_string(),
         )),
         WindowsPreviewEntryPoint::Wrap => Err(NonoError::UnsupportedPlatform(

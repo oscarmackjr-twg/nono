@@ -69,6 +69,8 @@ Start an interactive shell inside the sandbox.
 nono shell [OPTIONS]
 ```
 
+On Windows, live `nono shell` execution is not supported. Use `nono shell --dry-run` to inspect the resolved policy or `nono run -- <command>` for supported execution.
+
 ### `nono wrap`
 
 Apply sandbox and exec into command. nono disappears from the process tree — no parent process remains. For scripts, piping, and embedding where no parent process is wanted.

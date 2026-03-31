@@ -103,6 +103,10 @@ nono shell --allow-cwd --shell /bin/zsh
 
 Exit the shell with `Ctrl-D` or `exit`.
 
+<Note>
+On Windows, live `nono shell` execution is not supported. Use `nono shell --dry-run` to inspect shell policy, or use `nono run -- <command>` for supported execution.
+</Note>
+
 ## Checking Path Access (`nono why`)
 
 The `why` command checks if a path or network operation would be allowed or denied. It's designed for both human debugging and programmatic use by AI agents.
