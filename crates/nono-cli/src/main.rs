@@ -2362,13 +2362,6 @@ fn execute_sandboxed(
         exec_strategy::ExecStrategy::Supervised => {
             #[cfg(not(target_os = "windows"))]
             output::print_applying_sandbox(flags.silent);
-            #[cfg(target_os = "windows")]
-            if !Sandbox::support_info().is_supported && !flags.silent {
-                output::print_warning(
-                    "Windows preview: supervised execution uses backend-owned Windows feature classification, so supported supervised features run and unsupported ones fail closed with backend diagnostics",
-                );
-                eprintln!();
-            }
 
             // --- Audit session setup (always, unless --no-audit) ---
             // The session directory and ID are shared between audit and rollback.

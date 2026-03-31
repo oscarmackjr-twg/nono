@@ -164,7 +164,7 @@ The Windows supervised path is now split intentionally:
   - runtime trust interception
   - broad live child-side consumption of brokered Windows handles for resource transfer outside the current explicit supervisor-request test path
 
-That means Windows supervised execution is no longer purely scaffold-only, but it is also not Unix-parity supervision yet. The current implementation is a rollback-oriented supervised runtime with deterministic rejection for the remaining unsupported feature classes, a parent-side event loop that monitors the child process to completion, and more actionable startup/shutdown diagnostics when launch or wait handling fails.
+That means Windows supervised execution is now a real supported runtime path for the current rollback-oriented subset, even though it is not Unix-parity supervision yet. The current implementation has deterministic rejection for the remaining unsupported feature classes, a parent-side event loop that monitors the child process to completion, and more actionable startup/shutdown diagnostics when launch or wait handling fails.
 
 The live Windows launch path is now also shared intentionally across direct and supervised execution for the currently supported subset:
 

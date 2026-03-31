@@ -2286,6 +2286,10 @@ fn windows_run_supervised_rollback_executes_command() {
         !text.contains("scaffold only"),
         "supported supervised rollback should not claim scaffold-only behavior, got:\n{text}"
     );
+    assert!(
+        !text.contains("preview limitation"),
+        "supported supervised rollback should not claim preview-only behavior, got:\n{text}"
+    );
 }
 
 #[cfg(target_os = "windows")]
@@ -2349,6 +2353,10 @@ fn windows_run_supervised_rollback_block_net_uses_promoted_wfp_backend() {
     assert!(
         !text.contains("not implemented yet"),
         "expected live supervised blocked-network path rather than placeholder activation, got:\n{text}"
+    );
+    assert!(
+        !text.contains("preview limitation"),
+        "supported supervised blocked-network path should not report preview-only behavior, got:\n{text}"
     );
     std::thread::sleep(std::time::Duration::from_millis(150));
     assert!(

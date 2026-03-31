@@ -2603,8 +2603,7 @@ pub fn execute_supervised(
         return Err(NonoError::UnsupportedPlatform(format!(
             "Windows supervised execution initialized the control channel \
              (session: {}, transport: {}), but these supervised features are not implemented yet: {}. \
-             Supported Windows supervised features currently: {}. \
-             This is a preview limitation, not permanent product behavior.",
+             Supported Windows supervised features currently: {}.",
             supervisor.session_id,
             runtime.transport_name(),
             unsupported.join(", "),
