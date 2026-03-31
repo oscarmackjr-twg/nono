@@ -1,6 +1,8 @@
 param(
     [Parameter(Mandatory = $true)]
-    [string]$BinaryPath
+    [string]$BinaryPath,
+
+    [string]$ServiceBinaryPath = ""
 )
 
 Set-StrictMode -Version Latest
@@ -12,7 +14,9 @@ function Get-WixDocumentForScope {
         [string]$Scope,
 
         [Parameter(Mandatory = $true)]
-        [string]$Binary
+        [string]$Binary,
+
+        [string]$ServiceBinary = ""
     )
 
     $repoRoot = Split-Path -Parent $PSScriptRoot
@@ -24,12 +28,17 @@ function Get-WixDocumentForScope {
     }
 
     try {
-        & (Join-Path $PSScriptRoot "build-windows-msi.ps1") `
-            -VersionTag "v0.0.0-preview" `
-            -BinaryPath $Binary `
-            -Scope $Scope `
-            -OutputDir $tempDirName `
-            -EmitOnly
+        $buildArgs = @{
+            VersionTag  = "v0.0.0-preview"
+            BinaryPath  = $Binary
+            Scope       = $Scope
+            OutputDir   = $tempDirName
+            EmitOnly    = $true
+        }
+        if ($ServiceBinary -ne "") {
+            $buildArgs["ServiceBinaryPath"] = $ServiceBinary
+        }
+        & (Join-Path $PSScriptRoot "build-windows-msi.ps1") @buildArgs
 
         $wxsPath = Join-Path $tempDir ("nono-" + $Scope + ".wxs")
         if (-not (Test-Path -LiteralPath $wxsPath)) {
@@ -95,7 +104,15 @@ function Assert-True {
 
 $binaryFullPath = (Resolve-Path -LiteralPath $BinaryPath).Path
 
-$machineDoc = Get-WixDocumentForScope -Scope "machine" -Binary $binaryFullPath
+$serviceBinaryFullPath = ""
+if ($ServiceBinaryPath -ne "") {
+    if (-not (Test-Path -LiteralPath $ServiceBinaryPath)) {
+        throw "Service binary not found at '$ServiceBinaryPath'."
+    }
+    $serviceBinaryFullPath = (Resolve-Path -LiteralPath $ServiceBinaryPath).Path
+}
+
+$machineDoc = Get-WixDocumentForScope -Scope "machine" -Binary $binaryFullPath -ServiceBinary $serviceBinaryFullPath
 $userDoc = Get-WixDocumentForScope -Scope "user" -Binary $binaryFullPath
 
 $machinePackage = Get-FirstNodeByLocalName -Document $machineDoc -LocalName "Package"
@@ -133,5 +150,36 @@ Assert-Equal -Actual $machineNoRepair.Value -Expected "1" -Message "Machine MSI 
 Assert-Equal -Actual $userNoRepair.Value -Expected "1" -Message "User MSI ARPNOREPAIR mismatch"
 Assert-Equal -Actual $machineNoModify.Value -Expected "1" -Message "Machine MSI ARPNOMODIFY mismatch"
 Assert-Equal -Actual $userNoModify.Value -Expected "1" -Message "User MSI ARPNOMODIFY mismatch"
+
+# Service element assertions (machine MSI only)
+if ($serviceBinaryFullPath -ne "") {
+    $machineServiceInstall = Get-FirstNodeByLocalName -Document $machineDoc -LocalName "ServiceInstall"
+    Assert-Equal -Actual $machineServiceInstall.Name -Expected "nono-wfp-service" `
+        -Message "Machine MSI ServiceInstall Name mismatch"
+    Assert-Equal -Actual $machineServiceInstall.Start -Expected "demand" `
+        -Message "Machine MSI ServiceInstall Start mismatch"
+    Assert-Equal -Actual $machineServiceInstall.Type -Expected "ownProcess" `
+        -Message "Machine MSI ServiceInstall Type mismatch"
+    Assert-Equal -Actual $machineServiceInstall.Account -Expected "LocalSystem" `
+        -Message "Machine MSI ServiceInstall Account mismatch"
+
+    $machineServiceControl = Get-FirstNodeByLocalName -Document $machineDoc -LocalName "ServiceControl"
+    Assert-Equal -Actual $machineServiceControl.Name -Expected "nono-wfp-service" `
+        -Message "Machine MSI ServiceControl Name mismatch"
+    Assert-Equal -Actual $machineServiceControl.Stop -Expected "both" `
+        -Message "Machine MSI ServiceControl Stop mismatch"
+    Assert-Equal -Actual $machineServiceControl.Remove -Expected "uninstall" `
+        -Message "Machine MSI ServiceControl Remove mismatch"
+    Assert-Equal -Actual $machineServiceControl.Wait -Expected "yes" `
+        -Message "Machine MSI ServiceControl Wait mismatch"
+
+    # User MSI must contain no service elements (D-02)
+    $userServiceInstalls = $userDoc.SelectNodes("//*[local-name()='ServiceInstall']")
+    Assert-True -Condition ($null -eq $userServiceInstalls -or $userServiceInstalls.Count -eq 0) `
+        -Message "User MSI must not contain ServiceInstall elements"
+    $userServiceControls = $userDoc.SelectNodes("//*[local-name()='ServiceControl']")
+    Assert-True -Condition ($null -eq $userServiceControls -or $userServiceControls.Count -eq 0) `
+        -Message "User MSI must not contain ServiceControl elements"
+}
 
 Write-Host "Validated Windows MSI contract for machine and user scopes."
