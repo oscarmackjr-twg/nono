@@ -17,6 +17,7 @@
 
 use crate::error::{NonoError, Result};
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -519,7 +520,7 @@ fn load_from_env(uri: &str) -> Result<Zeroizing<String>> {
 ///
 /// # Errors
 ///
-/// Returns `SecretNotFound` if the file does not exist or is empty/whitespace-only.
+/// Returns `SecretNotFound` if the file does not exist or is empty.
 /// Returns `KeystoreAccess` for other I/O errors (permissions, etc.).
 fn load_from_file(uri: &str) -> Result<Zeroizing<String>> {
     validate_file_uri(uri)?;
@@ -545,10 +546,11 @@ fn load_from_file(uri: &str) -> Result<Zeroizing<String>> {
 /// Load a secret from a local file and wrap it in [`Zeroizing`].
 ///
 /// Intended for callers that need a common file-backed secret path without
-/// duplicating plaintext handling. The returned string is trimmed; empty or
-/// whitespace-only files are rejected.
+/// duplicating plaintext handling. A single trailing line ending is removed to
+/// match CLI-based secret loaders; other leading/trailing whitespace is
+/// preserved.
 pub fn load_secret_file(path: &Path) -> Result<Zeroizing<String>> {
-    let content = std::fs::read_to_string(path).map_err(|e| {
+    let mut content = Zeroizing::new(std::fs::read_to_string(path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             NonoError::SecretNotFound(format!("secret file not found: {}", path.display()))
         } else {
@@ -558,17 +560,24 @@ pub fn load_secret_file(path: &Path) -> Result<Zeroizing<String>> {
                 e
             ))
         }
-    })?;
+    })?);
 
-    let trimmed = content.trim().to_string();
-    if trimmed.is_empty() {
+    if content.ends_with("\r\n") {
+        let new_len = content.len().saturating_sub(2);
+        content.truncate(new_len);
+    } else if content.ends_with('\n') {
+        let new_len = content.len().saturating_sub(1);
+        content.truncate(new_len);
+    }
+
+    if content.is_empty() {
         return Err(NonoError::SecretNotFound(format!(
-            "secret file '{}' is empty or contains only whitespace",
+            "secret file '{}' is empty",
             path.display()
         )));
     }
 
-    Ok(Zeroizing::new(trimmed))
+    Ok(content)
 }
 
 /// Store a secret in a local file with owner-only permissions on Unix.
@@ -585,19 +594,62 @@ pub fn store_secret_file(path: &Path, secret: &str) -> Result<()> {
         })?;
     }
 
-    std::fs::write(path, secret).map_err(|e| {
-        NonoError::KeystoreAccess(format!("failed to store secret at {}: {e}", path.display()))
-    })?;
-
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::fs::OpenOptions;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        if path.exists() {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(
+                |e| {
+                    NonoError::KeystoreAccess(format!(
+                        "failed to secure existing secret file {}: {e}",
+                        path.display()
+                    ))
+                },
+            )?;
+        }
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|e| {
+                NonoError::KeystoreAccess(format!(
+                    "failed to store secret at {}: {e}",
+                    path.display()
+                ))
+            })?;
+
+        file.write_all(secret.as_bytes()).map_err(|e| {
+            NonoError::KeystoreAccess(format!("failed to store secret at {}: {e}", path.display()))
+        })?;
+
+        file.sync_all().map_err(|e| {
+            NonoError::KeystoreAccess(format!(
+                "failed to sync secret file {}: {e}",
+                path.display()
+            ))
+        })?;
 
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|e| {
             NonoError::KeystoreAccess(format!(
                 "failed to secure secret file {}: {e}",
                 path.display()
             ))
+        })?;
+    }
+
+    #[cfg(not(unix))]
+    {
+        let mut file = std::fs::File::create(path).map_err(|e| {
+            NonoError::KeystoreAccess(format!("failed to store secret at {}: {e}", path.display()))
+        })?;
+
+        file.write_all(secret.as_bytes()).map_err(|e| {
+            NonoError::KeystoreAccess(format!("failed to store secret at {}: {e}", path.display()))
         })?;
     }
 
@@ -2170,7 +2222,8 @@ mod tests {
         std::fs::write(&path, "  \n  \n").unwrap();
         let uri = format!("file://{}", path.display());
         let result = load_from_file(&uri);
-        assert!(result.is_err());
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().as_str(), "  \n  ");
     }
 
     #[test]
@@ -2187,6 +2240,51 @@ mod tests {
         let uri = format!("file://{}", path.display());
         let result = load_from_file(&uri).unwrap();
         assert_eq!(result.as_str(), "glpat-xxxxxxxxxxxx");
+    }
+
+    #[test]
+    fn test_load_from_file_preserves_significant_whitespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("spaces.txt");
+        std::fs::write(&path, "  secret value  \n").unwrap();
+        let uri = format!("file://{}", path.display());
+        let result = load_from_file(&uri).unwrap();
+        assert_eq!(result.as_str(), "  secret value  ");
+    }
+
+    #[test]
+    fn test_load_from_file_trims_single_trailing_crlf() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("crlf.txt");
+        std::fs::write(&path, "secret\r\n").unwrap();
+        let uri = format!("file://{}", path.display());
+        let result = load_from_file(&uri).unwrap();
+        assert_eq!(result.as_str(), "secret");
+    }
+
+    #[test]
+    fn test_load_from_file_newline_only_is_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("newline-only.txt");
+        std::fs::write(&path, "\n").unwrap();
+        let uri = format!("file://{}", path.display());
+        let result = load_from_file(&uri);
+        assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_store_secret_file_sets_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.txt");
+
+        store_secret_file(&path, "top-secret").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "top-secret");
     }
 
     // =========================================================================
