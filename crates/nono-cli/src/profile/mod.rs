@@ -3926,6 +3926,7 @@ mod tests {
             path_pattern: None,
             path_replacement: None,
             query_param_name: None,
+            endpoint_rules: vec![],
             env_var: Some("EXAMPLE_API_KEY".to_string()),
         };
         assert!(
@@ -3945,6 +3946,7 @@ mod tests {
             path_pattern: None,
             path_replacement: None,
             query_param_name: None,
+            endpoint_rules: vec![],
             env_var: None,
         };
         let result = validate_custom_credential("example", &cred);
@@ -3967,6 +3969,7 @@ mod tests {
             path_pattern: None,
             path_replacement: None,
             query_param_name: None,
+            endpoint_rules: vec![],
             env_var: Some("EXAMPLE_API_KEY".to_string()),
         };
         let result = validate_custom_credential("example", &cred);
@@ -3989,6 +3992,7 @@ mod tests {
             path_pattern: None,
             path_replacement: None,
             query_param_name: None,
+            endpoint_rules: vec![],
             env_var: Some("EXAMPLE_API_KEY".to_string()),
         };
         let result = validate_custom_credential("example", &cred);
