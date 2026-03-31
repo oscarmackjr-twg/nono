@@ -432,9 +432,9 @@ impl SetupRunner {
 
         println!();
         #[cfg(target_os = "windows")]
-        println!("  Use with: nono run --dry-run --profile <name> -- <command>");
+        println!("  Use with: nono run --profile <name> -- <command>");
         #[cfg(target_os = "windows")]
-        println!("            Live profile enforcement is still preview-only on Windows.");
+        println!("            Supported profile-backed restrictions run live; unsupported controls fail with backend diagnostics.");
         #[cfg(not(target_os = "windows"))]
         println!("  Use with: nono run --profile <name> -- <command>");
         println!();
@@ -507,10 +507,13 @@ impl SetupRunner {
             {
                 println!("Quick start examples:");
                 println!();
-                println!("  # Preview a built-in profile without claiming enforcement");
+                println!("  # Run a built-in profile where the Windows backend supports it");
+                println!("  nono run --profile default -- cmd /c echo hello");
+                println!();
+                println!("  # Preview filesystem and network policy without launching");
                 println!("  nono run --dry-run --profile claude-code -- claude");
                 println!();
-                println!("  # Preview-safe direct execution (no sandbox enforcement yet)");
+                println!("  # Direct execution with the current supported Windows subset");
                 println!("  nono run -- <command>");
                 println!();
                 println!("  # Check why a sensitive path is blocked");

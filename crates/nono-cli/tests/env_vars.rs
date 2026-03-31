@@ -2160,7 +2160,39 @@ fn windows_run_smoke_validates_stdout_stderr_and_exit_code() {
 
 #[cfg(target_os = "windows")]
 #[test]
-fn windows_run_blocks_live_profile_restrictions() {
+fn windows_run_live_default_profile_executes_command() {
+    let output = nono_bin()
+        .args([
+            "run",
+            "--profile",
+            "default",
+            "--",
+            "cmd",
+            "/c",
+            "echo",
+            "test",
+        ])
+        .output()
+        .expect("failed to run nono");
+
+    let text = combined_output(&output);
+    assert!(
+        output.status.success(),
+        "Windows live default profile run should succeed, output:\n{text}"
+    );
+    assert!(
+        text.contains("test"),
+        "expected child command output from live default profile run, got:\n{text}"
+    );
+    assert!(
+        !text.contains("cannot enforce the requested sandbox controls"),
+        "supported live profile run should not report unsupported sandbox controls, got:\n{text}"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_run_live_codex_profile_fails_intentionally_with_backend_reason() {
     let output = nono_bin()
         .args([
             "run",
@@ -2178,15 +2210,48 @@ fn windows_run_blocks_live_profile_restrictions() {
     let text = combined_output(&output);
     assert!(
         !output.status.success(),
-        "Windows preview should block live profile-enforced execution, output:\n{text}"
+        "unsupported Windows codex profile run should fail closed, output:\n{text}"
     );
     assert!(
         text.contains("cannot enforce the requested sandbox controls"),
-        "expected explicit preview enforcement error, got:\n{text}"
+        "expected explicit backend enforcement failure, got:\n{text}"
     );
     assert!(
-        text.contains("preview limitation"),
-        "expected preview wording in error, got:\n{text}"
+        text.contains("single-file grants"),
+        "expected backend-owned unsupported reason details, got:\n{text}"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_setup_check_only_reports_live_profile_subset() {
+    let output = nono_bin()
+        .args(["setup", "--check-only"])
+        .output()
+        .expect("failed to run nono setup --check-only");
+
+    let text = combined_output(&output);
+    assert!(
+        output.status.success(),
+        "Windows setup --check-only should succeed, output:\n{text}"
+    );
+    assert!(
+        text.contains("Support status:")
+            || text.contains("Support status: partial")
+            || text.contains("Support status: supported"),
+        "expected setup summary support status, got:\n{text}"
+    );
+    assert!(
+        text.contains("User state root:"),
+        "expected Windows storage layout in setup summary, got:\n{text}"
+    );
+    assert!(
+        text.contains("Supported profile-backed restrictions run live"),
+        "expected live profile subset wording in setup output, got:\n{text}"
+    );
+    assert!(
+        !text.contains("Live profile enforcement is still preview-only on Windows."),
+        "setup output should not regress to preview-only profile wording, got:\n{text}"
     );
 }
 
