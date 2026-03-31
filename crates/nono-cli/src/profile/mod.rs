@@ -158,10 +158,9 @@ pub struct CustomCredentialDef {
     /// when connecting to the upstream for this route. Required for upstreams
     /// with self-signed or private CA certificates (e.g., Kubernetes API servers).
     ///
-    /// Paths may be absolute or relative. Tilde (`~/…`) is expanded to the
-    /// user's home directory. Relative paths are resolved against the current
-    /// working directory. The resolved path must point to an existing file;
-    /// an error is raised at startup if the file cannot be found.
+    /// Supports absolute paths and tilde (`~/…`) expansion. Relative paths
+    /// resolve against the working directory; prefer absolute paths to avoid
+    /// ambiguity.
     #[serde(default)]
     pub tls_ca: Option<String>,
 }
