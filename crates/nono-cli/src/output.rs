@@ -50,7 +50,7 @@ pub fn print_banner(silent: bool) {
                 "  {} {}",
                 theme::fg("windows", t.yellow).bold(),
                 theme::fg(
-                    "Windows restricted execution supports a native enforced subset; unsupported flows fail explicitly",
+                    "Windows restricted execution covers the current supported command surface; unsupported flows fail explicitly",
                     t.subtext
                 ),
             );
@@ -396,7 +396,7 @@ fn dry_run_summary(_support: &nono::SupportInfo) -> &'static str {
     #[cfg(target_os = "windows")]
     {
         if !_support.is_supported {
-            return "dry-run validates the current Windows native subset without claiming full parity";
+            return "dry-run validates the current Windows command surface without claiming full parity";
         }
     }
 

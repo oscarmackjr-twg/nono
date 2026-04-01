@@ -36,9 +36,9 @@ nono run --read-file C:\path\to\allowed.txt -- cmd /c type C:\path\to\allowed.tx
 Expected results:
 
 - `--help` and `--version` succeed.
-- `setup --check-only` succeeds and reports the current Windows supported subset and readiness details.
+- `setup --check-only` succeeds and reports the current Windows command surface and readiness details.
 - dry-run output reports command and capability state without implying enforcement.
-- plain `run -- cmd /c ...` succeeds with current Windows supported-subset messaging.
+- plain `run -- cmd /c ...` succeeds with current Windows command-surface messaging.
 - live exact-file grants succeed when the requested file path is explicitly granted.
 - live `--block-net` and supported proxy/port-policy runs succeed when WFP readiness is satisfied, and otherwise fail with explicit backend readiness diagnostics.
 

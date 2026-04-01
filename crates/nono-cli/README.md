@@ -64,6 +64,8 @@ The CLI supports named output themes for banners, summaries, warnings, and statu
 
 Available themes: `mocha`, `latte`, `frappe`, `macchiato`, `tokyo-night`, `dark-factory`, `minimal`
 
+On Windows, live `nono shell` and `nono wrap` are intentionally unavailable. Use `nono shell --dry-run` or `nono wrap --dry-run` to inspect policy, and use `nono run -- <command>` for supported execution.
+
 ```bash
 # Per invocation
 nono --theme tokyo-night run --allow-cwd -- claude

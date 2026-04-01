@@ -426,7 +426,7 @@ fn windows_dry_run_reports_preview_validation_without_enforcement_claims() {
         "expected command preview in dry-run output, got:\n{text}"
     );
     assert!(
-        text.contains("current Windows native subset without claiming full parity"),
+        text.contains("current Windows command surface without claiming full parity"),
         "expected preview-validation wording in dry-run output, got:\n{text}"
     );
     assert!(
@@ -454,7 +454,7 @@ fn windows_run_executes_basic_command() {
     );
     assert!(
         text.contains(
-            "currently supported enforced subset for filesystem and blocked-network policy"
+            "current supported command surface for filesystem and blocked-network policy"
         ),
         "expected current Windows supported-subset warning in output, got:\n{text}"
     );
@@ -529,7 +529,7 @@ fn windows_run_allows_supported_directory_allowlist_in_preview_live_run() {
     );
     assert!(
         text.contains(
-            "currently supported enforced subset for filesystem and blocked-network policy"
+            "current supported command surface for filesystem and blocked-network policy"
         ),
         "expected updated Windows preview warning, got:\n{text}"
     );
@@ -2267,8 +2267,12 @@ fn windows_shell_help_reports_documented_limitation() {
         "Windows shell help should succeed, output:\n{text}"
     );
     assert!(
-        text.contains("Windows does not support live `nono shell` execution."),
+        text.contains("Live `nono shell` is intentionally unavailable on Windows."),
         "expected documented Windows shell limitation in help output, got:\n{text}"
+    );
+    assert!(
+        text.contains("product limitation"),
+        "expected product-limitation wording in shell help output, got:\n{text}"
     );
 }
 
@@ -2286,7 +2290,7 @@ fn windows_shell_live_reports_documented_limitation() {
         "Windows shell live execution should fail closed, output:\n{text}"
     );
     assert!(
-        text.contains("Windows does not support live `nono shell` execution."),
+        text.contains("Live `nono shell` is intentionally unavailable on Windows."),
         "expected explicit Windows shell limitation message, got:\n{text}"
     );
     assert!(
@@ -2378,6 +2382,12 @@ fn windows_setup_check_only_reports_live_profile_subset() {
             || text.contains("Support status: partial")
             || text.contains("Support status: supported"),
         "expected setup summary support status, got:\n{text}"
+    );
+    assert!(
+        text.contains(
+            "Live 'nono shell' and 'nono wrap' remain intentionally unavailable on Windows"
+        ),
+        "expected explicit shell/wrap limitation note in setup output, got:\n{text}"
     );
     assert!(
         text.contains("User state root:"),
@@ -2634,8 +2644,12 @@ fn windows_wrap_help_reports_documented_limitation() {
         "Windows wrap help should succeed, output:\n{text}"
     );
     assert!(
-        text.contains("Windows does not support live `nono wrap` execution."),
+        text.contains("Live `nono wrap` is intentionally unavailable on Windows."),
         "expected documented Windows wrap limitation in help output, got:\n{text}"
+    );
+    assert!(
+        text.contains("product limitation"),
+        "expected product-limitation wording in wrap help output, got:\n{text}"
     );
 }
 
@@ -2653,7 +2667,7 @@ fn windows_wrap_reports_documented_limitation() {
         "Windows wrap should fail closed, output:\n{text}"
     );
     assert!(
-        text.contains("Windows does not support live `nono wrap` execution."),
+        text.contains("Live `nono wrap` is intentionally unavailable on Windows."),
         "expected explicit wrap limitation, got:\n{text}"
     );
     assert!(

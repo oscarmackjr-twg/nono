@@ -132,21 +132,21 @@ pub fn validate_preview_entry_point(
                 return Err(NonoError::UnsupportedPlatform(format!(
                     "Windows cannot enforce the requested sandbox controls for this live run ({}). \
 Use `nono run --dry-run ...` to validate policy, or rerun without those controls. \
-This is a current Windows subset limitation, not a silent fallback.",
+This is an explicit Windows product-surface limitation, not a silent fallback.",
                     reasons.join(", ")
                 )));
             }
             Ok(())
         }
         WindowsPreviewEntryPoint::Shell => Err(NonoError::UnsupportedPlatform(
-            "Windows does not support live `nono shell` execution. \
-Interactive shell hosts are a permanent unsupported Windows mode for the current product boundary. \
+            "Live `nono shell` is intentionally unavailable on Windows. \
+Interactive shell hosts remain a current Windows product limitation rather than a partially-enforced preview mode. \
 Use `nono run -- <command>` for supported execution or `nono shell --dry-run` to inspect shell policy."
                 .to_string(),
         )),
         WindowsPreviewEntryPoint::Wrap => Err(NonoError::UnsupportedPlatform(
-            "Windows does not support live `nono wrap` execution. \
-One-way wrap/apply mode is a permanent unsupported Windows mode for the current product boundary. \
+            "Live `nono wrap` is intentionally unavailable on Windows. \
+One-way wrap/apply mode remains a current Windows product limitation rather than a partially-enforced preview mode. \
 Use `nono run -- <command>` for supported execution or `nono wrap --dry-run` to inspect wrap policy."
                 .to_string(),
         )),

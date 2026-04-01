@@ -694,7 +694,7 @@ fn installation_platform_label() -> Result<&'static str> {
 
 #[cfg(target_os = "windows")]
 fn installation_platform_label() -> Result<&'static str> {
-    Ok("Windows (native subset)")
+    Ok("Windows (restricted execution)")
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -747,7 +747,8 @@ fn print_check_only_summary() {
     }
     print_windows_wfp_readiness_report("", &wfp);
     println!("Use 'nono run --dry-run ...' to validate profiles and policy.");
-    println!("Plain 'nono run -- <command>' uses the current Windows native subset with backend-owned launch validation and low-integrity write boundaries.");
+    println!("Plain 'nono run -- <command>' uses the current supported Windows command surface with backend-owned launch validation and low-integrity write boundaries.");
+    println!("Live 'nono shell' and 'nono wrap' remain intentionally unavailable on Windows; use their --dry-run forms to inspect policy.");
     println!("Run 'nono run --help' to inspect the current command surface.");
 }
 

@@ -1514,7 +1514,7 @@ fn apply_pre_fork_sandbox(
                 info!("Windows preview runtime status: {:?}", preview);
                 if !silent {
                     output::print_warning(
-                        "Windows preview: running with backend-owned Windows process containment plus the currently supported enforced subset for filesystem and blocked-network policy; unsupported Windows restrictions still fail closed with backend diagnostics",
+                        "Windows preview: running with backend-owned Windows process containment plus the current supported command surface for filesystem and blocked-network policy; unsupported Windows restrictions still fail closed with backend diagnostics",
                     );
                     eprintln!();
                 }
