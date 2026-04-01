@@ -28,6 +28,7 @@ Available themes:
 - `frappe`
 - `macchiato`
 - `tokyo-night`
+- `dark-factory`
 - `minimal`
 
 Resolution order:
@@ -42,6 +43,9 @@ nono --theme tokyo-night run --allow-cwd -- claude
 
 # Via environment variable
 NONO_THEME=latte nono run --allow-cwd -- codex
+
+# Industrial dark theme
+nono --theme dark-factory run --allow-cwd -- cargo test
 
 # Config file
 # ~/.config/nono/config.toml

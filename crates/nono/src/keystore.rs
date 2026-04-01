@@ -403,28 +403,36 @@ pub fn validate_file_uri(uri: &str) -> Result<()> {
         ))
     })?;
 
-    if !path_str.starts_with('/') {
+    let path = std::path::Path::new(path_str);
+    let is_absolute_uri_path = path_str.starts_with('/') || path.is_absolute();
+    if !is_absolute_uri_path {
         return Err(NonoError::ConfigParse(format!(
             "file:// URI must use an absolute path (file:///path), got: {}",
             uri
         )));
     }
 
-    let meaningful = path_str.trim_end_matches('/');
-    if meaningful.is_empty() || meaningful == "/" {
+    let mut has_non_root_component = false;
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                return Err(NonoError::ConfigParse(format!(
+                    "file:// URI must not contain path traversal (..): {}",
+                    uri
+                )));
+            }
+            std::path::Component::Normal(_) => {
+                has_non_root_component = true;
+            }
+            _ => {}
+        }
+    }
+
+    if !has_non_root_component {
         return Err(NonoError::ConfigParse(format!(
             "file:// URI path is empty: {}",
             uri
         )));
-    }
-
-    for component in std::path::Path::new(path_str).components() {
-        if matches!(component, std::path::Component::ParentDir) {
-            return Err(NonoError::ConfigParse(format!(
-                "file:// URI must not contain path traversal (..): {}",
-                uri
-            )));
-        }
     }
 
     const FORBIDDEN_FILE_CHARS: &[char] = &['\0', '\n', '\r', ';', '`', '|', '$', '&', '>', '<'];
@@ -2184,6 +2192,13 @@ mod tests {
         assert!(validate_file_uri("file:///run/secrets/api-token").is_ok());
         assert!(validate_file_uri("file:///tmp/secret.txt").is_ok());
         assert!(validate_file_uri("file:///etc/ssl/certs/ca.pem").is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_validate_file_uri_valid_windows_absolute_path() {
+        assert!(validate_file_uri(r"file://C:\secrets\api-token").is_ok());
+        assert!(validate_file_uri(r"file://C:\temp\secret.txt").is_ok());
     }
 
     #[test]

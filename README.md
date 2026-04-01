@@ -259,6 +259,7 @@ nono ships with multiple color themes inspired by popular terminal palettes. The
 | `frappe` | Catppuccin Frappe -- muted dark |
 | `macchiato` | Catppuccin Macchiato -- deep vivid dark |
 | `tokyo-night` | Tokyo Night -- cool blues and purples |
+| `dark-factory` | Industrial steel dark with ember orange accents |
 | `minimal` | Grayscale with orange accent |
 
 ```bash
@@ -267,6 +268,9 @@ nono --theme tokyo-night run --allow-cwd -- my-agent
 
 # Via environment variable
 export NONO_THEME=latte
+
+# Industrial dark theme
+nono --theme dark-factory run --allow-cwd -- cargo test
 
 # Via config file (~/.config/nono/config.toml)
 # [ui]

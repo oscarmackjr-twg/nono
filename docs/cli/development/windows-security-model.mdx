@@ -87,17 +87,17 @@ Its job is to:
 The initial compiled subset is intentionally narrow:
 
 - directory grants are compiled
-- single-file grants are marked unsupported for the first backend slice
-- write-only directory grants are marked unsupported for the first backend slice
+- single-file grants are compiled as exact-path rules
+- write-only directory grants are compiled as writable directory rules
 
 The first attached enforcement behavior for that policy is a **Windows preview live-run filesystem subset**:
 
-- if the compiled policy contains unsupported grant shapes, Windows live execution fails closed
-- unsupported Windows filesystem gaps now report deterministic backend reason labels such as `single-file grants`, `write-only directory grants`, and `execution directory outside supported allowlist` instead of collapsing every failure into a generic filesystem preview error
+- Windows live execution still fails closed when the capability set requests backend gaps such as backend-native deny-within-allow semantics
+- unsupported Windows filesystem gaps now report deterministic backend reason labels such as `execution directory outside supported allowlist` instead of collapsing every failure into a generic filesystem preview error
 - network and port-filtering preview gaps are now backend-owned as well, so live `--block-net`, proxy-policy, and related enforcement-dependent requests report deterministic backend reasons instead of a second CLI-only preview bucket
 - Windows preview entry-point decisions are backend-owned too: `run`, `shell`, and `wrap` now flow through the same Windows preview validation surface instead of hard-coding separate CLI-only preview rejections
 - Windows supervised feature classes are backend-owned as well: rollback snapshots, proxy filtering, runtime capability elevation, and runtime trust interception now compile into explicit supported vs unsupported Windows-supervisor results instead of CLI-side string assembly
-- if the compiled policy exists, the executable path required for launch must be covered by it
+- if the compiled policy exists, the executable path required for launch must be covered by it, including exact-path single-file rules
 - if a live run requests user-intent directory grants, the selected working directory must stay inside that compiled directory allowlist subset
 - restricted Windows launches now always run under the low-integrity child-token path when they use the compiled filesystem subset, so direct writes back into the user's medium-integrity workspace remain blocked even when the requested policy includes a writable directory
 - if that subset includes a writable directory, writable semantics are currently split into two Windows-native cases without relabeling the user's workspace:
@@ -111,6 +111,7 @@ The first attached enforcement behavior for that policy is a **Windows preview l
 - common absolute path arguments are preflight-validated against the compiled directory allowlist and rejected before launch when they point outside the supported subset
 - common Windows command surfaces now receive command-aware path mediation for `cmd.exe` builtins, `more.com`, PowerShell file cmdlets, `xcopy.exe`, `find.exe`, `findstr.exe`, `comp.exe`, `fc.exe`, and Windows Script Host launches
 - that command-aware mediation is intentionally a launch-time preflight for the current native subset, not a full shell-proof sandbox boundary; it relies on resolved program names plus known argument shapes and can be bypassed by shell-specific features or alternate invocation forms, which is why fuller Windows-native enforcement work still prioritizes backend boundaries such as WFP, supervisor brokering, and broader OS-level enforcement rather than treating argument parsing as the final security model
+- `override_deny` is now treated as policy preprocessing on Windows rather than as a backend-native deny rule: matching deny-group entries are removed before the Windows filesystem policy is compiled, but Windows still does not provide a native deny-within-allow boundary comparable to macOS Seatbelt
 - shell launchers also receive runtime hardening where Windows can enforce it directly, including `cmd.exe /d`, PowerShell `-NoProfile -NonInteractive -NoLogo`, and `cscript.exe //NoLogo //B`
 - read-only restricted launches now use a low-integrity child token, which gives Windows a real per-process write boundary for common medium-integrity host locations while still allowing reads from the compiled allowlist
 - protected-path validation now uses Windows-aware canonical comparison for case-insensitive drive letters and verbatim path prefixes, and Windows blocks access to both the current platform state root and the legacy `~/.nono` preview-era state root
@@ -121,7 +122,7 @@ The first attached enforcement behavior for that policy is a **Windows preview l
 - the initial policy baseline includes a Windows `system_read_windows` group so standard system executables have an explicit read grant instead of relying on preview-era assumptions
 - Windows rollback/object-store writes now use Windows-safe replace semantics instead of assuming Unix rename behavior, and restore failures caused by locked or in-use files are surfaced as explicit restore errors rather than being downgraded into generic warnings
 
-That is not full runtime filesystem enforcement yet. It is the first enforced slice attached to the backend policy model that later denial and brokering work will consume. The current subset is limited to directory-only allowlists that the backend can classify safely; single-file grants, write-only directory grants, and deny-override semantics still fail closed until later Windows backend work lands.
+That is not full runtime filesystem enforcement yet. It is the first enforced slice attached to the backend policy model that later denial and brokering work will consume. The current subset now includes directory allowlists, exact-path single-file grants, and write-only directory rules that can drive launch validation and writable-runtime selection; `override_deny` works as policy preprocessing, while backend-native deny-within-allow semantics and broader Windows-native write mediation remain deferred.
 
 ## Execution Semantics
 

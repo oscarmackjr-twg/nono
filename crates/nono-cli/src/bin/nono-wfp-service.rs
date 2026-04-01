@@ -34,15 +34,19 @@ use windows_sys::{
     core::GUID,
     Win32::{
         Foundation::HANDLE,
+        Foundation::{FWP_E_ALREADY_EXISTS, FWP_E_FILTER_NOT_FOUND},
         NetworkManagement::WindowsFilteringPlatform::{
             FwpmEngineClose0, FwpmEngineOpen0, FwpmFilterAdd0, FwpmFilterDeleteByKey0,
             FwpmFreeMemory0, FwpmGetAppIdFromFileName0, FwpmTransactionAbort0,
             FwpmTransactionBegin0, FwpmTransactionCommit0, FWPM_ACTION0, FWPM_ACTION0_0,
-            FWPM_CONDITION_ALE_APP_ID, FWPM_DISPLAY_DATA0, FWPM_FILTER0, FWPM_FILTER0_0,
+            FWPM_CONDITION_ALE_APP_ID, FWPM_CONDITION_FLAGS, FWPM_CONDITION_IP_LOCAL_PORT,
+            FWPM_CONDITION_IP_REMOTE_PORT, FWPM_DISPLAY_DATA0, FWPM_FILTER0, FWPM_FILTER0_0,
             FWPM_FILTER_CONDITION0, FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V6,
             FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6, FWPM_SESSION0,
-            FWPM_SUBLAYER_UNIVERSAL, FWP_ACTION_BLOCK, FWP_BYTE_BLOB, FWP_BYTE_BLOB_TYPE,
-            FWP_CONDITION_VALUE0, FWP_CONDITION_VALUE0_0, FWP_EMPTY, FWP_MATCH_EQUAL,
+            FWPM_SUBLAYER_UNIVERSAL, FWP_ACTION_BLOCK, FWP_ACTION_PERMIT, FWP_BYTE_BLOB,
+            FWP_BYTE_BLOB_TYPE, FWP_CONDITION_FLAG_IS_LOOPBACK, FWP_CONDITION_VALUE0,
+            FWP_CONDITION_VALUE0_0, FWP_MATCH_EQUAL, FWP_MATCH_FLAGS_ALL_SET, FWP_UINT16,
+            FWP_UINT32, FWP_UINT64, FWP_VALUE0, FWP_VALUE0_0,
         },
         System::Rpc::RPC_C_AUTHN_WINNT,
     },
@@ -126,7 +130,7 @@ fn build_enforced_pending_cleanup_response(
         protocol_version: WFP_RUNTIME_PROTOCOL_VERSION,
         status: "enforced-pending-cleanup".to_string(),
         details: format!(
-            "request {} for {} installed target-attached blocked-mode enforcement and requires cleanup after launch: {}",
+            "request {} for {} installed target-attached network-policy enforcement and requires cleanup after launch: {}",
             request.request_kind, request.runtime_target, details
         ),
     }
@@ -140,7 +144,7 @@ fn build_cleanup_succeeded_response(
         protocol_version: WFP_RUNTIME_PROTOCOL_VERSION,
         status: "cleanup-succeeded".to_string(),
         details: format!(
-            "request {} for {} removed target-attached blocked-mode enforcement: {}",
+            "request {} for {} removed target-attached network-policy enforcement: {}",
             request.request_kind, request.runtime_target, details
         ),
     }
@@ -154,7 +158,7 @@ fn build_cleanup_failed_response(
         protocol_version: WFP_RUNTIME_PROTOCOL_VERSION,
         status: "cleanup-failed".to_string(),
         details: format!(
-            "request {} for {} could not remove target-attached blocked-mode enforcement: {}",
+            "request {} for {} could not remove target-attached network-policy enforcement: {}",
             request.request_kind, request.runtime_target, details
         ),
     }
@@ -168,7 +172,7 @@ fn build_filtering_probe_failed_response(
         protocol_version: WFP_RUNTIME_PROTOCOL_VERSION,
         status: "filtering-probe-failed".to_string(),
         details: format!(
-            "request {} for {} could not install the backend-owned filtering probe: {}",
+            "request {} for {} could not install the backend-owned network-policy probe: {}",
             request.request_kind, request.runtime_target, details
         ),
     }
@@ -304,6 +308,30 @@ struct WfpLayerSpec {
 }
 
 #[cfg(target_os = "windows")]
+#[derive(Clone, Copy)]
+enum FilterAction {
+    Permit,
+    Block,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy)]
+enum PortCondition {
+    Remote(u16),
+    Local(u16),
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy)]
+struct PolicyFilterSpec {
+    key: GUID,
+    layer_key: GUID,
+    action: FilterAction,
+    port: Option<PortCondition>,
+    loopback_only: bool,
+}
+
+#[cfg(target_os = "windows")]
 fn build_wfp_layer_specs() -> [WfpLayerSpec; 4] {
     [
         WfpLayerSpec {
@@ -384,6 +412,99 @@ fn zero_guid() -> GUID {
 }
 
 #[cfg(target_os = "windows")]
+fn build_policy_filter_specs(
+    request: &WfpRuntimeActivationRequest,
+    outbound_rule: &str,
+    inbound_rule: &str,
+) -> Vec<PolicyFilterSpec> {
+    let mut specs = Vec::new();
+
+    for layer in build_wfp_layer_specs() {
+        let base = if layer.rule_name == "outbound" {
+            outbound_rule
+        } else {
+            inbound_rule
+        };
+        let is_outbound = layer.rule_name == "outbound";
+
+        if is_outbound {
+            for port in &request.tcp_connect_ports {
+                specs.push(PolicyFilterSpec {
+                    key: deterministic_filter_key(base, &format!("{}-connect-{port}", layer.label)),
+                    layer_key: layer.key,
+                    action: FilterAction::Permit,
+                    port: Some(PortCondition::Remote(*port)),
+                    loopback_only: false,
+                });
+            }
+
+            for port in &request.localhost_ports {
+                specs.push(PolicyFilterSpec {
+                    key: deterministic_filter_key(
+                        base,
+                        &format!("{}-localhost-connect-{port}", layer.label),
+                    ),
+                    layer_key: layer.key,
+                    action: FilterAction::Permit,
+                    port: Some(PortCondition::Remote(*port)),
+                    loopback_only: true,
+                });
+            }
+
+            let needs_outbound_block = request.network_mode != "allow-all"
+                || !request.tcp_connect_ports.is_empty()
+                || !request.localhost_ports.is_empty();
+            if needs_outbound_block {
+                specs.push(PolicyFilterSpec {
+                    key: deterministic_filter_key(base, layer.label),
+                    layer_key: layer.key,
+                    action: FilterAction::Block,
+                    port: None,
+                    loopback_only: false,
+                });
+            }
+        } else {
+            for port in &request.tcp_bind_ports {
+                specs.push(PolicyFilterSpec {
+                    key: deterministic_filter_key(base, &format!("{}-bind-{port}", layer.label)),
+                    layer_key: layer.key,
+                    action: FilterAction::Permit,
+                    port: Some(PortCondition::Local(*port)),
+                    loopback_only: false,
+                });
+            }
+            for port in &request.localhost_ports {
+                specs.push(PolicyFilterSpec {
+                    key: deterministic_filter_key(
+                        base,
+                        &format!("{}-localhost-bind-{port}", layer.label),
+                    ),
+                    layer_key: layer.key,
+                    action: FilterAction::Permit,
+                    port: Some(PortCondition::Local(*port)),
+                    loopback_only: true,
+                });
+            }
+
+            let needs_inbound_block = request.network_mode != "allow-all"
+                || !request.tcp_bind_ports.is_empty()
+                || !request.localhost_ports.is_empty();
+            if needs_inbound_block {
+                specs.push(PolicyFilterSpec {
+                    key: deterministic_filter_key(base, layer.label),
+                    layer_key: layer.key,
+                    action: FilterAction::Block,
+                    port: None,
+                    loopback_only: false,
+                });
+            }
+        }
+    }
+
+    specs
+}
+
+#[cfg(target_os = "windows")]
 fn open_wfp_engine() -> Result<WfpEngine, String> {
     let session: FWPM_SESSION0 = zeroed();
     let mut handle: HANDLE = null_mut();
@@ -430,13 +551,13 @@ fn get_app_id_blob(target_program: &std::path::Path) -> Result<WfpAppIdBlob, Str
 }
 
 #[cfg(target_os = "windows")]
-fn add_block_filter(
+fn add_policy_filter(
     engine: &WfpEngine,
-    filter_key: GUID,
-    layer_key: GUID,
+    spec: PolicyFilterSpec,
     app_id_blob: *mut FWP_BYTE_BLOB,
 ) -> Result<(), String> {
-    let mut condition = FWPM_FILTER_CONDITION0 {
+    let mut conditions = Vec::with_capacity(3);
+    conditions.push(FWPM_FILTER_CONDITION0 {
         fieldKey: FWPM_CONDITION_ALE_APP_ID,
         matchType: FWP_MATCH_EQUAL,
         conditionValue: FWP_CONDITION_VALUE0 {
@@ -445,24 +566,62 @@ fn add_block_filter(
                 byteBlob: app_id_blob,
             },
         },
-    };
+    });
+    if let Some(port) = spec.port {
+        let (field_key, value) = match port {
+            PortCondition::Remote(value) => (FWPM_CONDITION_IP_REMOTE_PORT, value),
+            PortCondition::Local(value) => (FWPM_CONDITION_IP_LOCAL_PORT, value),
+        };
+        conditions.push(FWPM_FILTER_CONDITION0 {
+            fieldKey: field_key,
+            matchType: FWP_MATCH_EQUAL,
+            conditionValue: FWP_CONDITION_VALUE0 {
+                r#type: FWP_UINT16,
+                Anonymous: FWP_CONDITION_VALUE0_0 { uint16: value },
+            },
+        });
+    }
+    if spec.loopback_only {
+        conditions.push(FWPM_FILTER_CONDITION0 {
+            fieldKey: FWPM_CONDITION_FLAGS,
+            matchType: FWP_MATCH_FLAGS_ALL_SET,
+            conditionValue: FWP_CONDITION_VALUE0 {
+                r#type: FWP_UINT32,
+                Anonymous: FWP_CONDITION_VALUE0_0 {
+                    uint32: FWP_CONDITION_FLAG_IS_LOOPBACK,
+                },
+            },
+        });
+    }
     let action = FWPM_ACTION0 {
-        r#type: FWP_ACTION_BLOCK,
+        r#type: match spec.action {
+            FilterAction::Permit => FWP_ACTION_PERMIT,
+            FilterAction::Block => FWP_ACTION_BLOCK,
+        },
         Anonymous: FWPM_ACTION0_0 {
             filterType: zero_guid(),
         },
     };
+    let mut weight_value = match spec.action {
+        FilterAction::Permit => 20u64,
+        FilterAction::Block => 10u64,
+    };
     let mut filter: FWPM_FILTER0 = zeroed();
-    filter.filterKey = filter_key;
+    filter.filterKey = spec.key;
     filter.displayData = FWPM_DISPLAY_DATA0 {
         name: null_mut(),
         description: null_mut(),
     };
-    filter.layerKey = layer_key;
+    filter.layerKey = spec.layer_key;
     filter.subLayerKey = FWPM_SUBLAYER_UNIVERSAL;
-    filter.weight.r#type = FWP_EMPTY;
-    filter.numFilterConditions = 1;
-    filter.filterCondition = &mut condition;
+    filter.weight = FWP_VALUE0 {
+        r#type: FWP_UINT64,
+        Anonymous: FWP_VALUE0_0 {
+            uint64: &mut weight_value,
+        },
+    };
+    filter.numFilterConditions = conditions.len() as u32;
+    filter.filterCondition = conditions.as_mut_ptr();
     filter.action = action;
     filter.Anonymous = FWPM_FILTER0_0 { rawContext: 0 };
 
@@ -471,29 +630,35 @@ fn add_block_filter(
     // whose nested pointers remain valid for the duration of the call.
     let status = unsafe { FwpmFilterAdd0(engine.0, &filter, null_mut(), &mut filter_id) };
     if status != 0 {
-        return Err(format_windows_error(
-            status,
-            "failed to install WFP blocked-mode filter",
-        ));
+        let details = if status == FWP_E_ALREADY_EXISTS as u32 {
+            "failed to install WFP filter because a stale filter with the same deterministic key already exists"
+                .to_string()
+        } else {
+            format_windows_error(status, "failed to install WFP network-policy filter")
+        };
+        return Err(details);
     }
     Ok(())
 }
 
 #[cfg(target_os = "windows")]
-fn delete_block_filter(engine: &WfpEngine, filter_key: GUID) -> Result<(), String> {
+fn delete_policy_filter(engine: &WfpEngine, filter_key: GUID) -> Result<(), String> {
     // SAFETY: engine handle is valid and filter_key points to an initialized GUID.
     let status = unsafe { FwpmFilterDeleteByKey0(engine.0, &filter_key) };
     if status != 0 {
-        return Err(format_windows_error(
-            status,
-            "failed to delete WFP blocked-mode filter",
-        ));
+        let details = if status == FWP_E_FILTER_NOT_FOUND as u32 {
+            "failed to delete WFP filter because the deterministic key was not found; cleanup is stale or has already run".to_string()
+        } else {
+            format_windows_error(status, "failed to delete WFP network-policy filter")
+        };
+        return Err(details);
     }
     Ok(())
 }
 
 #[cfg(target_os = "windows")]
-fn install_wfp_blocked_mode_filters(
+fn install_wfp_policy_filters(
+    request: &WfpRuntimeActivationRequest,
     target_program: &std::path::Path,
     outbound_rule: &str,
     inbound_rule: &str,
@@ -502,19 +667,15 @@ fn install_wfp_blocked_mode_filters(
     let app_id = get_app_id_blob(target_program)?;
     let transaction = WfpTransaction::begin(&engine)?;
 
-    for layer in build_wfp_layer_specs() {
-        let base = if layer.rule_name == "outbound" {
-            outbound_rule
-        } else {
-            inbound_rule
-        };
-        let filter_key = deterministic_filter_key(base, layer.label);
-        add_block_filter(&engine, filter_key, layer.key, app_id.as_ptr())?;
+    let specs = build_policy_filter_specs(request, outbound_rule, inbound_rule);
+    for spec in &specs {
+        add_policy_filter(&engine, *spec, app_id.as_ptr())?;
     }
 
     transaction.commit()?;
     Ok(format!(
-        "installed WFP app-id block filters for {} using outbound rule base {} and inbound rule base {}",
+        "installed {} WFP app-id network-policy filters for {} using outbound rule base {} and inbound rule base {}",
+        specs.len(),
         target_program.display(),
         outbound_rule,
         inbound_rule
@@ -522,35 +683,36 @@ fn install_wfp_blocked_mode_filters(
 }
 
 #[cfg(target_os = "windows")]
-fn remove_wfp_blocked_mode_filters(
+fn remove_wfp_policy_filters(
+    request: &WfpRuntimeActivationRequest,
     outbound_rule: &str,
     inbound_rule: &str,
 ) -> Result<String, String> {
     let engine = open_wfp_engine()?;
     let transaction = WfpTransaction::begin(&engine)?;
 
-    for layer in build_wfp_layer_specs() {
-        let base = if layer.rule_name == "outbound" {
-            outbound_rule
-        } else {
-            inbound_rule
-        };
-        let filter_key = deterministic_filter_key(base, layer.label);
-        delete_block_filter(&engine, filter_key)?;
+    let specs = build_policy_filter_specs(request, outbound_rule, inbound_rule);
+    for spec in &specs {
+        delete_policy_filter(&engine, spec.key)?;
     }
 
     transaction.commit()?;
     Ok(format!(
-        "removed WFP app-id block filters for outbound rule base {} and inbound rule base {}",
-        outbound_rule, inbound_rule
+        "removed {} WFP app-id network-policy filters for outbound rule base {} and inbound rule base {}",
+        specs.len(),
+        outbound_rule,
+        inbound_rule
     ))
 }
 
-fn activate_blocked_mode(request: &WfpRuntimeActivationRequest) -> WfpRuntimeActivationResponse {
+fn activate_policy_mode(request: &WfpRuntimeActivationRequest) -> WfpRuntimeActivationResponse {
     if request.protocol_version != WFP_RUNTIME_PROTOCOL_VERSION {
         return build_protocol_mismatch_response(request);
     }
-    if request.network_mode != "blocked" {
+    if !matches!(
+        request.network_mode.as_str(),
+        "blocked" | "proxy-only" | "allow-all"
+    ) {
         return build_invalid_activation_response(request);
     }
 
@@ -572,14 +734,14 @@ fn activate_blocked_mode(request: &WfpRuntimeActivationRequest) -> WfpRuntimeAct
         };
     if !target_program.exists() {
         return build_prerequisites_missing_response(format!(
-            "target program for blocked-mode enforcement does not exist: {}",
+            "target program for network-policy enforcement does not exist: {}",
             target_program.display()
         ));
     }
 
     #[cfg(target_os = "windows")]
     {
-        match install_wfp_blocked_mode_filters(&target_program, &outbound_rule, &inbound_rule) {
+        match install_wfp_policy_filters(request, &target_program, &outbound_rule, &inbound_rule) {
             Ok(details) => build_enforced_pending_cleanup_response(request, details),
             Err(err) => build_filtering_probe_failed_response(request, err),
         }
@@ -595,7 +757,7 @@ fn activate_blocked_mode(request: &WfpRuntimeActivationRequest) -> WfpRuntimeAct
     }
 }
 
-fn deactivate_blocked_mode(request: &WfpRuntimeActivationRequest) -> WfpRuntimeActivationResponse {
+fn deactivate_policy_mode(request: &WfpRuntimeActivationRequest) -> WfpRuntimeActivationResponse {
     if request.protocol_version != WFP_RUNTIME_PROTOCOL_VERSION {
         return build_protocol_mismatch_response(request);
     }
@@ -608,7 +770,7 @@ fn deactivate_blocked_mode(request: &WfpRuntimeActivationRequest) -> WfpRuntimeA
 
     #[cfg(target_os = "windows")]
     {
-        match remove_wfp_blocked_mode_filters(&outbound_rule, &inbound_rule) {
+        match remove_wfp_policy_filters(request, &outbound_rule, &inbound_rule) {
             Ok(details) => build_cleanup_succeeded_response(request, details),
             Err(err) => build_cleanup_failed_response(request, err),
         }
@@ -652,8 +814,10 @@ fn probe_runtime_activation() -> ExitCode {
         }
     };
     let response = match request.request_kind.as_str() {
-        "activate_blocked_mode" => activate_blocked_mode(&request),
-        "deactivate_blocked_mode" => deactivate_blocked_mode(&request),
+        "activate_blocked_mode" | "activate_proxy_mode" | "activate_allow_all_mode" => {
+            activate_policy_mode(&request)
+        }
+        "deactivate_blocked_mode" | "deactivate_policy_mode" => deactivate_policy_mode(&request),
         _ => build_invalid_activation_response(&request),
     };
     match serde_json::to_string(&response) {
@@ -724,8 +888,11 @@ mod tests {
             request_kind: "activate_blocked_mode".to_string(),
             network_mode: "blocked".to_string(),
             preferred_backend: "windows-filtering-platform".to_string(),
-            active_backend: "none".to_string(),
+            active_backend: "windows-filtering-platform".to_string(),
             runtime_target: "blocked Windows network access".to_string(),
+            tcp_connect_ports: Vec::new(),
+            tcp_bind_ports: Vec::new(),
+            localhost_ports: Vec::new(),
             target_program_path: Some(r"C:\tools\target.exe".to_string()),
             outbound_rule_name: Some("nono-test-out".to_string()),
             inbound_rule_name: Some("nono-test-in".to_string()),
@@ -759,8 +926,11 @@ mod tests {
             request_kind: "activate_proxy_mode".to_string(),
             network_mode: "proxy-only".to_string(),
             preferred_backend: "windows-filtering-platform".to_string(),
-            active_backend: "none".to_string(),
+            active_backend: "windows-filtering-platform".to_string(),
             runtime_target: "proxy Windows network access".to_string(),
+            tcp_connect_ports: Vec::new(),
+            tcp_bind_ports: vec![8080],
+            localhost_ports: vec![8080],
             target_program_path: None,
             outbound_rule_name: None,
             inbound_rule_name: None,
@@ -794,7 +964,7 @@ mod tests {
     #[test]
     fn blocked_mode_probe_reports_missing_target_program() {
         let request = sample_request();
-        let response = activate_blocked_mode(&request);
+        let response = activate_policy_mode(&request);
         assert!(matches!(
             response.status.as_str(),
             "prerequisites-missing" | "filtering-probe-failed"
@@ -817,6 +987,27 @@ mod tests {
         );
         assert_eq!(first_raw, second_raw);
         assert_ne!(first_raw, different_raw);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn proxy_policy_filter_specs_include_loopback_permits_and_block_fallback() {
+        let request = WfpRuntimeActivationRequest {
+            request_kind: "activate_proxy_mode".to_string(),
+            network_mode: "proxy-only".to_string(),
+            tcp_bind_ports: vec![8080],
+            localhost_ports: vec![8080],
+            ..sample_request()
+        };
+        let specs = build_policy_filter_specs(&request, "nono-out", "nono-in");
+        assert!(specs.iter().any(|spec| {
+            matches!(spec.action, FilterAction::Permit)
+                && matches!(spec.port, Some(PortCondition::Remote(8080)))
+                && spec.loopback_only
+        }));
+        assert!(specs.iter().any(|spec| {
+            matches!(spec.action, FilterAction::Block) && spec.port.is_none() && !spec.loopback_only
+        }));
     }
 
     #[test]

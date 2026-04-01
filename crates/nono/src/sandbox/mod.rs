@@ -10,6 +10,65 @@ use crate::error::Result;
 #[cfg(target_os = "windows")]
 use std::path::{Path, PathBuf};
 
+#[cfg(target_os = "windows")]
+fn windows_compare_path(path: &Path) -> PathBuf {
+    let raw = path.as_os_str().to_string_lossy();
+
+    if let Some(stripped) = raw.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{stripped}"));
+    }
+    if let Some(stripped) = raw.strip_prefix(r"\\?\") {
+        return PathBuf::from(stripped);
+    }
+
+    path.to_path_buf()
+}
+
+#[cfg(target_os = "windows")]
+fn windows_paths_equal(left: &Path, right: &Path) -> bool {
+    let left = windows_compare_path(left);
+    let right = windows_compare_path(right);
+
+    let mut left_components = left.components();
+    let mut right_components = right.components();
+
+    loop {
+        match (left_components.next(), right_components.next()) {
+            (None, None) => return true,
+            (None, Some(_)) | (Some(_), None) => return false,
+            (Some(left_component), Some(right_component)) => {
+                let left_component = left_component.as_os_str().to_string_lossy();
+                let right_component = right_component.as_os_str().to_string_lossy();
+                if !left_component.eq_ignore_ascii_case(&right_component) {
+                    return false;
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_path_starts_with(path: &Path, prefix: &Path) -> bool {
+    let path = windows_compare_path(path);
+    let prefix = windows_compare_path(prefix);
+    let mut path_components = path.components();
+    let mut prefix_components = prefix.components();
+
+    loop {
+        match (path_components.next(), prefix_components.next()) {
+            (_, None) => return true,
+            (None, Some(_)) => return false,
+            (Some(path_component), Some(prefix_component)) => {
+                let path_component = path_component.as_os_str().to_string_lossy();
+                let prefix_component = prefix_component.as_os_str().to_string_lossy();
+                if !path_component.eq_ignore_ascii_case(&prefix_component) {
+                    return false;
+                }
+            }
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod linux;
 
@@ -307,7 +366,6 @@ pub enum WindowsNetworkPolicyMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowsNetworkLaunchSupport {
     Supported,
-    UnsupportedShellHost,
 }
 
 /// Windows backend selection for a given network enforcement shape.
@@ -382,6 +440,12 @@ impl WindowsUnsupportedNetworkIssue {
 pub struct WindowsNetworkPolicy {
     /// The primary network mode requested by the capability set.
     pub mode: WindowsNetworkPolicyMode,
+    /// Explicit outbound connect allowlist ports.
+    pub tcp_connect_ports: Vec<u16>,
+    /// Explicit inbound bind allowlist ports.
+    pub tcp_bind_ports: Vec<u16>,
+    /// Loopback-only ports allowed for both connect and bind paths.
+    pub localhost_ports: Vec<u16>,
     /// Network capability shapes that are intentionally not in the first
     /// enforceable subset.
     pub unsupported: Vec<WindowsUnsupportedNetworkIssue>,
@@ -429,6 +493,13 @@ impl WindowsNetworkPolicy {
             self.preferred_backend.label(),
             self.active_backend.label()
         )
+    }
+
+    #[must_use]
+    pub fn has_port_rules(&self) -> bool {
+        !self.tcp_connect_ports.is_empty()
+            || !self.tcp_bind_ports.is_empty()
+            || !self.localhost_ports.is_empty()
     }
 }
 
@@ -490,8 +561,69 @@ impl WindowsFilesystemPolicy {
     #[must_use]
     pub fn covers_path(&self, path: &Path, required: crate::AccessMode) -> bool {
         self.rules.iter().any(|rule| {
-            !rule.is_file && path.starts_with(&rule.path) && rule.access.contains(required)
+            if !rule.access.contains(required) {
+                return false;
+            }
+
+            if rule.is_file {
+                #[cfg(target_os = "windows")]
+                {
+                    windows_paths_equal(path, &rule.path)
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    path == rule.path
+                }
+            } else {
+                #[cfg(target_os = "windows")]
+                {
+                    windows_path_starts_with(path, &rule.path)
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    path.starts_with(&rule.path)
+                }
+            }
         })
+    }
+
+    #[must_use]
+    pub fn covers_execution_dir(&self, path: &Path) -> bool {
+        self.rules.iter().any(|rule| {
+            !rule.is_file && {
+                #[cfg(target_os = "windows")]
+                {
+                    windows_path_starts_with(path, &rule.path)
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    path.starts_with(&rule.path)
+                }
+            }
+        })
+    }
+
+    #[must_use]
+    pub fn covers_writable_directory_path(&self, path: &Path) -> bool {
+        self.rules.iter().any(|rule| {
+            !rule.is_file && rule.access.contains(crate::AccessMode::Write) && {
+                #[cfg(target_os = "windows")]
+                {
+                    windows_path_starts_with(path, &rule.path)
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    path.starts_with(&rule.path)
+                }
+            }
+        })
+    }
+
+    #[must_use]
+    pub fn has_user_intent_directory_rules(&self) -> bool {
+        self.rules
+            .iter()
+            .any(|rule| !rule.is_file && rule.source.is_user_intent())
     }
 
     #[must_use]

@@ -747,7 +747,7 @@ fn print_check_only_summary() {
     }
     print_windows_wfp_readiness_report("", &wfp);
     println!("Use 'nono run --dry-run ...' to validate profiles and policy.");
-    println!("Plain 'nono run -- <command>' is preview-safe direct execution only.");
+    println!("Plain 'nono run -- <command>' uses the current Windows native subset with backend-owned launch validation and low-integrity write boundaries.");
     println!("Run 'nono run --help' to inspect the current command surface.");
 }
 
@@ -903,15 +903,27 @@ mod tests {
     /// `resolve_user_config_dir()` returning `~/.config`. This test catches that.
     #[test]
     fn test_setup_profiles_loadable_by_name() {
+        let _guard = crate::config::test_env_lock().lock().expect("env lock");
         let original_home = env::var("HOME").ok();
         let original_xdg = env::var("XDG_CONFIG_HOME").ok();
+        #[cfg(target_os = "windows")]
+        let original_appdata = env::var("APPDATA").ok();
 
         let tmp = tempdir().expect("tempdir");
 
-        // Point HOME at a tmpdir so both setup and loader derive paths
-        // under our control.
-        env::set_var("HOME", tmp.path());
-        env::remove_var("XDG_CONFIG_HOME");
+        #[cfg(target_os = "windows")]
+        {
+            env::set_var("APPDATA", tmp.path());
+            env::remove_var("XDG_CONFIG_HOME");
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            // Point HOME at a tmpdir so both setup and loader derive paths
+            // under our control.
+            env::set_var("HOME", tmp.path());
+            env::remove_var("XDG_CONFIG_HOME");
+        }
 
         // Run the actual setup code that writes example profiles.
         let runner = SetupRunner {
@@ -939,6 +951,14 @@ mod tests {
         }
         if let Some(xdg) = original_xdg {
             env::set_var("XDG_CONFIG_HOME", xdg);
+        } else {
+            env::remove_var("XDG_CONFIG_HOME");
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(appdata) = original_appdata {
+            env::set_var("APPDATA", appdata);
+        } else {
+            env::remove_var("APPDATA");
         }
     }
 

@@ -5,6 +5,8 @@ description: Validation checklist for Windows packaging and current native-subse
 
 Use this checklist before handing a Windows build to a tester or marking a release candidate as ready for broader validation of the current Windows native subset.
 
+For the current Windows filesystem contract, see [Windows Filesystem Parity Contract](/cli/development/windows-filesystem-parity-contract).
+
 ## Packaging Validation
 
 - Confirm the release workflow produced `nono-vX.Y.Z-x86_64-pc-windows-msvc-machine.msi`.
@@ -28,6 +30,7 @@ nono setup --check-only
 nono run --dry-run -- cmd /c echo test
 nono run --dry-run --profile codex -- cmd /c echo test
 nono run -- cmd /c echo hello
+nono run --read-file C:\path\to\allowed.txt -- cmd /c type C:\path\to\allowed.txt
 ```
 
 Expected results:
@@ -36,6 +39,8 @@ Expected results:
 - `setup --check-only` succeeds and reports the current Windows supported subset and readiness details.
 - dry-run output reports command and capability state without implying enforcement.
 - plain `run -- cmd /c ...` succeeds with current Windows supported-subset messaging.
+- live exact-file grants succeed when the requested file path is explicitly granted.
+- live `--block-net` and supported proxy/port-policy runs succeed when WFP readiness is satisfied, and otherwise fail with explicit backend readiness diagnostics.
 
 ## Guardrail Validation
 
@@ -43,7 +48,6 @@ Run these commands and confirm they fail intentionally:
 
 ```powershell
 nono run --profile codex -- cmd /c echo hello
-nono run --block-net -- cmd /c echo hello
 nono shell
 nono wrap -- cmd /c echo hello
 ```
@@ -53,6 +57,12 @@ Expected results:
 - each command returns a non-zero exit code
 - each failure uses explicit Windows limitation or backend-diagnostic wording
 - none of the outputs claim that sandbox enforcement was applied
+
+Also confirm:
+
+- `override_deny` use cases that already resolve during policy preprocessing do not fail purely because the run is on Windows
+- command-aware path mediation still rejects absolute or escaped file paths outside the compiled allowlist
+- WFP-backed failures distinguish readiness, activation, stale-filter, and cleanup diagnostics instead of generic preview-limit wording
 
 ## CI Validation
 

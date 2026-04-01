@@ -3,10 +3,11 @@ title: Windows Network Enforcement
 description: Design spike for the Windows network enforcement backend
 ---
 
-This note now covers both the initial `WIN-704` design spike and the current implementation slice. Windows still does **not** have full network parity, but it now has both:
+This note now covers both the initial `WIN-704` design spike and the current implementation slice. Windows still does **not** have full network parity, but it now has:
 
-- a real first blocked-network backend path for a narrow supported subset
-- a first real WFP API-backed install/delete primitive behind the service-host activation contract
+- a real WFP-backed app-scoped network-policy backend for live Windows runs
+- service-managed install and cleanup for blocked, proxy-only, and practical port allowlist shapes
+- shared direct and supervised runtime activation/cleanup behavior
 
 ## Selected Direction
 
@@ -21,7 +22,7 @@ This is the only option in scope that plausibly gives:
 - auditable deny paths
 - an upgrade path to proxy-only and richer policy shapes
 
-The current implementation does **not** have full WFP parity yet. It adds the compiled Windows network policy model, records both the preferred backend (`WFP`) and the currently active backend for the narrow supported subset, and now also provides a first real user-mode WFP app-id filter install/delete path inside `nono-wfp-service`.
+The current implementation does **not** have full WFP parity yet. It adds the compiled Windows network policy model, records `WFP` as both the preferred and active backend for the supported shapes, and uses `nono-wfp-service` to install/remove app-scoped WFP filters for live runs.
 
 ## Why Not the Other Options
 
@@ -42,13 +43,11 @@ The first backend-owned network policy model distinguishes:
 - `Blocked`
 - `ProxyOnly { port, bind_ports }`
 
-The spike also makes unsupported shapes explicit:
+The supported WFP-backed shape now also carries:
 
 - TCP connect allowlists
 - TCP bind allowlists
 - localhost-only port filters
-
-Those unsupported shapes now compile into deterministic backend labels instead of being inferred ad hoc at call sites.
 
 ## Policy Compilation Contract
 
@@ -59,41 +58,37 @@ The library now exposes a Windows network policy compiler:
 That compiled policy carries:
 
 - the selected Windows network mode
-- a list of unsupported network capability shapes
+- deduplicated connect / bind / localhost port allowlists
+- the selected backend state for live enforcement
 
 This mirrors the Windows filesystem policy compiler and is the intended backend contract for later runtime installation.
 
 ## Runtime Plan
 
-Recommended sequence:
+Current sequence:
 
 1. compile `WindowsNetworkPolicy` from `CapabilitySet`
 2. keep preview/runtime classification backend-owned
-3. implement real `Blocked` enforcement first
-4. then add `ProxyOnly localhost:<port>` enforcement
-5. defer richer port filters until the WFP path is stable
+3. send a single WFP runtime activation request for the selected policy shape
+4. install deterministic permit filters first, then the fallback block filters for the remaining surface
+5. remove the same deterministic filter set on cleanup
 
 ## Preview and Full-Port Boundary
 
 Today:
 
-- `AllowAll` remains the no-enforcement path
-- `Blocked` now has a real first backend for standalone executable launches:
-  - `nono` stages a unique executable copy
-  - installs inbound/outbound Windows Firewall block rules for that staged path
-  - launches the staged path
-  - removes the rules on cleanup
-- that blocked-network slice now reports clearer backend-owned diagnostics:
-  - elevation failures explicitly call out the current Windows Firewall-rule backend
-  - unsupported shapes explain that WFP is the preferred long-term backend even when no active backend is available yet
-- shell and interpreter hosts such as `cmd.exe` and `powershell.exe` remain intentionally unsupported for this first backend slice because they can trampoline into unrestricted descendants
-- proxy-only and richer port filters still fail closed
+- plain `AllowAll` remains the no-enforcement path
+- `Blocked` installs per-app WFP block filters on connect and accept layers
+- `ProxyOnly` allows only loopback traffic on the selected proxy port plus explicitly allowed bind ports, then blocks the rest
+- connect / bind / localhost allowlists install higher-priority permit filters ahead of the fallback block filters
+- the same WFP path is used for direct launches, supervised launches, and child processes reached through interpreter or shell hosts such as `cmd.exe`
+- activation, stale-filter collisions, and cleanup mismatches now return backend-owned diagnostics from the service host
 
-Later full-port work should:
+Remaining work is narrower:
 
-- expand the WFP-backed `Blocked` slice beyond the current narrow subset
-- make `AllowAll` and `Blocked` distinct in runtime behavior
-- return deterministic unsupported results for policy shapes still outside the first backend subset
+- ship the final privileged service/driver packaging model
+- widen process-tree attachment beyond the current per-app launch contract
+- add any future policy shapes that still fall outside the current port/loopback model
 
 ## WFP Scaffold Boundary
 
@@ -102,7 +97,7 @@ The current backend contract now carries two backend states per compiled Windows
 - `preferred backend`
   This is the long-term Windows target. For `Blocked` and `ProxyOnly`, it is `windows-filtering-platform`.
 - `active backend`
-  This is what the current runtime can actually install today. For the narrow supported `Blocked` subset, it is now `windows-filtering-platform`. Unsupported shapes keep `active backend: none`.
+  This is what the current runtime can actually install today. For the supported blocked / proxy / port-policy shapes, it is `windows-filtering-platform`.
 
 That means later WFP work can replace the active backend without changing the higher-level `WindowsNetworkPolicy` contract again.
 
@@ -113,7 +108,7 @@ The runtime code now also reflects that split directly:
 - `FirewallRulesNetworkBackend`
   The older coarse backend slice kept in code as a fallback implementation path while the WFP path is hardened further.
 
-The WFP scaffold does not claim success. It returns deterministic diagnostics for cases such as:
+The WFP path returns deterministic diagnostics for cases such as:
 
 - WFP backend not installed
 - WFP backend not available in the current build
@@ -125,35 +120,34 @@ The runtime activation path now uses the same lifecycle model as setup readiness
 - `start service first`
 - `install driver first`
 - `start driver first`
-- `components present, but runtime activation still must install or clean up enforceable blocked-mode state`
+- `components present, but runtime activation still must install or clean up enforceable network-policy state`
 
 That keeps setup, readiness, and live WFP activation failures aligned without falsely claiming working WFP enforcement.
 
 `nono setup --check-only` now also prints a single `Next action:` line derived from that same lifecycle state, so setup guidance and live activation failures point at the same recovery step.
 
-When the service and driver both probe as present, the Windows runtime now performs a first explicit backend handshake by running `nono-wfp-service --probe-runtime-activation` with a JSON activation request over stdio. The first concrete request path is `activate_blocked_mode`.
+When the service and driver both probe as present, the Windows runtime performs backend activation by running `nono-wfp-service --probe-runtime-activation` with a JSON activation request over stdio. The runtime request now covers `activate_blocked_mode`, `activate_proxy_mode`, and `activate_allow_all_mode` with port restrictions.
 
-That service-owned blocked-mode workflow now:
+That service-owned workflow now:
 - validates the request kind and protocol version
 - re-checks local backend layout inside the service host
-- performs a first backend-owned blocked-mode activation attempt
+- performs a backend-owned network-policy activation attempt
 - returns a structured activation state
 
-Today, `activate_blocked_mode` inside `nono-wfp-service` validates the request, derives the target app id with `FwpmGetAppIdFromFileName0`, opens the WFP engine, and installs app-scoped block filters on:
+Today, `nono-wfp-service` validates the request, derives the target app id with `FwpmGetAppIdFromFileName0`, opens the WFP engine, and installs app-scoped permit/block filters on:
 
 - `FWPM_LAYER_ALE_AUTH_CONNECT_V4`
 - `FWPM_LAYER_ALE_AUTH_CONNECT_V6`
 - `FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4`
 - `FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6`
 
-Those filters are keyed deterministically from the existing runtime request fields so the matching `deactivate_blocked_mode` request can remove them by key. That means the service host now owns both install and cleanup for a real WFP-backed blocked-mode primitive under the existing JSON transport contract.
+Those filters are keyed deterministically from the runtime request fields so the matching `deactivate_policy_mode` request can remove them by key. Permit filters are installed at higher weight for allowed connect / bind / loopback ports, followed by fallback block filters for the remaining surface.
 
 This does **not** mean the broader Windows network backend is finished:
 
-- backend selection now routes the narrow supported direct `Blocked` subset to the `windows-filtering-platform` backend
-- shell and interpreter hosts still fail closed for that subset
-- runtime still fails closed when activation cannot install or clean up those filters
-- richer modes and wider process-tree semantics are still deferred
+- backend selection now routes supported direct and supervised Windows policies to `windows-filtering-platform`
+- runtime still fails closed when activation cannot install or clean up the required filters
+- broader packaging, service hardening, and future policy shapes are still deferred
 
 The first real probing layer is now in place for that scaffold:
 

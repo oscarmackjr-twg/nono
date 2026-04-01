@@ -1617,6 +1617,46 @@ mod tests {
     use std::env;
     use tempfile::tempdir;
 
+    #[cfg(target_os = "windows")]
+    fn test_home() -> &'static str {
+        r"C:\Users\tester"
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn test_home() -> &'static str {
+        "/home/user"
+    }
+
+    #[cfg(target_os = "windows")]
+    fn test_xdg_state_home() -> &'static str {
+        r"C:\Users\tester\AppData\Local\state"
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn test_xdg_state_home() -> &'static str {
+        "/custom/state"
+    }
+
+    #[cfg(target_os = "windows")]
+    fn test_xdg_cache_home() -> &'static str {
+        r"C:\Users\tester\AppData\Local\cache"
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn test_xdg_cache_home() -> &'static str {
+        "/custom/cache"
+    }
+
+    #[cfg(target_os = "windows")]
+    fn test_xdg_runtime_dir() -> &'static str {
+        r"C:\Users\tester\AppData\Local\Temp\runtime"
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn test_xdg_runtime_dir() -> &'static str {
+        "/run/user/1000"
+    }
+
     #[test]
     fn test_valid_profile_names() {
         assert!(is_valid_profile_name("claude-code"));
@@ -1631,17 +1671,20 @@ mod tests {
 
     #[test]
     fn test_expand_vars() {
+        let _guard = crate::config::test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         // Save original HOME to restore after test (avoid polluting other parallel tests)
         let original_home = env::var("HOME").ok();
 
         let workdir = PathBuf::from("/projects/myapp");
-        env::set_var("HOME", "/home/user");
+        env::set_var("HOME", test_home());
 
         let expanded = expand_vars("$WORKDIR/src", &workdir).expect("valid env");
         assert_eq!(expanded, PathBuf::from("/projects/myapp/src"));
 
         let expanded = expand_vars("$HOME/.config", &workdir).expect("valid env");
-        assert_eq!(expanded, PathBuf::from("/home/user/.config"));
+        assert_eq!(expanded, PathBuf::from(test_home()).join(".config"));
 
         // Restore original HOME
         if let Some(home) = original_home {
@@ -1651,6 +1694,9 @@ mod tests {
 
     #[test]
     fn test_expand_vars_xdg_state_home() {
+        let _guard = crate::config::test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         // $XDG_STATE_HOME must be expanded so that profiles and deny rules
         // can reference it portably. Without this, users cannot write
         // add_deny_access: ["$XDG_STATE_HOME"] and the variable is treated
@@ -1658,17 +1704,26 @@ mod tests {
         let original_home = env::var("HOME").ok();
         let original_state = env::var("XDG_STATE_HOME").ok();
 
-        env::set_var("HOME", "/home/user");
-        env::set_var("XDG_STATE_HOME", "/custom/state");
+        env::set_var("HOME", test_home());
+        env::set_var("XDG_STATE_HOME", test_xdg_state_home());
 
         let workdir = PathBuf::from("/projects/myapp");
         let expanded = expand_vars("$XDG_STATE_HOME/history", &workdir).expect("valid env");
-        assert_eq!(expanded, PathBuf::from("/custom/state/history"));
+        assert_eq!(
+            expanded,
+            PathBuf::from(test_xdg_state_home()).join("history")
+        );
 
         // Fallback when env var is unset
         env::remove_var("XDG_STATE_HOME");
         let expanded = expand_vars("$XDG_STATE_HOME/history", &workdir).expect("valid env");
-        assert_eq!(expanded, PathBuf::from("/home/user/.local/state/history"));
+        assert_eq!(
+            expanded,
+            PathBuf::from(test_home())
+                .join(".local")
+                .join("state")
+                .join("history")
+        );
 
         // Restore
         if let Some(home) = original_home {
@@ -1681,20 +1736,26 @@ mod tests {
 
     #[test]
     fn test_expand_vars_xdg_cache_home() {
+        let _guard = crate::config::test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let original_home = env::var("HOME").ok();
         let original_cache = env::var("XDG_CACHE_HOME").ok();
 
-        env::set_var("HOME", "/home/user");
-        env::set_var("XDG_CACHE_HOME", "/custom/cache");
+        env::set_var("HOME", test_home());
+        env::set_var("XDG_CACHE_HOME", test_xdg_cache_home());
 
         let workdir = PathBuf::from("/projects/myapp");
         let expanded = expand_vars("$XDG_CACHE_HOME/pip", &workdir).expect("valid env");
-        assert_eq!(expanded, PathBuf::from("/custom/cache/pip"));
+        assert_eq!(expanded, PathBuf::from(test_xdg_cache_home()).join("pip"));
 
         // Fallback when env var is unset
         env::remove_var("XDG_CACHE_HOME");
         let expanded = expand_vars("$XDG_CACHE_HOME/pip", &workdir).expect("valid env");
-        assert_eq!(expanded, PathBuf::from("/home/user/.cache/pip"));
+        assert_eq!(
+            expanded,
+            PathBuf::from(test_home()).join(".cache").join("pip")
+        );
 
         // Restore
         if let Some(home) = original_home {
@@ -1707,13 +1768,19 @@ mod tests {
 
     #[test]
     fn test_expand_vars_xdg_runtime_dir() {
+        let _guard = crate::config::test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let original_runtime = env::var("XDG_RUNTIME_DIR").ok();
 
-        env::set_var("XDG_RUNTIME_DIR", "/run/user/1000");
+        env::set_var("XDG_RUNTIME_DIR", test_xdg_runtime_dir());
 
         let workdir = PathBuf::from("/projects/myapp");
         let expanded = expand_vars("$XDG_RUNTIME_DIR/pulse", &workdir).expect("valid env");
-        assert_eq!(expanded, PathBuf::from("/run/user/1000/pulse"));
+        assert_eq!(
+            expanded,
+            PathBuf::from(test_xdg_runtime_dir()).join("pulse")
+        );
 
         // When unset, $XDG_RUNTIME_DIR has no default per the spec — the
         // variable should be left unexpanded so the path won't resolve.
@@ -1731,8 +1798,12 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn test_resolve_user_config_dir_uses_valid_absolute_xdg() {
+        let _guard = crate::config::test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let tmp = tempdir().expect("tmpdir");
         env::set_var("XDG_CONFIG_HOME", tmp.path());
         let resolved = resolve_user_config_dir().expect("resolve user config dir");
@@ -1743,8 +1814,12 @@ mod tests {
         env::remove_var("XDG_CONFIG_HOME");
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn test_resolve_user_config_dir_falls_back_on_relative_xdg() {
+        let _guard = crate::config::test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let expected_home = home_dir().expect("home dir");
         env::set_var("XDG_CONFIG_HOME", "relative/path");
 
@@ -1757,6 +1832,9 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn test_resolve_user_config_dir_uses_appdata() {
+        let _guard = crate::config::test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let tmp = tempdir().expect("tmpdir");
         let original_appdata = env::var("APPDATA").ok();
         let original_xdg = env::var("XDG_CONFIG_HOME").ok();
@@ -1785,6 +1863,9 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn test_expand_vars_uses_windows_home_and_appdata() {
+        let _guard = crate::config::test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let original_home = env::var("HOME").ok();
         let original_userprofile = env::var("USERPROFILE").ok();
         let original_appdata = env::var("APPDATA").ok();

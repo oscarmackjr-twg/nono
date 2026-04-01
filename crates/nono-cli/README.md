@@ -62,7 +62,7 @@ nono run --allow-cwd --dry-run -- command
 
 The CLI supports named output themes for banners, summaries, warnings, and status text.
 
-Available themes: `mocha`, `latte`, `frappe`, `macchiato`, `tokyo-night`, `minimal`
+Available themes: `mocha`, `latte`, `frappe`, `macchiato`, `tokyo-night`, `dark-factory`, `minimal`
 
 ```bash
 # Per invocation
@@ -70,6 +70,9 @@ nono --theme tokyo-night run --allow-cwd -- claude
 
 # Environment variable
 export NONO_THEME=latte
+
+# Industrial dark theme
+nono --theme dark-factory run --allow-cwd -- cargo test
 
 # Config file
 # ~/.config/nono/config.toml

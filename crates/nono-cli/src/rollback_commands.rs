@@ -1458,7 +1458,16 @@ mod tests {
         if let Some(home) = dirs::home_dir() {
             let path = home.join("dev").join("project");
             let result = shorten_home(&path);
+            #[cfg(target_os = "windows")]
+            assert!(
+                result.starts_with("~\\"),
+                "Expected ~\\... but got: {result}"
+            );
+            #[cfg(not(target_os = "windows"))]
             assert!(result.starts_with("~/"), "Expected ~/... but got: {result}");
+            #[cfg(target_os = "windows")]
+            assert!(result.ends_with(r"dev\project"));
+            #[cfg(not(target_os = "windows"))]
             assert!(result.ends_with("dev/project"));
         }
     }

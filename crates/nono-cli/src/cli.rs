@@ -92,7 +92,7 @@ pub struct Cli {
     #[arg(long, short = 's', global = true, help_heading = "OPTIONS")]
     pub silent: bool,
 
-    /// Color theme for output (mocha, latte, frappe, macchiato, tokyo-night, minimal)
+    /// Color theme for output (mocha, latte, frappe, macchiato, tokyo-night, dark-factory, minimal)
     #[arg(
         long,
         global = true,

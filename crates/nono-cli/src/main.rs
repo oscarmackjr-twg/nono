@@ -1866,11 +1866,7 @@ fn try_prepare_low_integrity_runtime_root(
         return Ok(None);
     }
 
-    if Sandbox::windows_supports_direct_writable_dir(&managed_root) {
-        Ok(Some(managed_root))
-    } else {
-        Ok(None)
-    }
+    Ok(Some(managed_root))
 }
 
 #[cfg(target_os = "windows")]
@@ -1884,6 +1880,43 @@ fn try_set_low_integrity_label(path: &std::path::Path) -> bool {
     };
 
     output.status.success()
+}
+
+#[cfg(target_os = "windows")]
+fn normalize_windows_compare_path(path: &std::path::Path) -> String {
+    path.to_string_lossy()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_ascii_lowercase()
+}
+
+#[cfg(target_os = "windows")]
+fn trusted_windows_local_appdata() -> Result<std::path::PathBuf> {
+    let trusted = dirs::data_local_dir().ok_or_else(|| {
+        NonoError::SandboxInit(
+            "Failed to resolve the Windows LocalAppData directory from the OS".to_string(),
+        )
+    })?;
+
+    if let Some(env_local) = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from) {
+        let env_normalized = normalize_windows_compare_path(&env_local);
+        let trusted_normalized = normalize_windows_compare_path(&trusted);
+        if env_normalized != trusted_normalized {
+            return Err(NonoError::SandboxInit(format!(
+                "Failed to prepare Windows writable runtime root: LOCALAPPDATA override '{}' does not match the OS LocalAppData directory '{}'",
+                env_local.display(),
+                trusted.display()
+            )));
+        }
+    }
+
+    Ok(trusted)
+}
+
+#[cfg(target_os = "windows")]
+fn runtime_root_needs_low_integrity_label(path: &std::path::Path) -> bool {
+    let normalized = path.to_string_lossy().to_ascii_lowercase();
+    normalized.contains("\\temp\\low\\") || normalized.contains("\\locallow\\")
 }
 
 #[cfg(target_os = "windows")]
@@ -1909,10 +1942,9 @@ fn prepare_windows_runtime_env_vars(
     } else if let Some(managed_root) = try_prepare_low_integrity_runtime_root(runtime_state_dir)? {
         managed_root
     } else {
-        std::env::var_os("LOCALAPPDATA")
-            .map(std::path::PathBuf::from)
-            .map(|local| local.join("Temp").join("Low"))
-            .unwrap_or_else(|| runtime_state_dir.join(".nono-runtime-low"))
+        trusted_windows_local_appdata()?
+            .join("Temp")
+            .join("Low")
             .join("nono")
             .join(
                 runtime_state_dir
@@ -1921,16 +1953,23 @@ fn prepare_windows_runtime_env_vars(
             )
     };
     let layout = WindowsRuntimeLayout::new(runtime_root);
-    layout.ensure_dirs()?;
-    if !Sandbox::windows_supports_direct_writable_dir(&layout.runtime_root)
-        && layout
-            .runtime_root
-            .to_string_lossy()
-            .to_ascii_lowercase()
-            .contains("\\temp\\low\\")
+    std::fs::create_dir_all(&layout.runtime_root).map_err(|e| {
+        NonoError::SandboxInit(format!(
+            "Failed to prepare Windows runtime state directory {}: {}",
+            layout.runtime_root.display(),
+            e
+        ))
+    })?;
+    if runtime_root_needs_low_integrity_label(&layout.runtime_root)
+        && !Sandbox::windows_supports_direct_writable_dir(&layout.runtime_root)
+        && !try_set_low_integrity_label(&layout.runtime_root)
     {
-        let _ = try_set_low_integrity_label(&layout.runtime_root);
+        return Err(NonoError::SandboxInit(format!(
+            "Failed to prepare Windows writable runtime root {}: the directory is not low-integrity-compatible",
+            layout.runtime_root.display()
+        )));
     }
+    layout.ensure_dirs()?;
 
     if !Sandbox::windows_supports_direct_writable_dir(&layout.runtime_root) {
         return Err(NonoError::SandboxInit(format!(
@@ -3694,7 +3733,8 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn test_validate_windows_preview_direct_execution_blocks_unsupported_override_deny() {
+    fn test_validate_windows_preview_direct_execution_allows_override_deny_when_policy_is_supported(
+    ) {
         let dir = tempfile::tempdir().expect("tempdir");
         let flags = ExecutionFlags {
             strategy: exec_strategy::ExecStrategy::Direct,
@@ -3725,9 +3765,8 @@ mod tests {
             override_deny_paths: vec![dir.path().to_path_buf()],
         };
 
-        let err = validate_windows_preview_direct_execution(&flags, &CapabilitySet::new())
-            .expect_err("override_deny should remain blocked on Windows preview");
-        assert!(err.to_string().contains("deny-override"));
+        validate_windows_preview_direct_execution(&flags, &CapabilitySet::new())
+            .expect("override_deny preprocessing should not be blocked on Windows preview");
     }
 
     #[test]
@@ -3737,6 +3776,7 @@ mod tests {
         assert!(!trust_interception_active(Some(&policy)));
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn test_trust_interception_active_when_includes_exist() {
         let policy = nono::trust::TrustPolicy {

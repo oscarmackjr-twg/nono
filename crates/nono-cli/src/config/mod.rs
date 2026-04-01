@@ -13,6 +13,9 @@ use crate::policy;
 use nono::{NonoError, Result};
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
+
 // ============================================================================
 // Environment variable validation
 // ============================================================================
@@ -40,8 +43,16 @@ pub fn validated_home() -> Result<String> {
 }
 
 fn resolve_home_env() -> Result<(String, &'static str)> {
+    #[cfg(not(target_os = "windows"))]
     if let Ok(home) = std::env::var("HOME") {
         return Ok((home, "HOME"));
+    }
+
+    #[cfg(target_os = "windows")]
+    if let Ok(home) = std::env::var("HOME") {
+        if Path::new(&home).is_absolute() {
+            return Ok((home, "HOME"));
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -96,6 +107,12 @@ pub fn user_state_dir() -> Option<PathBuf> {
     dirs::state_dir()
         .or_else(dirs::data_local_dir)
         .map(|p| p.join("nono"))
+}
+
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> &'static Mutex<()> {
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    ENV_LOCK.get_or_init(|| Mutex::new(()))
 }
 
 /// Legacy Windows state directory used by earlier preview builds.
@@ -266,10 +283,36 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn test_validated_home_falls_back_to_userprofile() {
+        let _guard = test_env_lock().lock().expect("env lock");
         let original_home = std::env::var("HOME").ok();
         let original_userprofile = std::env::var("USERPROFILE").ok();
 
         std::env::remove_var("HOME");
+        std::env::set_var("USERPROFILE", r"C:\Users\tester");
+
+        let home = validated_home().expect("USERPROFILE should be accepted on Windows");
+        assert_eq!(home, r"C:\Users\tester");
+
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        if let Some(userprofile) = original_userprofile {
+            std::env::set_var("USERPROFILE", userprofile);
+        } else {
+            std::env::remove_var("USERPROFILE");
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_validated_home_ignores_non_absolute_home_when_userprofile_exists() {
+        let _guard = test_env_lock().lock().expect("env lock");
+        let original_home = std::env::var("HOME").ok();
+        let original_userprofile = std::env::var("USERPROFILE").ok();
+
+        std::env::set_var("HOME", "/home/user");
         std::env::set_var("USERPROFILE", r"C:\Users\tester");
 
         let home = validated_home().expect("USERPROFILE should be accepted on Windows");

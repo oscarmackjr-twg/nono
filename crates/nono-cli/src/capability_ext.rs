@@ -518,6 +518,10 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn json_string(path: &Path) -> String {
+        serde_json::to_string(&path.display().to_string()).expect("json path")
+    }
+
     fn sandbox_args() -> SandboxArgs {
         SandboxArgs::default()
     }
@@ -713,14 +717,14 @@ mod tests {
                 r#"{{
                     "meta": {{ "name": "policy-adds" }},
                     "policy": {{
-                        "add_allow_read": ["{}"],
-                        "add_allow_write": ["{}"],
-                        "add_allow_readwrite": ["{}"]
+                        "add_allow_read": [{read}],
+                        "add_allow_write": [{write}],
+                        "add_allow_readwrite": [{readwrite}]
                     }}
                 }}"#,
-                read_dir.display(),
-                write_dir.display(),
-                rw_dir.display()
+                read = json_string(&read_dir),
+                write = json_string(&write_dir),
+                readwrite = json_string(&rw_dir),
             ),
         )
         .expect("write profile");
@@ -1085,12 +1089,12 @@ mod tests {
                 r#"{{
                     "meta": {{ "name": "override-deny-test" }},
                     "policy": {{
-                        "add_allow_readwrite": ["{path}"],
-                        "add_deny_access": ["{path}"],
-                        "override_deny": ["{path}"]
+                        "add_allow_readwrite": [{path}],
+                        "add_deny_access": [{path}],
+                        "override_deny": [{path}]
                     }}
                 }}"#,
-                path = denied.display()
+                path = json_string(&denied),
             ),
         )
         .expect("write profile");
@@ -1128,11 +1132,11 @@ mod tests {
                 r#"{{
                     "meta": {{ "name": "override-deny-no-grant" }},
                     "policy": {{
-                        "add_deny_access": ["{path}"],
-                        "override_deny": ["{path}"]
+                        "add_deny_access": [{path}],
+                        "override_deny": [{path}]
                     }}
                 }}"#,
-                path = denied.display()
+                path = json_string(&denied),
             ),
         )
         .expect("write profile");
@@ -1211,9 +1215,9 @@ mod tests {
             format!(
                 r#"{{
                     "meta": {{ "name": "test-upgrade" }},
-                    "filesystem": {{ "read": ["{}"] }}
+                    "filesystem": {{ "read": [{path}] }}
                 }}"#,
-                target.display()
+                path = json_string(&target),
             ),
         )
         .expect("write profile");
@@ -1257,9 +1261,9 @@ mod tests {
             format!(
                 r#"{{
                     "meta": {{ "name": "test-merge" }},
-                    "filesystem": {{ "read": ["{}"] }}
+                    "filesystem": {{ "read": [{path}] }}
                 }}"#,
-                target.display()
+                path = json_string(&target),
             ),
         )
         .expect("write profile");

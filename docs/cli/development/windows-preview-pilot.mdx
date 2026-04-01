@@ -5,6 +5,8 @@ description: Packaging, handoff, and operator guidance for the Windows nono prev
 
 This guide is the handoff package for a Windows preview pilot. It covers how to obtain a build, what the preview can do safely today, and which commands to use during pilot validation.
 
+For the current Windows filesystem boundary, see [Windows Filesystem Parity Contract](/cli/development/windows-filesystem-parity-contract).
+
 ## Artifact
 
 Windows builds are published as:
@@ -43,14 +45,15 @@ Available now:
 - `nono setup --check-only`
 - `nono run --dry-run ...`
 - `nono run -- <command>` for preview-safe direct execution
+- live exact-file grants and writable runtime redirection within the current Windows native subset
+- live `--block-net`, proxy-only, and supported connect/bind/localhost policy shapes through the WFP-backed Windows network subset when readiness requirements are met
 
 Intentionally blocked in preview when real enforcement would be implied, or when Windows has an explicit unsupported live mode:
 
 - live profile-backed restricted runs
-- live `--block-net` or equivalent enforcement-dependent controls
 - `nono shell`
 - `nono wrap` (documented unsupported Windows live mode)
-- full supervised enforcement
+- generic supervised enforcement outside the current rollback-oriented supported subset
 
 The preview is for startup, config, dry-run, and direct execution path validation. It is not a claim of full Windows sandbox parity.
 
@@ -72,17 +75,23 @@ nono --version
 nono setup --check-only
 nono run --dry-run --profile codex -- cmd /c echo test
 nono run -- cmd /c echo hello
+nono run --read-file C:\path\to\allowed.txt -- cmd /c type C:\path\to\allowed.txt
 ```
 
 Expected blocked-preview checks:
 
 ```powershell
 nono run --profile codex -- cmd /c echo hello
-nono run --block-net -- cmd /c echo hello
 nono wrap -- cmd /c echo hello
 ```
 
-Those commands should fail loudly with preview-limitation messaging. They must not report that a sandbox was successfully enforced.
+Those commands should fail loudly with documented Windows limitation or backend-owned diagnostics. They must not report unsupported flows as successfully enforced.
+
+Also validate that:
+
+- exact-file grants succeed when the file is explicitly allowed
+- `override_deny` behaves like policy preprocessing rather than causing a Windows-only live-run rejection by itself
+- WFP-backed network failures report actionable readiness or activation details instead of generic preview-only wording
 
 ## Debugging Inputs
 
@@ -93,5 +102,6 @@ For Windows triage, capture:
 - `nono --version`
 - whether the run was `--dry-run` or live
 - whether a profile or network restriction was requested
+- whether `nono setup --check-only` reported WFP service/driver readiness beforehand
 
 In CI, the Windows lane uploads build and smoke logs as artifacts for comparison with local Windows behavior.
