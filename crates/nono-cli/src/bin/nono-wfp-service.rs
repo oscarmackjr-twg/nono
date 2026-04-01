@@ -8,7 +8,6 @@
 #[path = "../windows_wfp_contract.rs"]
 mod windows_wfp_contract;
 
-use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::process::ExitCode;
 use windows_wfp_contract::{
@@ -20,6 +19,9 @@ const SERVICE_MODE_ARG: &str = "--service-mode";
 const PROBE_RUNTIME_ACTIVATION_ARG: &str = "--probe-runtime-activation";
 const EXPECTED_DRIVER_BINARY: &str = "nono-wfp-driver.sys";
 const MAX_RUNTIME_REQUEST_SIZE: usize = 64 * 1024;
+
+#[cfg(target_os = "windows")]
+use sha2::{Digest, Sha256};
 
 #[cfg(target_os = "windows")]
 use std::os::windows::ffi::OsStrExt;
