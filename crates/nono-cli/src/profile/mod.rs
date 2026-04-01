@@ -3954,6 +3954,7 @@ mod tests {
             query_param_name: None,
             endpoint_rules: vec![],
             env_var: Some("EXAMPLE_API_KEY".to_string()),
+            tls_ca: None,
         };
         assert!(
             validate_custom_credential("example", &cred).is_ok(),
@@ -3974,6 +3975,7 @@ mod tests {
             query_param_name: None,
             endpoint_rules: vec![],
             env_var: None,
+            tls_ca: None,
         };
         let result = validate_custom_credential("example", &cred);
         let err = result.expect_err("file:// URI without env_var should be rejected");
@@ -3997,6 +3999,7 @@ mod tests {
             query_param_name: None,
             endpoint_rules: vec![],
             env_var: Some("EXAMPLE_API_KEY".to_string()),
+            tls_ca: None,
         };
         let result = validate_custom_credential("example", &cred);
         let err = result.expect_err("file:// URI with relative path should be rejected");
@@ -4020,6 +4023,7 @@ mod tests {
             query_param_name: None,
             endpoint_rules: vec![],
             env_var: Some("EXAMPLE_API_KEY".to_string()),
+            tls_ca: None,
         };
         let result = validate_custom_credential("example", &cred);
         assert!(
