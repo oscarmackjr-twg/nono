@@ -12,11 +12,13 @@ For the current Windows filesystem contract, see [Windows Filesystem Parity Cont
 - Confirm the release workflow produced `nono-vX.Y.Z-x86_64-pc-windows-msvc-machine.msi`.
 - Confirm the release workflow produced `nono-vX.Y.Z-x86_64-pc-windows-msvc-user.msi`.
 - Confirm the release workflow produced `nono-vX.Y.Z-x86_64-pc-windows-msvc.zip`.
+- Confirm the release workflow produced the signed raw `nono.exe` artifact.
 - Confirm the MSI packages install `nono.exe`, `README.md`, and `LICENSE`.
 - Confirm each MSI creates an Apps & Features uninstall entry with the expected install scope.
 - Confirm the zip contains `nono.exe`.
 - Confirm `SHA256SUMS.txt` includes the Windows zip checksum.
 - Confirm `SHA256SUMS.txt` includes both Windows MSI checksums.
+- Confirm `SHA256SUMS.txt` includes the Windows `nono.exe` checksum.
 - Confirm the GitHub release exposes the Windows MSI and zip artifacts alongside existing Unix artifacts.
 
 ## Local Runtime Validation
@@ -73,11 +75,13 @@ On pull requests or mainline pushes, confirm:
 - the `Windows Integration` job ran on `windows-latest`
 - the `Windows Security` job ran on `windows-latest`
 - the `Windows Regression` job ran on `windows-latest`
+- the `Windows Packaging` job ran on `windows-latest`
 - `windows-build.log` is available as an artifact
 - `windows-smoke.log` is available as an artifact
 - `windows-integration.log` is available as an artifact
 - `windows-security.log` is available as an artifact
 - `windows-regression.log` is available as an artifact
+- Windows MSI contract validation passed in CI
 
 These logs are the baseline comparison set for Windows bug reports.
 

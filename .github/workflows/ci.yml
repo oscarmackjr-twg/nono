@@ -305,6 +305,41 @@ jobs:
           path: ci-logs\windows-regression.log
           if-no-files-found: warn
 
+  windows-packaging:
+    name: Windows Packaging
+    needs: changes
+    if: ${{ !startsWith(github.head_ref, 'dependabot/github_actions/') && needs.changes.outputs.run_code_jobs == 'true' }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        with:
+          path: |
+            ~\.cargo\registry
+            ~\.cargo\git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build Windows release binaries
+        shell: pwsh
+        run: cargo build --release -p nono-cli
+
+      - name: Validate Windows MSI contract
+        shell: pwsh
+        run: |
+          .\scripts\validate-windows-msi-contract.ps1 `
+            -BinaryPath .\target\release\nono.exe `
+            -ServiceBinaryPath .\target\release\nono-wfp-service.exe
+
   fmt:
     name: Rustfmt
     needs: changes

@@ -11,11 +11,12 @@ This note locks the current Windows installer strategy for `WIN-1201`.
 
 The supported Windows release artifacts are:
 
+- `nono.exe`
 - `nono-vX.Y.Z-x86_64-pc-windows-msvc-machine.msi`
 - `nono-vX.Y.Z-x86_64-pc-windows-msvc-user.msi`
 - `nono-vX.Y.Z-x86_64-pc-windows-msvc.zip`
 
-Those artifacts are produced by the release workflow today and are the only supported Windows delivery paths for the current restricted-execution command surface.
+Those artifacts are produced by the release workflow today. The supported install and distribution paths for users remain the two MSI scopes plus the portable zip; the raw signed `nono.exe` is published as a verification and manual-distribution asset, not a managed installer path.
 
 Not supported as a release path today:
 
@@ -95,6 +96,7 @@ The generated MSI metadata explicitly disables Add/Remove Programs modify and re
 Windows release and support messaging should reflect this strategy:
 
 - MSI and zip are the supported Windows artifact types
+- the signed raw `nono.exe` is published as a release asset for verification and manual use, but it is not a distinct managed install contract
 - user and machine MSI scopes are distinct and intentional
 - Windows is still a partial-parity platform until signing and final release validation complete
 - operators should not infer service installation, MSIX support, or cross-scope auto-migration from the existence of the current MSI packages

@@ -11,42 +11,62 @@ This document records the gates that must be satisfied before Windows is listed 
 
 | Gate | Requirement | Status |
 |------|-------------|--------|
-| Runtime output is free of misleading preview language | REL-01 | In progress |
+| Runtime output is free of misleading preview language | REL-01 | Blocked by library support alignment |
 | CI lanes treat Windows identically to macOS and Linux | REL-01 | In progress |
-| Windows listed as supported platform in README and release artifacts | REL-02 | Not yet satisfied |
-| Installation guide reflects current Windows support level accurately | REL-03 | In progress |
-| Product limitations documented as intentional decisions, not gaps | REL-03 | In progress |
+| Windows listed as supported platform in README and release artifacts | REL-02 | Blocked |
+| Installation guide reflects current Windows support level accurately | REL-03 | Met |
+| Product limitations documented as intentional decisions, not gaps | REL-03 | Met |
 | Formal promotion criteria recorded and reviewed | REL-04 | In progress |
 
 ## Gate Details
 
 ### REL-01: Runtime output contains no preview language
 
-- [ ] `nono --help` on Windows contains no language describing the platform as preview, experimental, or beta
-- [ ] `nono run --dry-run` on Windows uses final supported-platform wording
+- [x] `nono --help` on Windows contains no language describing the platform as preview, experimental, or beta
+- [x] `nono run --dry-run` on Windows uses final supported-platform wording
 - [x] Supervised mode output on Windows shows `supervised (...)` for the supported subset
 - [ ] library-wide support reporting and runtime behavior are fully aligned for first-class release status
-- [x] CI job names for Windows (`Windows Build`, `Windows Smoke`, `Windows Integration`, `Windows Security`) carry no "preview" qualifier
+- [x] CI job names for Windows (`Windows Build`, `Windows Smoke`, `Windows Integration`, `Windows Security`, `Windows Regression`, `Windows Packaging`) carry no "preview" qualifier
 
 ### REL-02: Windows listed as supported platform in release automation and README
 
 - [ ] README platform support line reflects final Windows release status accurately
 - [x] README Kernel-Enforced Sandbox feature table includes a Windows row
-- [ ] release workflow uploads signed Windows artifacts (`.exe`, machine MSI, user MSI, zip) as first-class release assets alongside macOS and Linux artifacts
+- [x] release workflow uploads signed Windows artifacts (`.exe`, machine MSI, user MSI, zip) as first-class release assets alongside macOS and Linux artifacts
 
 ### REL-03: Installation guide and README reflect the final Windows release contract
 
-- [ ] Installation guide reflects the current supported release level accurately
+- [x] Installation guide reflects the current supported release level accurately
 - [x] Installation guide PowerShell example uses a real version placeholder (`vX.Y.Z`)
 - [x] `nono shell` and `nono wrap` limitations are documented as intentional product decisions
-- [ ] release-guide wording matches the current support state
+- [x] release-guide wording matches the current support state
 
 ### REL-04: Formal promotion criteria documented
 
 - [x] This document exists and is committed to the repository
 - [x] This document is linked from the Windows RC checklist
 - [x] This document is listed in the docs navigation (docs.json)
+- [x] `WIN-1705` promotion audit outcomes are recorded in this document
 - [ ] every gate above is checked off
+
+## Current Audit Result
+
+`WIN-1705` is complete for the current branch state.
+
+Met:
+
+- Windows release automation now stages signed `.exe`, machine MSI, user MSI, and zip artifacts.
+- Authenticode verification is automated for the raw binary, both MSI scopes, and the zip payload.
+- MSI contract validation covers scope split, upgrade-code split, ARP repair/modify disablement, and optional service inclusion/exclusion behavior.
+- Help, dry-run, install, and release docs no longer describe the active Windows command surface as preview-only.
+- `nono shell` and `nono wrap` are documented as intentional Windows product limitations rather than accidental gaps.
+
+Blocked:
+
+- `Sandbox::support_info()` still reports Windows as `partial`, and the library-wide `Sandbox::apply()` path is still not the Windows backend used by the CLI.
+- README/support messaging therefore still accurately stops short of calling Windows a first-class supported peer.
+
+That means `WIN-1706` is not complete yet. Promotion remains blocked on core support reporting and runtime behavior alignment, not on packaging or signing readiness.
 
 ## What Windows Does Not Support
 

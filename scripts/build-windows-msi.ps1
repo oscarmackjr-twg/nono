@@ -98,6 +98,24 @@ function Get-ScopeMetadata {
     }
 }
 
+function Write-Utf8NoBomCompat {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Value
+    )
+
+    if ($PSVersionTable.PSVersion.Major -ge 6) {
+        Set-Content -LiteralPath $Path -Value $Value -Encoding utf8NoBOM
+        return
+    }
+
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($Path, $Value, $utf8NoBom)
+}
+
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $binaryFullPath = (Resolve-Path -LiteralPath $BinaryPath).Path
 
@@ -228,7 +246,7 @@ $($serviceComponentXml)    </ComponentGroup>
 </Wix>
 "@
 
-Set-Content -LiteralPath $wxsPath -Value $wxsContent -Encoding utf8NoBOM
+Write-Utf8NoBomCompat -Path $wxsPath -Value $wxsContent
 
 if ($EmitOnly) {
     Write-Host "Wrote WiX source to $wxsPath"

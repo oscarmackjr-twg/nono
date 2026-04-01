@@ -90,6 +90,7 @@
           "cli/development/windows-full-port-roadmap",
           "cli/development/windows-macos-parity-roadmap",
           "cli/development/windows-installer-strategy",
+          "cli/development/windows-signing-guide",
           "cli/development/windows-preview-pilot",
           "cli/development/windows-preview-validation",
           "cli/development/windows-release-candidate-checklist",

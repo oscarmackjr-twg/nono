@@ -117,11 +117,11 @@ jobs:
         shell: pwsh
         run: |
           if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERT)) {
-            Write-Error "WINDOWS_SIGNING_CERT and WINDOWS_SIGNING_CERT_PASSWORD must be set. Set these repository secrets before releasing Windows artifacts. See docs/cli/development/windows-signing-guide.md."
+            Write-Error "WINDOWS_SIGNING_CERT and WINDOWS_SIGNING_CERT_PASSWORD must be set. Set these repository secrets before releasing Windows artifacts. See docs/cli/development/windows-signing-guide.mdx."
             exit 1
           }
           if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERT_PASSWORD)) {
-            Write-Error "WINDOWS_SIGNING_CERT and WINDOWS_SIGNING_CERT_PASSWORD must be set. Set these repository secrets before releasing Windows artifacts. See docs/cli/development/windows-signing-guide.md."
+            Write-Error "WINDOWS_SIGNING_CERT and WINDOWS_SIGNING_CERT_PASSWORD must be set. Set these repository secrets before releasing Windows artifacts. See docs/cli/development/windows-signing-guide.mdx."
             exit 1
           }
           Write-Host "Signing secrets present — proceeding to sign."
@@ -164,6 +164,21 @@ jobs:
           WINDOWS_SIGNING_CERT: ${{ secrets.WINDOWS_SIGNING_CERT }}
           WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
 
+      - name: Verify Authenticode signatures (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $binary = Join-Path $PWD "target\\${{ matrix.target }}\\release\\${{ matrix.artifact }}"
+          $machineMsi = Join-Path $PWD "artifact_staging\\nono-${{ env.RELEASE_TAG }}-x86_64-pc-windows-msvc-machine.msi"
+          $userMsi = Join-Path $PWD "artifact_staging\\nono-${{ env.RELEASE_TAG }}-x86_64-pc-windows-msvc-user.msi"
+          foreach ($artifact in @($binary, $machineMsi, $userMsi)) {
+            $sig = Get-AuthenticodeSignature -FilePath $artifact
+            if ($sig.Status -ne "Valid") {
+              Write-Error "Authenticode verification failed for $artifact with status $($sig.Status)."
+              exit 1
+            }
+          }
+
       - name: Create zip from signed binary (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -176,15 +191,39 @@ jobs:
           }
           Compress-Archive -LiteralPath $binary -DestinationPath $zipPath
 
-      - name: Prepare upload (Windows)
+      - name: Verify signed binary inside zip (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $zipName = "nono-${{ env.RELEASE_TAG }}-${{ matrix.target }}.zip"
+          $extractRoot = Join-Path $PWD "zip-signature-check"
+          if (Test-Path $extractRoot) {
+            Remove-Item -LiteralPath $extractRoot -Recurse -Force
+          }
+          Expand-Archive -LiteralPath $zipName -DestinationPath $extractRoot -Force
+          $binaryName = "${{ matrix.artifact }}"
+          $extractedBinary = Join-Path $extractRoot $binaryName
+          $sig = Get-AuthenticodeSignature -FilePath $extractedBinary
+          if ($sig.Status -ne "Valid") {
+            Write-Error "Zip payload signature verification failed for $extractedBinary with status $($sig.Status)."
+            exit 1
+          }
+
+      - name: Prepare upload (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $binary = Join-Path $PWD "target\\${{ matrix.target }}\\release\\${{ matrix.artifact }}"
+          $zipName = "nono-${{ env.RELEASE_TAG }}-${{ matrix.target }}.zip"
+          if (-not (Test-Path $binary)) {
+            Write-Error "Missing signed binary artifact: $binary"
+            exit 1
+          }
           if (-not (Test-Path $zipName)) {
             Write-Error "Missing zip artifact: $zipName"
             exit 1
           }
+          Copy-Item $binary artifact_staging\
           Copy-Item $zipName artifact_staging\
 
       - name: Prepare upload
@@ -231,6 +270,7 @@ jobs:
           find . -name "*.tar.gz" -exec mv {} . \;
           find . -name "*.zip" -exec mv {} . \;
           find . -name "*.msi" -exec mv {} . \;
+          find . -name "*.exe" -exec mv {} . \;
           find . -name "*.deb" -exec mv {} . \;
           sha256sum *.tar.gz > SHA256SUMS.txt
           if ls *.zip >/dev/null 2>&1; then
@@ -238,6 +278,9 @@ jobs:
           fi
           if ls *.msi >/dev/null 2>&1; then
             sha256sum *.msi >> SHA256SUMS.txt
+          fi
+          if ls *.exe >/dev/null 2>&1; then
+            sha256sum *.exe >> SHA256SUMS.txt
           fi
           cat SHA256SUMS.txt
 
@@ -251,6 +294,7 @@ jobs:
             artifacts/*.tar.gz
             artifacts/*.zip
             artifacts/*.msi
+            artifacts/*.exe
             artifacts/*.deb
             artifacts/SHA256SUMS.txt
 

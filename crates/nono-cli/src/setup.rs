@@ -374,7 +374,7 @@ impl SetupRunner {
             Err(err) => {
                 #[cfg(target_os = "windows")]
                 println!(
-                    "  * Sensitive path expansion: unavailable in this Windows preview ({})",
+                    "  * Sensitive path expansion: unavailable in the current Windows command surface ({})",
                     err
                 );
 
@@ -513,7 +513,7 @@ impl SetupRunner {
                 println!("  # Preview filesystem and network policy without launching");
                 println!("  nono run --dry-run --profile claude-code -- claude");
                 println!();
-                println!("  # Direct execution with the current supported Windows subset");
+                println!("  # Direct execution with the current supported Windows command surface");
                 println!("  nono run -- <command>");
                 println!();
                 println!("  # Check why a sensitive path is blocked");
@@ -521,7 +521,7 @@ impl SetupRunner {
                 println!();
                 println!("Documentation: https://github.com/always-further/nono#readme");
                 println!();
-                println!("Run 'nono run --help' to inspect the current Windows preview surface.");
+                println!("Run 'nono run --help' to inspect the current Windows command surface.");
             }
 
             #[cfg(not(target_os = "windows"))]

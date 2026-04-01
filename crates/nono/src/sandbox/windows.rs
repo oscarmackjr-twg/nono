@@ -26,7 +26,7 @@ use windows_sys::Win32::System::SystemServices::{
 
 const WINDOWS_PREVIEW_SUPPORTED: bool = false;
 const WINDOWS_PREVIEW_DETAILS: &str =
-    "Windows native builds support setup, dry-run, direct execution, a documented restricted subset, and partial supervised/runtime enforcement. Full Windows sandbox parity is not complete yet, and unsupported Windows flows fail explicitly.";
+    "Windows native builds support setup, dry-run, direct execution, the current restricted-execution command surface, and partial supervised/runtime enforcement. Full Windows sandbox parity is not complete yet, and unsupported Windows flows fail explicitly.";
 
 pub fn apply(caps: &CapabilitySet) -> Result<()> {
     let _ = caps;

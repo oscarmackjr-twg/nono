@@ -35,7 +35,7 @@ Status labels:
 | Rollback, state, and trust storage | partial | Windows now stores rollback sessions under the nono state root, reports config/state/rollback/trust paths in `setup --check-only`, uses Windows-safe replace semantics for snapshot/object writes, and labels the native trust backend as Windows Credential Manager in diagnostics | Still needs broader production hardening and final release-path validation |
 | Network enforcement | partial | Windows now uses the WFP service-managed backend for the supported live subset: blocked mode installs app-scoped WFP block filters, proxy-only installs loopback proxy-port plus bind-port permits ahead of fallback block filters, connect/bind/localhost allowlists compile into the same request/cleanup contract, and shell/interpreter-host launches now use that same backend path instead of failing up front | Needs final packaging hardening and any future policy shapes outside the current WFP port/loopback model |
 | Process / IPC restrictions | partial | Direct execution now uses basic Windows process-lifetime containment; IPC remains scaffolded | Needs fuller Windows-native restriction semantics and supervisor parity |
-| CI Windows lanes | working | Build, smoke, integration, security, and parity-regression coverage run on `windows-latest`, with per-lane log artifacts for debugging | Installer/signing release validation still depends on the release workflow rather than main CI |
+| CI Windows lanes | working | Build, smoke, integration, security, parity-regression, and packaging-contract validation run on `windows-latest`, with per-lane log artifacts for debugging where applicable | Release-signing validation still depends on the release workflow and secrets |
 
 ## Current Guidance
 
