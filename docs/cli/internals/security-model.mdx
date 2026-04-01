@@ -7,7 +7,7 @@ nono's security model is built on a single premise: **the sandboxed process is u
 
 This page explains the layered enforcement architecture, the trust boundaries between components, and why specific mechanisms were chosen.
 
-For the current Windows filesystem boundary and parity contract, see [Windows Filesystem Parity Contract](/cli/development/windows-filesystem-parity-contract). Windows uses a narrower native subset than the Linux and macOS kernel-enforced models described below.
+For the current Windows filesystem boundary and parity contract, see [Windows Filesystem Parity Contract](/cli/development/windows-filesystem-parity-contract). Windows currently exposes a narrower restricted-execution command surface than the Linux and macOS kernel-enforced models described below.
 
 Windows network enforcement now follows a separate backend-owned WFP contract rather than the Linux/macOS kernel path described on this page. For supported Windows runs, `nono-wfp-service` installs deterministic per-app WFP permit/block filters for blocked, proxy-only, connect-port, bind-port, and localhost-only policies, then removes that same filter set on cleanup. The current contract is still narrower than Linux/macOS because it depends on explicit backend readiness and service-managed activation instead of a single unprivileged kernel primitive.
 
@@ -286,7 +286,7 @@ Supervised mode on macOS provides rollback snapshots (content-addressable filesy
 
 ## Windows Model
 
-Windows currently uses a narrower native restricted-run subset than Linux or macOS.
+Windows currently uses a narrower restricted-execution command surface than Linux or macOS.
 
 The current Windows filesystem/runtime path combines:
 
@@ -300,7 +300,7 @@ Two limitations matter:
 - Windows does not yet provide a general backend-native deny-within-allow filesystem rule comparable to Seatbelt
 - launch-time path mediation is still preflight, not a complete kernel-level substitute for broader filesystem enforcement
 
-That means the Linux and macOS models remain the reference design for full kernel-enforced sandbox behavior, while Windows is an intentionally explicit native subset with fail-closed diagnostics where parity is not yet credible.
+That means the Linux and macOS models remain the reference design for full kernel-enforced sandbox behavior, while Windows is an intentionally explicit restricted command surface with fail-closed diagnostics where parity is not yet credible.
 
 ## Summary
 

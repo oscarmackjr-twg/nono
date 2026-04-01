@@ -7,12 +7,12 @@ description: Epics, sprints, dependencies, and release criteria for first-class 
 
 This roadmap starts from the current repository state:
 
-- Windows preview build, setup, dry-run, and direct execution already exist
+- Windows build, setup, dry-run, and direct execution already exist
 - Windows supervisor IPC scaffolding exists
-- Windows preview packaging exists as zip and MSI
-- Windows preview still blocks real enforcement-dependent flows intentionally
+- Windows packaging exists as zip and MSI
+- Windows still blocks unsupported enforcement-dependent flows intentionally
 
-This plan covers the **full Windows port**, not the preview track.
+This plan covers the **full Windows port**, not just the current restricted-execution surface.
 
 ## Planning Constraints
 
@@ -40,7 +40,7 @@ The full port is complete when Windows is a first-class supported platform in:
 - packaging and release
 - operator documentation
 
-That requires more than compiling and running commands. The Windows path must support real enforcement and must not rely on preview-only guardrails for core restricted workflows.
+That requires more than compiling and running commands. The Windows path must support real enforcement and must not rely on validation-only guardrails for core restricted workflows.
 
 ## Epic Overview
 
@@ -616,4 +616,3 @@ That story gates nearly every expensive implementation choice that follows, espe
 - filesystem policy enforcement
 - network restriction design
 - supervisor-approved resource brokering
-

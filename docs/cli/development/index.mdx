@@ -23,7 +23,7 @@ This section covers development topics for contributors and maintainers of nono.
     icon="table-cells"
     href="/cli/development/windows-feature-gap-matrix"
   >
-    Working, partial, stubbed, and deferred status across the Windows preview port
+    Working, partial, stubbed, and deferred status across the current Windows command surface
   </Card>
   <Card
     title="Windows Security Model"
@@ -65,14 +65,14 @@ This section covers development topics for contributors and maintainers of nono.
     icon="box-archive"
     href="/cli/development/windows-preview-pilot"
   >
-    Release artifact, install flow, and operator guidance for the Windows preview
+    Release artifact, install flow, and operator guidance for the current Windows validation track
   </Card>
   <Card
     title="Windows Preview Validation"
     icon="clipboard-check"
     href="/cli/development/windows-preview-validation"
   >
-    Packaging, smoke-test, and guardrail checklist for pilot readiness
+    Packaging, smoke-test, and guardrail checklist for the current Windows validation boundary
   </Card>
   <Card
     title="Windows RC Checklist"
@@ -100,18 +100,17 @@ This section covers development topics for contributors and maintainers of nono.
 
 2. **Build the project**
    ```bash
-   cargo build --release
+   make build
    ```
 
 3. **Run the test suite**
    ```bash
-   ./tests/run_integration_tests.sh
+   make test
    ```
 
 4. **Check formatting and lints**
    ```bash
-   cargo fmt -- --check
-   cargo clippy -- -D warnings -D clippy::unwrap_used
+   make check
    ```
 
 ## Development Environment
@@ -129,8 +128,8 @@ This section covers development topics for contributors and maintainers of nono.
 # Debug build
 cargo build
 
-# Release build (used for integration tests)
-cargo build --release
+# Workspace build via project make target
+make build
 
 # Run with verbose logging
 RUST_LOG=debug cargo run -- run --allow-cwd -- echo "test"

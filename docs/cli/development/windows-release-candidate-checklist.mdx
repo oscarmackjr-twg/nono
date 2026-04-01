@@ -15,6 +15,7 @@ Confirm the main CI workflow completed these Windows lanes successfully:
 - `Windows Smoke`
 - `Windows Integration`
 - `Windows Security`
+- `Windows Regression`
 
 Confirm the following artifacts are available for debugging:
 
@@ -22,6 +23,7 @@ Confirm the following artifacts are available for debugging:
 - `windows-smoke.log`
 - `windows-integration.log`
 - `windows-security.log`
+- `windows-regression.log`
 
 ## Packaging Gate
 
@@ -82,10 +84,10 @@ nono run --block-net --allow . -- cmd /c echo hello
 Expected results:
 
 - help and version succeed
-- setup reports the current Windows supported subset and WFP readiness
+- setup reports the current Windows supported command surface and WFP readiness
 - dry-run validates policy without claiming full enforcement parity
 - supported live profile-backed runs succeed
-- blocked-network enforcement fails intentionally when requested on the supported path
+- blocked-network enforcement succeeds on the supported path when WFP readiness is satisfied, or fails with explicit backend diagnostics when readiness is not satisfied
 
 ## Unsupported-Flow Gate
 
@@ -131,7 +133,7 @@ The Windows release candidate gate is complete when:
 - Windows CI lanes are green
 - Windows logs are attached as artifacts
 - packaging artifacts are present and verifiable
-- supported live Windows restrictions run through the active backend subset
+- supported live Windows restrictions run through the active backend command surface
 - unsupported Windows flows fail explicitly
 - upgrade and uninstall behavior are validated
 - the current repair-disabled MSI contract is validated and documented

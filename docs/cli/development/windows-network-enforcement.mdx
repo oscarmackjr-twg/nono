@@ -68,7 +68,7 @@ This mirrors the Windows filesystem policy compiler and is the intended backend 
 Current sequence:
 
 1. compile `WindowsNetworkPolicy` from `CapabilitySet`
-2. keep preview/runtime classification backend-owned
+2. keep Windows validation/runtime classification backend-owned
 3. send a single WFP runtime activation request for the selected policy shape
 4. install deterministic permit filters first, then the fallback block filters for the remaining surface
 5. remove the same deterministic filter set on cleanup

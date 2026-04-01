@@ -1,9 +1,9 @@
 ---
 title: Windows Validation Checklist
-description: Validation checklist for Windows packaging and current native-subset runtime behavior
+description: Validation checklist for Windows packaging and current restricted-execution runtime behavior
 ---
 
-Use this checklist before handing a Windows build to a tester or marking a release candidate as ready for broader validation of the current Windows native subset.
+Use this checklist before handing a Windows build to a tester or marking a release candidate as ready for broader validation of the current Windows restricted-execution surface.
 
 For the current Windows filesystem contract, see [Windows Filesystem Parity Contract](/cli/development/windows-filesystem-parity-contract).
 
@@ -62,7 +62,7 @@ Also confirm:
 
 - `override_deny` use cases that already resolve during policy preprocessing do not fail purely because the run is on Windows
 - command-aware path mediation still rejects absolute or escaped file paths outside the compiled allowlist
-- WFP-backed failures distinguish readiness, activation, stale-filter, and cleanup diagnostics instead of generic preview-limit wording
+- WFP-backed failures distinguish readiness, activation, stale-filter, and cleanup diagnostics instead of generic limitation wording
 
 ## CI Validation
 
@@ -72,10 +72,12 @@ On pull requests or mainline pushes, confirm:
 - the `Windows Smoke` job ran on `windows-latest`
 - the `Windows Integration` job ran on `windows-latest`
 - the `Windows Security` job ran on `windows-latest`
+- the `Windows Regression` job ran on `windows-latest`
 - `windows-build.log` is available as an artifact
 - `windows-smoke.log` is available as an artifact
 - `windows-integration.log` is available as an artifact
 - `windows-security.log` is available as an artifact
+- `windows-regression.log` is available as an artifact
 
 These logs are the baseline comparison set for Windows bug reports.
 

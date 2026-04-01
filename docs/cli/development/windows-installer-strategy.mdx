@@ -15,7 +15,7 @@ The supported Windows release artifacts are:
 - `nono-vX.Y.Z-x86_64-pc-windows-msvc-user.msi`
 - `nono-vX.Y.Z-x86_64-pc-windows-msvc.zip`
 
-Those artifacts are produced by the release workflow today and are the only supported Windows delivery paths for the current native subset.
+Those artifacts are produced by the release workflow today and are the only supported Windows delivery paths for the current restricted-execution command surface.
 
 Not supported as a release path today:
 
@@ -106,4 +106,4 @@ This strategy intentionally leaves these items to later work:
 - `WIN-1202`: signing binaries and installers
 - `WIN-1203`: validating uninstall, upgrade, and repair behavior in practice
 - `WIN-1204`: adding service packaging only if a release-capable Windows service runtime is actually required
-- `WIN-1205`: promoting Windows from partial native subset to first-class supported release target
+- `WIN-1205`: promoting Windows from the current partial restricted-execution surface to a first-class supported release target

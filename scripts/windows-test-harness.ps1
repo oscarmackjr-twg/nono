@@ -1,10 +1,13 @@
 param(
-    [ValidateSet("build", "smoke", "integration", "security", "all")]
+    [ValidateSet("build", "smoke", "integration", "security", "regression", "all")]
     [string]$Suite = "all",
     [string]$LogDir = "ci-logs"
 )
 
 $ErrorActionPreference = "Stop"
+# Cargo and other native tools write normal progress output to stderr.
+# Keep that from being promoted into terminating PowerShell errors while we tee logs.
+$PSNativeCommandUseErrorActionPreference = $false
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
@@ -18,9 +21,23 @@ function Invoke-LoggedCargo {
     $logPath = Join-Path $LogDir $LogFile
     "==> $Label" | Tee-Object -FilePath $logPath -Append
     "`$ cargo $($CargoArgs -join ' ')" | Tee-Object -FilePath $logPath -Append
-    & cargo @CargoArgs 2>&1 | Tee-Object -FilePath $logPath -Append
-    if ($LASTEXITCODE -ne 0) {
-        throw "Cargo command failed for $Label with exit code $LASTEXITCODE"
+    $stdoutPath = Join-Path $LogDir ([System.Guid]::NewGuid().ToString() + ".stdout.tmp")
+    $stderrPath = Join-Path $LogDir ([System.Guid]::NewGuid().ToString() + ".stderr.tmp")
+    $process = Start-Process -FilePath "cargo" `
+        -ArgumentList $CargoArgs `
+        -NoNewWindow `
+        -Wait `
+        -PassThru `
+        -RedirectStandardOutput $stdoutPath `
+        -RedirectStandardError $stderrPath
+    foreach ($capturePath in @($stdoutPath, $stderrPath)) {
+        if (Test-Path $capturePath) {
+            Get-Content $capturePath | Tee-Object -FilePath $logPath -Append
+            Remove-Item -LiteralPath $capturePath -Force
+        }
+    }
+    if ($process.ExitCode -ne 0) {
+        throw "Cargo command failed for $Label with exit code $($process.ExitCode)"
     }
     "" | Tee-Object -FilePath $logPath -Append | Out-Null
 }
@@ -54,7 +71,12 @@ function Invoke-LoggedCommand {
 
     $logPath = Join-Path $LogDir $LogFile
     "==> $Label" | Tee-Object -FilePath $logPath -Append
-    & $Command 2>&1 | Tee-Object -FilePath $logPath -Append
+    $capturePath = Join-Path $LogDir ([System.Guid]::NewGuid().ToString() + ".tmp")
+    & $Command *> $capturePath
+    if (Test-Path $capturePath) {
+        Get-Content $capturePath | Tee-Object -FilePath $logPath -Append
+        Remove-Item -LiteralPath $capturePath -Force
+    }
     if ($LASTEXITCODE -ne 0) {
         throw "Command failed for $Label with exit code $LASTEXITCODE"
     }
@@ -62,7 +84,7 @@ function Invoke-LoggedCommand {
 }
 
 $smokeTests = @(
-    @{ Package = "nono-cli"; Filter = "windows_root_help_reports_supported_subset_messaging" },
+    @{ Package = "nono-cli"; Filter = "test_root_help_mentions_windows_restricted_execution_surface" },
     @{ Package = "nono-cli"; Filter = "windows_setup_check_only_reports_live_profile_subset" },
     @{ Package = "nono-cli"; Filter = "windows_run_executes_basic_command" },
     @{ Package = "nono-cli"; Filter = "windows_run_live_default_profile_executes_command" },
@@ -91,8 +113,21 @@ $securityTests = @(
     @{ Package = "nono-cli"; Filter = "windows_run_block_net_cleans_up_promoted_wfp_filters_after_exit" }
 )
 
+$regressionTests = @(
+    @{ Package = "nono"; Filter = "normalize_windows_path_strips_verbatim_prefix" },
+    @{ Package = "nono"; Filter = "normalize_windows_path_strips_unc_verbatim_prefix" },
+    @{ Package = "nono"; Filter = "windows_paths_start_with_case_insensitive_matches_drive_case" },
+    @{ Package = "nono-cli"; Filter = "windows_protected_path_check_handles_verbatim_prefix_and_case_insensitive_drive_letters" },
+    @{ Package = "nono-cli"; Filter = "windows_path_overlaps_filter_handles_verbatim_prefix_and_drive_case" },
+    @{ Package = "nono-cli"; Filter = "test_validate_windows_preview_direct_execution_allows_override_deny_when_policy_is_supported" },
+    @{ Package = "nono-cli"; Filter = "windows_run_prefers_managed_low_integrity_runtime_root_inside_allowlist" },
+    @{ Package = "nono-cli"; Filter = "windows_run_blocks_unverified_runtime_root_override" },
+    @{ Package = "nono-cli"; Filter = "windows_run_redirects_temp_vars_into_writable_allowlist" },
+    @{ Package = "nono-cli"; Filter = "windows_run_redirects_profile_state_vars_into_writable_allowlist" }
+)
+
 $suites = if ($Suite -eq "all") {
-    @("build", "smoke", "integration", "security")
+    @("build", "smoke", "integration", "security", "regression")
 } else {
     @($Suite)
 }
@@ -117,6 +152,9 @@ foreach ($activeSuite in $suites) {
         }
         "security" {
             Invoke-TestList -LogFile "windows-security.log" -Tests $securityTests
+        }
+        "regression" {
+            Invoke-TestList -LogFile "windows-regression.log" -Tests $regressionTests
         }
     }
 }

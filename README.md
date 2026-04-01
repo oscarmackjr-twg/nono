@@ -133,7 +133,7 @@ nono applies OS-level restrictions that cannot be bypassed or escalated from wit
 |----------|-----------|--------------------------|
 | macOS | Seatbelt | 10.5+ |
 | Linux | Landlock | 5.13+ |
-| Windows | WFP + Process Integrity (native subset) | Windows 10 1903+ |
+| Windows | WFP + Process Integrity | Windows 10 1903+ |
 
 ```bash
 # Grant read to src, write to output — everything else is denied by the kernel

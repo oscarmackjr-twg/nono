@@ -1,9 +1,9 @@
 ---
 title: Windows Preview Pilot
-description: Packaging, handoff, and operator guidance for the Windows nono preview
+description: Packaging, handoff, and operator guidance for the current Windows validation track
 ---
 
-This guide is the handoff package for a Windows preview pilot. It covers how to obtain a build, what the preview can do safely today, and which commands to use during pilot validation.
+This guide is the handoff package for the current Windows validation track. It covers how to obtain a build, what the supported Windows surface can do safely today, and which commands to use during validation.
 
 For the current Windows filesystem boundary, see [Windows Filesystem Parity Contract](/cli/development/windows-filesystem-parity-contract).
 
@@ -27,7 +27,7 @@ The MSI packages install `nono.exe`, `README.md`, and `LICENSE`, add the install
 Example PowerShell session:
 
 ```powershell
-$version = "v0.0.0-preview"
+$version = "vX.Y.Z"
 $msi = "nono-$version-x86_64-pc-windows-msvc-user.msi"
 $uri = "https://github.com/always-further/nono/releases/download/$version/$msi"
 $path = Join-Path $env:TEMP $msi
@@ -44,18 +44,18 @@ Available now:
 - `nono --version`
 - `nono setup --check-only`
 - `nono run --dry-run ...`
-- `nono run -- <command>` for preview-safe direct execution
-- live exact-file grants and writable runtime redirection within the current Windows native subset
-- live `--block-net`, proxy-only, and supported connect/bind/localhost policy shapes through the WFP-backed Windows network subset when readiness requirements are met
+- `nono run -- <command>` for supported direct restricted execution
+- live exact-file grants and writable runtime redirection within the current Windows restricted-execution surface
+- live `--block-net`, proxy-only, and supported connect/bind/localhost policy shapes through the WFP-backed Windows network surface when readiness requirements are met
 
-Intentionally blocked in preview when real enforcement would be implied, or when Windows has an explicit unsupported live mode:
+Intentionally blocked when real enforcement would be implied, or when Windows has an explicit unsupported live mode:
 
 - live profile-backed restricted runs
 - `nono shell`
 - `nono wrap` (documented unsupported Windows live mode)
 - generic supervised enforcement outside the current rollback-oriented supported subset
 
-The preview is for startup, config, dry-run, and direct execution path validation. It is not a claim of full Windows sandbox parity.
+The current Windows validation track is for startup, config, dry-run, direct execution path validation, and the supported restricted-execution surface. It is not a claim of full Windows sandbox parity.
 
 ## Current Packaging Limits
 
@@ -78,7 +78,7 @@ nono run -- cmd /c echo hello
 nono run --read-file C:\path\to\allowed.txt -- cmd /c type C:\path\to\allowed.txt
 ```
 
-Expected blocked-preview checks:
+Expected blocked checks:
 
 ```powershell
 nono run --profile codex -- cmd /c echo hello
@@ -91,7 +91,7 @@ Also validate that:
 
 - exact-file grants succeed when the file is explicitly allowed
 - `override_deny` behaves like policy preprocessing rather than causing a Windows-only live-run rejection by itself
-- WFP-backed network failures report actionable readiness or activation details instead of generic preview-only wording
+- WFP-backed network failures report actionable readiness or activation details instead of generic limitation wording
 
 ## Debugging Inputs
 
@@ -104,4 +104,4 @@ For Windows triage, capture:
 - whether a profile or network restriction was requested
 - whether `nono setup --check-only` reported WFP service/driver readiness beforehand
 
-In CI, the Windows lane uploads build and smoke logs as artifacts for comparison with local Windows behavior.
+In CI, the Windows lanes upload build, smoke, integration, security, and regression logs as artifacts for comparison with local Windows behavior.
