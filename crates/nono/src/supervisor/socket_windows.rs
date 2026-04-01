@@ -54,6 +54,9 @@ impl SupervisorSocket {
     /// Create a connected Windows pipe pair for supervisor-child IPC.
     #[must_use = "both pipe ends must be used"]
     pub fn pair() -> Result<(Self, Self)> {
+        // `pair()` is a local already-connected helper used by tests and
+        // in-process setup. The production Windows supervisor transport still
+        // uses duplex named pipes through `bind()` / `connect()`.
         let (parent_reader, child_writer) = create_anonymous_pipe()?;
         let (child_reader, parent_writer) = create_anonymous_pipe()?;
         let transport_name = unique_pair_name()?;

@@ -9,6 +9,7 @@
 mod windows_wfp_contract;
 
 use sha2::{Digest, Sha256};
+use std::io::Read;
 use std::process::ExitCode;
 use windows_wfp_contract::{
     WfpRuntimeActivationRequest, WfpRuntimeActivationResponse, WFP_RUNTIME_PROTOCOL_VERSION,
@@ -18,6 +19,7 @@ const SERVICE_NAME: &str = "nono-wfp-service";
 const SERVICE_MODE_ARG: &str = "--service-mode";
 const PROBE_RUNTIME_ACTIVATION_ARG: &str = "--probe-runtime-activation";
 const EXPECTED_DRIVER_BINARY: &str = "nono-wfp-driver.sys";
+const MAX_RUNTIME_REQUEST_SIZE: usize = 64 * 1024;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::ffi::OsStrExt;
@@ -189,24 +191,15 @@ fn validate_target_request_fields(
         .target_program_path
         .as_ref()
         .map(std::path::PathBuf::from)
-        .ok_or_else(|| {
-            build_invalid_activation_response(&WfpRuntimeActivationRequest {
-                request_kind: request.request_kind.clone(),
-                ..request.clone()
-            })
-        })?;
-    let outbound_rule = request.outbound_rule_name.clone().ok_or_else(|| {
-        build_invalid_activation_response(&WfpRuntimeActivationRequest {
-            request_kind: request.request_kind.clone(),
-            ..request.clone()
-        })
-    })?;
-    let inbound_rule = request.inbound_rule_name.clone().ok_or_else(|| {
-        build_invalid_activation_response(&WfpRuntimeActivationRequest {
-            request_kind: request.request_kind.clone(),
-            ..request.clone()
-        })
-    })?;
+        .ok_or_else(|| build_invalid_activation_response(request))?;
+    let outbound_rule = request
+        .outbound_rule_name
+        .clone()
+        .ok_or_else(|| build_invalid_activation_response(request))?;
+    let inbound_rule = request
+        .inbound_rule_name
+        .clone()
+        .ok_or_else(|| build_invalid_activation_response(request))?;
     Ok((target_program, outbound_rule, inbound_rule))
 }
 
@@ -363,7 +356,29 @@ fn deterministic_filter_key(base_name: &str, label: &str) -> GUID {
     bytes.copy_from_slice(&digest[..16]);
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    GUID::from_u128(u128::from_be_bytes(bytes))
+    guid_from_hash_bytes(bytes)
+}
+
+#[cfg(target_os = "windows")]
+fn guid_from_hash_bytes(bytes: [u8; 16]) -> GUID {
+    GUID {
+        data1: u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+        data2: u16::from_be_bytes([bytes[4], bytes[5]]),
+        data3: u16::from_be_bytes([bytes[6], bytes[7]]),
+        data4: [
+            bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+        ],
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn zero_guid() -> GUID {
+    GUID {
+        data1: 0,
+        data2: 0,
+        data3: 0,
+        data4: [0; 8],
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -432,7 +447,7 @@ fn add_block_filter(
     let action = FWPM_ACTION0 {
         r#type: FWP_ACTION_BLOCK,
         Anonymous: FWPM_ACTION0_0 {
-            filterType: GUID::from_u128(0),
+            filterType: zero_guid(),
         },
     };
     let mut filter: FWPM_FILTER0 = zeroed();
@@ -608,12 +623,23 @@ fn deactivate_blocked_mode(request: &WfpRuntimeActivationRequest) -> WfpRuntimeA
 }
 
 fn probe_runtime_activation() -> ExitCode {
-    let stdin = std::io::read_to_string(std::io::stdin());
-    let Ok(stdin) = stdin else {
+    let mut stdin = Vec::new();
+    let read_result = std::io::stdin()
+        .lock()
+        .take((MAX_RUNTIME_REQUEST_SIZE as u64) + 1)
+        .read_to_end(&mut stdin);
+    let Ok(_) = read_result else {
         eprintln!("nono-wfp-service: failed to read runtime activation request from stdin");
         return ExitCode::from(2);
     };
-    let request: WfpRuntimeActivationRequest = match serde_json::from_str(&stdin) {
+    if stdin.len() > MAX_RUNTIME_REQUEST_SIZE {
+        eprintln!(
+            "nono-wfp-service: runtime activation request payload exceeds {} bytes",
+            MAX_RUNTIME_REQUEST_SIZE
+        );
+        return ExitCode::from(2);
+    }
+    let request: WfpRuntimeActivationRequest = match serde_json::from_slice(&stdin) {
         Ok(request) => request,
         Err(err) => {
             eprintln!(
@@ -789,5 +815,11 @@ mod tests {
         );
         assert_eq!(first_raw, second_raw);
         assert_ne!(first_raw, different_raw);
+    }
+
+    #[test]
+    fn runtime_activation_request_size_limit_matches_protocol_guard() {
+        let payload = vec![b'x'; MAX_RUNTIME_REQUEST_SIZE + 1];
+        assert!(payload.len() > MAX_RUNTIME_REQUEST_SIZE);
     }
 }

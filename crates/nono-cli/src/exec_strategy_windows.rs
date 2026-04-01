@@ -660,6 +660,13 @@ fn run_sc_command(args: &[String]) -> Result<String> {
     ))
 }
 
+fn sc_create_conflict_is_registered(output: &str) -> bool {
+    let normalized = output.to_ascii_uppercase();
+    normalized.contains("FAILED 1073")
+        || normalized.contains("ALREADY EXISTS")
+        || normalized.contains("MARKED FOR DELETION")
+}
+
 fn build_wfp_service_create_args(config: &WfpProbeConfig) -> Vec<String> {
     vec![
         "create".to_string(),
@@ -1359,7 +1366,23 @@ where
         });
     }
 
-    run_service_command(&build_wfp_service_create_args(config))?;
+    if let Err(err) = run_service_command(&build_wfp_service_create_args(config)) {
+        if let Ok(state) = query_service(config.backend_service) {
+            let registered_state = parse_windows_service_state(&state);
+            if registered_state != WindowsServiceState::Missing
+                && sc_create_conflict_is_registered(&err.to_string())
+            {
+                return Ok(WindowsWfpInstallReport {
+                    status_label: "already installed",
+                    details: format!(
+                        "Windows WFP service {} is already registered. Expected startup command: {}. The service host is used for blocked-mode activation, but unsupported states still fail closed until full backend parity is implemented.",
+                        config.backend_service, service_command
+                    ),
+                });
+            }
+        }
+        return Err(err);
+    }
     run_service_command(&build_wfp_service_description_args(config))?;
 
     let registered_state = parse_windows_service_state(&query_service(config.backend_service)?);
@@ -1429,7 +1452,24 @@ where
         });
     }
 
-    run_service_command(&build_wfp_driver_create_args(config))?;
+    if let Err(err) = run_service_command(&build_wfp_driver_create_args(config)) {
+        if let Ok(state) = query_service(config.backend_driver) {
+            let registered_state = parse_windows_service_state(&state);
+            if registered_state != WindowsServiceState::Missing
+                && sc_create_conflict_is_registered(&err.to_string())
+            {
+                return Ok(WindowsWfpDriverInstallReport {
+                    status_label: "already installed",
+                    details: format!(
+                        "Windows WFP driver {} is already registered. Expected driver binary path: {}. Driver startup is not attempted automatically.",
+                        config.backend_driver,
+                        config.backend_driver_binary_path.display()
+                    ),
+                });
+            }
+        }
+        return Err(err);
+    }
     run_service_command(&build_wfp_driver_description_args(config))?;
 
     let registered_state = parse_windows_service_state(&query_service(config.backend_driver)?);
@@ -3988,6 +4028,41 @@ mod tests {
 
         assert_eq!(report.status_label, "already installed");
         assert!(report.details.contains("already registered"));
+    }
+
+    #[test]
+    fn test_install_windows_wfp_service_treats_create_conflict_as_idempotent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let binary_path = dir.path().join("nono-wfp-service.exe");
+        std::fs::write(&binary_path, b"stub").expect("write stub binary");
+        let config = WfpProbeConfig {
+            platform_service: WINDOWS_WFP_PLATFORM_SERVICE,
+            backend_service: WINDOWS_WFP_BACKEND_SERVICE,
+            backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
+            backend_binary_path: binary_path,
+            backend_driver_binary_path: dir.path().join("nono-wfp-driver.sys"),
+            backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
+        };
+
+        let report = install_windows_wfp_service_with_runner(
+            &config,
+            |service| match service {
+                WINDOWS_WFP_PLATFORM_SERVICE => Ok("STATE              : 4  RUNNING".to_string()),
+                WINDOWS_WFP_BACKEND_SERVICE => Ok("STATE              : 1  STOPPED".to_string()),
+                other => Err(NonoError::Setup(format!(
+                    "unexpected service query in test: {other}"
+                ))),
+            },
+            |_args| {
+                Err(NonoError::Setup(
+                    "[SC] CreateService FAILED 1073: The specified service already exists."
+                        .to_string(),
+                ))
+            },
+        )
+        .expect("create conflict should be treated as already installed");
+
+        assert_eq!(report.status_label, "already installed");
     }
 
     #[test]
