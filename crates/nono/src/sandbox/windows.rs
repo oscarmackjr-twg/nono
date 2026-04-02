@@ -1444,7 +1444,7 @@ mod tests {
         assert_eq!(policy.rules.len(), 1);
         assert_eq!(
             policy.rules[0].path,
-            dir.path().canonicalize().expect("canonical")
+            normalize_windows_path(&dir.path().canonicalize().expect("canonical"))
         );
         assert_eq!(policy.rules[0].access, AccessMode::ReadWrite);
         assert_eq!(policy.rules[0].source, CapabilitySource::User);

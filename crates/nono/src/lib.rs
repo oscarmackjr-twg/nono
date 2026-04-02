@@ -49,6 +49,8 @@ pub mod capability;
 pub mod diagnostic;
 pub mod error;
 pub mod keystore;
+pub mod manifest;
+pub mod manifest_convert;
 pub mod net_filter;
 pub mod query;
 pub mod sandbox;
@@ -67,9 +69,10 @@ pub use diagnostic::{
 };
 pub use error::{NonoError, Result};
 pub use keystore::{
-    is_apple_password_uri, is_env_uri, is_op_uri, load_secret_by_ref, load_secrets,
-    redact_apple_password_uri, redact_op_uri, validate_apple_password_uri,
-    validate_destination_env_var, validate_env_uri, validate_op_uri, LoadedSecret,
+    is_apple_password_uri, is_env_uri, is_op_uri, load_secret_by_ref, load_secret_file,
+    load_secrets, redact_apple_password_uri, redact_op_uri, store_secret_file,
+    validate_apple_password_uri, validate_destination_env_var, validate_env_uri, validate_op_uri,
+    LoadedSecret,
 };
 pub use net_filter::{FilterResult, HostFilter};
 #[cfg(target_os = "linux")]

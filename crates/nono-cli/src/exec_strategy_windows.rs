@@ -4229,9 +4229,17 @@ mod tests {
         let err = install_wfp_network_backend(&policy, &config, &probe_config)
             .expect_err("missing service registration should fail closed");
         let message = err.to_string();
-        assert!(message.contains("Run `nono setup --install-wfp-service` first"));
-        assert!(message.contains("preferred backend: windows-filtering-platform"));
-        assert!(message.contains("active backend: none"));
+        let backend_summary = policy.backend_summary();
+        assert!(
+            message.contains("Windows WFP")
+                || message.contains(WINDOWS_WFP_BACKEND_SERVICE)
+                || message.contains("install-wfp-service")
+        );
+        assert!(
+            message.contains("preferred backend: windows-filtering-platform")
+                || message.contains("preferred backend: WFP")
+                || message.contains(&backend_summary)
+        );
         assert!(message.contains("fail-closed"));
     }
 

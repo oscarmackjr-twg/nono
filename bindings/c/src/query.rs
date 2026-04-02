@@ -259,7 +259,17 @@ mod tests {
     #[test]
     fn test_query_path_granted() {
         let caps = nono_capability_set_new();
-        let path = CString::new("/tmp").unwrap_or_default();
+        let unique = format!(
+            "nono-ffi-query-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let dir = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&dir).unwrap_or_else(|_| panic!("create temp query dir"));
+        let allow_path = dir.to_string_lossy().into_owned();
+        let path = CString::new(allow_path.clone()).unwrap_or_default();
         // SAFETY: caps and path are valid.
         unsafe {
             nono_capability_set_allow_path(
@@ -269,11 +279,9 @@ mod tests {
             );
             let ctx = nono_query_context_new(caps);
 
-            // On macOS /tmp canonicalizes to /private/tmp, so query with
-            // the canonical path to match the resolved capability.
-            let canonical_tmp =
-                std::fs::canonicalize("/tmp").unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
-            let query_str = format!("{}/test.txt", canonical_tmp.display());
+            let canonical_root = std::fs::canonicalize(&dir)
+                .unwrap_or_else(|_| std::path::PathBuf::from(&allow_path));
+            let query_str = canonical_root.join("test.txt").display().to_string();
             let query_path = CString::new(query_str).unwrap_or_default();
             let mut result = std::mem::zeroed::<NonoQueryResult>();
             let rc = nono_query_context_query_path(
@@ -293,6 +301,7 @@ mod tests {
             nono_query_context_free(ctx);
             nono_capability_set_free(caps);
         }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

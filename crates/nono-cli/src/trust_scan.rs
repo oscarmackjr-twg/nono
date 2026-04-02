@@ -1197,6 +1197,7 @@ mod tests {
 
     #[test]
     fn load_scan_policy_with_trust_override_skips_verification() {
+        let _guard = crate::test_env::ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         // Isolate from the real user config dir so a stale trust-policy.json
         // on the developer's machine doesn't interfere with the test.
@@ -1223,6 +1224,7 @@ mod tests {
 
     #[test]
     fn load_scan_policy_skips_policy_verification_without_signed_artifacts() {
+        let _guard = crate::test_env::ENV_LOCK.lock().unwrap();
         let scan_dir = tempfile::tempdir().unwrap();
         let include_pattern = "*.arbitrary";
         let orig_xdg = std::env::var("XDG_CONFIG_HOME").ok();
@@ -1264,6 +1266,9 @@ mod tests {
 
     #[test]
     fn multi_subject_bundle_detected_and_verified() {
+        let _guard = crate::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let dir = tempfile::tempdir().unwrap();
 
         // Create two files
@@ -1287,6 +1292,7 @@ mod tests {
         ];
         let bundle_json = trust::sign_files(&files, &key_pair, &key_id).unwrap();
         let bundle_path = trust::multi_subject_bundle_path(dir.path());
+        std::fs::create_dir_all(dir.path()).unwrap();
         std::fs::write(&bundle_path, &bundle_json).unwrap();
 
         let policy = TrustPolicy {
@@ -1312,6 +1318,9 @@ mod tests {
 
     #[test]
     fn multi_subject_bundle_detects_tampered_file() {
+        let _guard = crate::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let dir = tempfile::tempdir().unwrap();
 
         let content_a = b"file A content";
@@ -1332,6 +1341,7 @@ mod tests {
             (std::path::PathBuf::from("b.py"), digest_b),
         ];
         let bundle_json = trust::sign_files(&files, &key_pair, &key_id).unwrap();
+        std::fs::create_dir_all(dir.path()).unwrap();
         std::fs::write(trust::multi_subject_bundle_path(dir.path()), &bundle_json).unwrap();
 
         // Tamper with b.py after signing
@@ -1361,6 +1371,9 @@ mod tests {
 
     #[test]
     fn multi_subject_bundle_missing_file_fails() {
+        let _guard = crate::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let dir = tempfile::tempdir().unwrap();
 
         let content_a = b"file A content";
@@ -1379,6 +1392,7 @@ mod tests {
             (std::path::PathBuf::from("b.py"), digest_b), // b.py doesn't exist on disk
         ];
         let bundle_json = trust::sign_files(&files, &key_pair, &key_id).unwrap();
+        std::fs::create_dir_all(dir.path()).unwrap();
         std::fs::write(trust::multi_subject_bundle_path(dir.path()), &bundle_json).unwrap();
 
         let policy = TrustPolicy {
@@ -1403,6 +1417,9 @@ mod tests {
 
     #[test]
     fn multi_subject_verified_paths_included() {
+        let _guard = crate::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let dir = tempfile::tempdir().unwrap();
 
         let content_a = b"script content";
@@ -1416,6 +1433,7 @@ mod tests {
 
         let files = vec![(std::path::PathBuf::from("script.py"), digest_a)];
         let bundle_json = trust::sign_files(&files, &key_pair, &key_id).unwrap();
+        std::fs::create_dir_all(dir.path()).unwrap();
         std::fs::write(trust::multi_subject_bundle_path(dir.path()), &bundle_json).unwrap();
 
         let policy = TrustPolicy {
@@ -1452,6 +1470,7 @@ mod tests {
 
         let files = vec![(std::path::PathBuf::from("a.md"), digest)];
         let bundle_json = trust::sign_files(&files, &key_pair, &key_id).unwrap();
+        std::fs::create_dir_all(dir.path()).unwrap();
         std::fs::write(trust::multi_subject_bundle_path(dir.path()), &bundle_json).unwrap();
 
         // Policy has a different publisher — mismatch

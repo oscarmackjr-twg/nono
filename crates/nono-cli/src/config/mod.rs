@@ -229,15 +229,32 @@ mod tests {
 
     #[test]
     fn test_check_sensitive_path() {
-        assert!(check_sensitive_path("~/.ssh")
-            .expect("should not fail")
-            .is_some());
-        assert!(check_sensitive_path("~/.aws")
-            .expect("should not fail")
-            .is_some());
-        assert!(check_sensitive_path("~/.bashrc")
-            .expect("should not fail")
-            .is_some());
+        #[cfg(target_os = "windows")]
+        {
+            let home = validated_home().expect("validated home");
+            assert!(check_sensitive_path(&format!(r"{home}\.ssh"))
+                .expect("should not fail")
+                .is_some());
+            assert!(check_sensitive_path(&format!(r"{home}\.aws"))
+                .expect("should not fail")
+                .is_some());
+            assert!(check_sensitive_path(&format!(r"{home}\.bashrc"))
+                .expect("should not fail")
+                .is_some());
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            assert!(check_sensitive_path("~/.ssh")
+                .expect("should not fail")
+                .is_some());
+            assert!(check_sensitive_path("~/.aws")
+                .expect("should not fail")
+                .is_some());
+            assert!(check_sensitive_path("~/.bashrc")
+                .expect("should not fail")
+                .is_some());
+        }
         // /tmp is a system path, not sensitive
         assert!(check_sensitive_path("/tmp")
             .expect("should not fail")

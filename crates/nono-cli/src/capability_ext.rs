@@ -330,6 +330,14 @@ impl CapabilitySetExt for CapabilitySet {
                 port: 0,
                 bind_ports,
             });
+
+            // Add allow_domain ports to Landlock ConnectTcp rules so non-HTTP
+            // protocols (NATS, PostgreSQL, etc.) can connect directly while
+            // HTTP traffic still goes through the proxy.
+            for entry in &profile.network.allow_domain {
+                let port = parse_allow_domain_port(entry);
+                caps.add_tcp_connect_port(port);
+            }
         }
 
         // Localhost IPC ports from profile
@@ -424,6 +432,17 @@ fn finalize_caps(
     Ok(())
 }
 
+/// Extract port number from an allow_domain entry.
+/// Format: `"host:port"` returns the port, bare `"host"` returns 443 (HTTPS default).
+fn parse_allow_domain_port(entry: &str) -> u16 {
+    if let Some((_host, port_str)) = entry.rsplit_once(':') {
+        if let Ok(port) = port_str.parse::<u16>() {
+            return port;
+        }
+    }
+    443
+}
+
 fn apply_cli_network_mode(caps: &mut CapabilitySet, args: &SandboxArgs) {
     if args.block_net {
         caps.set_network_blocked(true);
@@ -436,6 +455,13 @@ fn apply_cli_network_mode(caps: &mut CapabilitySet, args: &SandboxArgs) {
             port: 0,
             bind_ports: args.allow_bind.clone(),
         });
+
+        // Add allow_proxy (--allow-domain) ports to Landlock ConnectTcp rules
+        // so non-HTTP protocols can connect directly.
+        for entry in &args.allow_proxy {
+            let port = parse_allow_domain_port(entry);
+            caps.add_tcp_connect_port(port);
+        }
     }
 }
 
@@ -517,6 +543,10 @@ fn add_cli_overrides(caps: &mut CapabilitySet, args: &SandboxArgs) -> Result<()>
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    fn json_string(path: &Path) -> String {
+        serde_json::to_string(&path.display().to_string()).expect("json path")
+    }
 
     fn sandbox_args() -> SandboxArgs {
         SandboxArgs::default()
@@ -713,14 +743,14 @@ mod tests {
                 r#"{{
                     "meta": {{ "name": "policy-adds" }},
                     "policy": {{
-                        "add_allow_read": ["{}"],
-                        "add_allow_write": ["{}"],
-                        "add_allow_readwrite": ["{}"]
+                        "add_allow_read": [{read}],
+                        "add_allow_write": [{write}],
+                        "add_allow_readwrite": [{readwrite}]
                     }}
                 }}"#,
-                read_dir.display(),
-                write_dir.display(),
-                rw_dir.display()
+                read = json_string(&read_dir),
+                write = json_string(&write_dir),
+                readwrite = json_string(&rw_dir),
             ),
         )
         .expect("write profile");
@@ -854,6 +884,7 @@ mod tests {
                         "read_file": ["{}"]
                     }},
                     "policy": {{
+                        "exclude_groups": ["system_read_linux", "system_write_linux"],
                         "add_deny_access": ["{}"]
                     }}
                 }}"#,
@@ -899,6 +930,7 @@ mod tests {
                         "read_file": ["{}"]
                     }},
                     "policy": {{
+                        "exclude_groups": ["system_read_linux", "system_write_linux"],
                         "add_deny_access": ["{}"]
                     }}
                 }}"#,
@@ -1083,12 +1115,12 @@ mod tests {
                 r#"{{
                     "meta": {{ "name": "override-deny-test" }},
                     "policy": {{
-                        "add_allow_readwrite": ["{path}"],
-                        "add_deny_access": ["{path}"],
-                        "override_deny": ["{path}"]
+                        "add_allow_readwrite": [{path}],
+                        "add_deny_access": [{path}],
+                        "override_deny": [{path}]
                     }}
                 }}"#,
-                path = denied.display()
+                path = json_string(&denied),
             ),
         )
         .expect("write profile");
@@ -1126,11 +1158,11 @@ mod tests {
                 r#"{{
                     "meta": {{ "name": "override-deny-no-grant" }},
                     "policy": {{
-                        "add_deny_access": ["{path}"],
-                        "override_deny": ["{path}"]
+                        "add_deny_access": [{path}],
+                        "override_deny": [{path}]
                     }}
                 }}"#,
-                path = denied.display()
+                path = json_string(&denied),
             ),
         )
         .expect("write profile");
@@ -1209,9 +1241,9 @@ mod tests {
             format!(
                 r#"{{
                     "meta": {{ "name": "test-upgrade" }},
-                    "filesystem": {{ "read": ["{}"] }}
+                    "filesystem": {{ "read": [{path}] }}
                 }}"#,
-                target.display()
+                path = json_string(&target),
             ),
         )
         .expect("write profile");
@@ -1255,9 +1287,9 @@ mod tests {
             format!(
                 r#"{{
                     "meta": {{ "name": "test-merge" }},
-                    "filesystem": {{ "read": ["{}"] }}
+                    "filesystem": {{ "read": [{path}] }}
                 }}"#,
-                target.display()
+                path = json_string(&target),
             ),
         )
         .expect("write profile");
@@ -1427,6 +1459,95 @@ mod tests {
             caps.ipc_mode(),
             nono::IpcMode::SharedMemoryOnly,
             "absent profile ipc_mode should default to SharedMemoryOnly"
+        );
+    }
+
+    #[test]
+    fn test_parse_allow_domain_port_with_explicit_port() {
+        assert_eq!(parse_allow_domain_port("nats.example.com:4222"), 4222);
+        assert_eq!(parse_allow_domain_port("postgres.example.com:5432"), 5432);
+        assert_eq!(parse_allow_domain_port("localhost:8080"), 8080);
+    }
+
+    #[test]
+    fn test_parse_allow_domain_port_default() {
+        assert_eq!(parse_allow_domain_port("api.example.com"), 443);
+        assert_eq!(parse_allow_domain_port("*.example.com"), 443);
+    }
+
+    #[test]
+    fn test_parse_allow_domain_port_invalid_port() {
+        // Invalid port string falls back to 443
+        assert_eq!(parse_allow_domain_port("host:notaport"), 443);
+    }
+
+    #[test]
+    fn test_from_profile_allow_domain_ports_added_to_tcp_connect() {
+        let dir = tempdir().expect("tmpdir");
+        let profile_path = dir.path().join("allow-domain-ports.json");
+        std::fs::write(
+            &profile_path,
+            r#"{
+                "meta": { "name": "allow-domain-ports" },
+                "filesystem": { "allow": ["/tmp"] },
+                "network": {
+                    "allow_domain": [
+                        "api.example.com",
+                        "nats.example.com:4222",
+                        "postgres.example.com:5432"
+                    ]
+                }
+            }"#,
+        )
+        .expect("write profile");
+        let profile = crate::profile::load_profile_from_path(&profile_path).expect("load profile");
+
+        let workdir = tempdir().expect("workdir");
+        let args = sandbox_args();
+
+        let (caps, _) =
+            CapabilitySet::from_profile(&profile, workdir.path(), &args).expect("build caps");
+
+        let ports = caps.tcp_connect_ports();
+        assert!(
+            ports.contains(&443),
+            "tcp_connect_ports should contain 443 for bare domain, got: {:?}",
+            ports
+        );
+        assert!(
+            ports.contains(&4222),
+            "tcp_connect_ports should contain 4222 for nats.example.com:4222, got: {:?}",
+            ports
+        );
+        assert!(
+            ports.contains(&5432),
+            "tcp_connect_ports should contain 5432 for postgres.example.com:5432, got: {:?}",
+            ports
+        );
+    }
+
+    #[test]
+    fn test_from_args_allow_proxy_ports_added_to_tcp_connect() {
+        let args = SandboxArgs {
+            allow_proxy: vec![
+                "api.example.com".to_string(),
+                "nats.example.com:4222".to_string(),
+            ],
+            ..sandbox_args()
+        };
+
+        let (caps, _) = CapabilitySet::from_args(&args).expect("build caps");
+
+        let ports = caps.tcp_connect_ports();
+        assert!(
+            ports.contains(&443),
+            "tcp_connect_ports should contain 443 for bare domain, got: {:?}",
+            ports
+        );
+        assert!(
+            ports.contains(&4222),
+            "tcp_connect_ports should contain 4222 for nats.example.com:4222, got: {:?}",
+            ports
         );
     }
 }

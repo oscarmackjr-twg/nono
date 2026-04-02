@@ -72,9 +72,9 @@ pub struct CredentialDef {
     /// Explicit environment variable name for the phantom token.
     ///
     /// Required when `credential_key` is a URI manager reference (`env://`,
-    /// `op://`, `apple-password://`), since uppercasing those produces
-    /// nonsensical env var names. When `None`, the proxy derives the env var
-    /// from `credential_key.to_uppercase()`.
+    /// `op://`, `apple-password://`, `file://`), since uppercasing those
+    /// produces nonsensical env var names. When `None`, the proxy derives
+    /// the env var from `credential_key.to_uppercase()`.
     #[serde(default)]
     pub env_var: Option<String>,
 
@@ -310,7 +310,14 @@ pub fn expand_proxy_allow(policy: &NetworkPolicy, entries: &[String]) -> Vec<Str
                 result.push(wildcard);
             }
         } else {
-            result.push(entry.clone());
+            // Strip optional :port suffix — the proxy host filter matches
+            // hostnames only, while allow_domain entries may include ports
+            // for Landlock TCP connect rules.
+            let host = entry
+                .rsplit_once(':')
+                .and_then(|(h, p)| p.parse::<u16>().ok().map(|_| h))
+                .unwrap_or(entry.as_str());
+            result.push(host.to_string());
         }
     }
     result

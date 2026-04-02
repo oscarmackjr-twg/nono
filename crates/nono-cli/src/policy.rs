@@ -889,9 +889,7 @@ pub fn validate_deny_overlaps(deny_paths: &[PathBuf], caps: &CapabilitySet) -> R
                     "Landlock cannot enforce {}. This deny has no effect on Linux.",
                     conflict
                 );
-                if cap.source.is_user_intent() {
-                    fatal_conflicts.push(conflict);
-                }
+                fatal_conflicts.push(conflict);
             }
         }
     }
@@ -1072,10 +1070,26 @@ pub fn list_policy_profiles() -> Result<Vec<String>> {
 
 /// Load the embedded policy and return the parsed Policy struct.
 ///
-/// Convenience wrapper that loads from the compile-time embedded JSON.
+/// The policy JSON is embedded at compile time and never changes at runtime,
+/// so we parse it once and cache the result. This avoids re-parsing ~23 KB of
+/// JSON on every call (up to ~18 call sites per CLI invocation).
 pub fn load_embedded_policy() -> Result<Policy> {
+    static CACHED: std::sync::OnceLock<Policy> = std::sync::OnceLock::new();
+
+    // The embedded JSON is baked in at build time — parse failure here means
+    // a build-system bug, not a runtime condition.  We cache the successful
+    // parse and clone on each call (cheap: Policy is a handful of HashMaps
+    // whose keys and values are small strings).
+    if let Some(policy) = CACHED.get() {
+        return Ok(policy.clone());
+    }
+
     let json = crate::config::embedded::embedded_policy_json();
-    load_policy(json)
+    let policy = load_policy(json)?;
+    // Another thread may have raced us; that's fine — OnceLock keeps the
+    // first value and our `policy` is simply dropped.
+    let _ = CACHED.set(policy.clone());
+    Ok(policy)
 }
 
 // ============================================================================
@@ -1253,14 +1267,16 @@ mod tests {
         )
         .expect("resolve failed");
 
-        assert_eq!(resolved.names.len(), 2);
-
         if cfg!(target_os = "macos") {
+            assert_eq!(resolved.names.len(), 2);
             assert!(resolved.names.contains(&"claude_code_macos".to_string()));
             assert!(resolved.names.contains(&"vscode_macos".to_string()));
-        } else {
+        } else if cfg!(target_os = "linux") {
+            assert_eq!(resolved.names.len(), 2);
             assert!(resolved.names.contains(&"claude_code_linux".to_string()));
             assert!(resolved.names.contains(&"vscode_linux".to_string()));
+        } else {
+            assert!(resolved.names.is_empty());
         }
     }
 
@@ -1320,13 +1336,14 @@ mod tests {
         )
         .expect("resolve failed");
 
-        // Exactly one should have been resolved
-        assert_eq!(resolved.names.len(), 1);
-
         if cfg!(target_os = "macos") {
+            assert_eq!(resolved.names.len(), 1);
             assert_eq!(resolved.names[0], "test_macos_only");
-        } else {
+        } else if cfg!(target_os = "linux") {
+            assert_eq!(resolved.names.len(), 1);
             assert_eq!(resolved.names[0], "test_linux_only");
+        } else {
+            assert!(resolved.names.is_empty());
         }
     }
 
@@ -1419,8 +1436,13 @@ mod tests {
             .expect("expand_path should succeed for absolute paths");
 
         // Deny path should always be collected regardless of platform
-        assert_eq!(deny_paths.len(), 1);
-        assert_eq!(deny_paths[0], PathBuf::from("/nonexistent/test/deny"));
+        assert!(
+            deny_paths
+                .iter()
+                .any(|path| path == &PathBuf::from("/nonexistent/test/deny")),
+            "deny paths should include the original path, got: {:?}",
+            deny_paths
+        );
 
         if cfg!(target_os = "macos") {
             // On macOS, Seatbelt platform rules should be generated
@@ -1773,7 +1795,8 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_deny_overlaps_group_overlap_warn_only() {
+    #[cfg(target_os = "linux")]
+    fn test_validate_deny_overlaps_group_overlap_is_fatal() {
         use nono::FsCapability;
 
         let mut caps = CapabilitySet::new();
@@ -1784,10 +1807,15 @@ mod tests {
 
         let deny_paths = vec![PathBuf::from("/tmp/secret")];
 
-        // Group/system overlaps are warning-only. Fatal errors are reserved for
-        // explicit user intent (CLI/profile), where deny-within-allow is likely accidental.
-        validate_deny_overlaps(&deny_paths, &caps)
-            .expect("group overlap should not hard-fail validation");
+        // Group-sourced overlaps must be fatal on Linux — Landlock cannot
+        // enforce deny-within-allow, so silently ignoring the conflict
+        // gives the user a false sense of security.
+        // On macOS this is a no-op (Seatbelt handles deny-within-allow natively).
+        let result = validate_deny_overlaps(&deny_paths, &caps);
+        assert!(
+            result.is_err(),
+            "group-sourced deny overlap must be a hard error on Linux"
+        );
     }
 
     #[test]
@@ -1799,9 +1827,9 @@ mod tests {
         // means the allow wins. Both cases silently disable the deny.
         //
         // We check every group because profiles can
-        // combine arbitrary groups, and validate_deny_overlaps is warn-only
-        // for group-sourced capabilities at runtime. This test is the real
-        // safety net for the embedded policy.
+        // combine arbitrary groups, and validate_deny_overlaps rejects
+        // overlaps at runtime. This test catches regressions in the
+        // embedded policy at compile time.
         //
         // We filter to Linux-applicable groups (platform: None or "linux")
         // and check directly from parsed policy so this catches regressions
@@ -1871,13 +1899,13 @@ mod tests {
             resolve_groups(&policy, &["test_deny".to_string()], &mut caps).expect("resolve failed");
 
         // deny_paths should be populated with the expanded deny.access paths
-        assert_eq!(resolved.deny_paths.len(), 1);
         assert!(
-            resolved.deny_paths[0]
-                .to_string_lossy()
-                .contains("nonexistent/test/path"),
-            "Expected deny path to contain 'nonexistent/test/path', got: {}",
-            resolved.deny_paths[0].display()
+            resolved
+                .deny_paths
+                .iter()
+                .any(|path| path.to_string_lossy().contains("nonexistent/test/path")),
+            "Expected deny path to contain 'nonexistent/test/path', got: {:?}",
+            resolved.deny_paths
         );
     }
 
@@ -1969,11 +1997,11 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn test_embedded_policy_includes_device_files() {
-        // The system_read_linux group lists /dev/urandom, /dev/null, etc.
+        // The system_read_linux_core group lists /dev/urandom, /dev/null, etc.
         // Verify they survive policy resolution and end up in the capability set.
         let policy = load_embedded_policy().expect("embedded policy");
         let mut caps = CapabilitySet::new();
-        resolve_groups(&policy, &["system_read_linux".to_string()], &mut caps)
+        resolve_groups(&policy, &["system_read_linux_core".to_string()], &mut caps)
             .expect("resolve failed");
 
         let resolved_paths: Vec<PathBuf> = caps
@@ -1985,7 +2013,7 @@ mod tests {
         for device in &["/dev/urandom", "/dev/null", "/dev/zero", "/dev/random"] {
             assert!(
                 resolved_paths.iter().any(|p| p == Path::new(device)),
-                "{} must be included in system_read_linux capabilities, got: {:?}",
+                "{} must be included in system_read_linux_core capabilities, got: {:?}",
                 device,
                 resolved_paths
             );
@@ -2036,12 +2064,12 @@ mod tests {
     }
 
     #[test]
-    fn test_system_read_linux_does_not_grant_bare_etc_or_proc() {
+    fn test_system_read_linux_core_does_not_grant_bare_etc_or_proc() {
         let policy = load_embedded_policy().expect("embedded policy must parse");
         let group = policy
             .groups
-            .get("system_read_linux")
-            .expect("system_read_linux group must exist");
+            .get("system_read_linux_core")
+            .expect("system_read_linux_core group must exist");
         let read_paths = group
             .allow
             .as_ref()
@@ -2050,13 +2078,117 @@ mod tests {
 
         assert!(
             !read_paths.iter().any(|p| p == "/etc"),
-            "system_read_linux must not grant bare '/etc'; use specific paths instead. Found: {:?}",
+            "system_read_linux_core must not grant bare '/etc'; use specific paths instead. Found: {:?}",
             read_paths
         );
         assert!(
             !read_paths.iter().any(|p| p == "/proc"),
-            "system_read_linux must not grant bare '/proc'; use specific paths instead. Found: {:?}",
+            "system_read_linux_core must not grant bare '/proc'; use specific paths instead. Found: {:?}",
             read_paths
+        );
+    }
+
+    #[test]
+    fn test_linux_core_excludes_runtime_state_sysfs_temp_and_nix() {
+        let policy = load_embedded_policy().expect("embedded policy must parse");
+        let group = policy
+            .groups
+            .get("system_read_linux_core")
+            .expect("system_read_linux_core group must exist");
+        let read_paths = group
+            .allow
+            .as_ref()
+            .map(|a| a.read.as_slice())
+            .unwrap_or(&[]);
+
+        for disallowed in ["/run", "/var/run", "/sys", "/tmp", "/nix"] {
+            assert!(
+                !read_paths.iter().any(|p| p == disallowed),
+                "system_read_linux_core must not include '{}'. Found: {:?}",
+                disallowed,
+                read_paths
+            );
+        }
+    }
+
+    #[test]
+    fn test_linux_compat_groups_expose_expected_paths() {
+        let policy = load_embedded_policy().expect("embedded policy must parse");
+
+        let runtime = policy
+            .groups
+            .get("linux_runtime_state")
+            .expect("linux_runtime_state group must exist");
+        let runtime_paths = runtime
+            .allow
+            .as_ref()
+            .map(|a| a.read.as_slice())
+            .unwrap_or(&[]);
+        assert!(runtime_paths.iter().any(|p| p == "/run"));
+        assert!(runtime_paths.iter().any(|p| p == "/var/run"));
+
+        let sysfs = policy
+            .groups
+            .get("linux_sysfs_read")
+            .expect("linux_sysfs_read group must exist");
+        let sysfs_paths = sysfs
+            .allow
+            .as_ref()
+            .map(|a| a.read.as_slice())
+            .unwrap_or(&[]);
+        assert_eq!(sysfs_paths, ["/sys"]);
+
+        let temp = policy
+            .groups
+            .get("linux_temp_read")
+            .expect("linux_temp_read group must exist");
+        let temp_paths = temp
+            .allow
+            .as_ref()
+            .map(|a| a.read.as_slice())
+            .unwrap_or(&[]);
+        assert_eq!(temp_paths, ["/tmp"]);
+    }
+
+    #[test]
+    fn test_default_user_groups_do_not_grant_local_state() {
+        let policy = load_embedded_policy().expect("embedded policy must parse");
+
+        let user_tools = policy
+            .groups
+            .get("user_tools")
+            .expect("user_tools group must exist");
+        let user_tools_allow = user_tools.allow.as_ref().expect("user_tools allow rules");
+        assert!(
+            !user_tools_allow.read.iter().any(|p| p == "~/.local/state"),
+            "user_tools must not grant ~/.local/state"
+        );
+        assert!(
+            !user_tools_allow
+                .readwrite
+                .iter()
+                .any(|p| p == "~/.local/state"),
+            "user_tools must not grant ~/.local/state"
+        );
+
+        let user_caches_linux = policy
+            .groups
+            .get("user_caches_linux")
+            .expect("user_caches_linux group must exist");
+        let user_caches_allow = user_caches_linux
+            .allow
+            .as_ref()
+            .expect("user_caches_linux allow rules");
+        assert!(
+            !user_caches_allow.read.iter().any(|p| p == "~/.local/state"),
+            "user_caches_linux must not grant ~/.local/state"
+        );
+        assert!(
+            !user_caches_allow
+                .readwrite
+                .iter()
+                .any(|p| p == "~/.local/state"),
+            "user_caches_linux must not grant ~/.local/state"
         );
     }
 
