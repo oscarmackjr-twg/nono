@@ -12,17 +12,19 @@ use crate::windows_wfp_contract::{
 };
 use nono::supervisor::AuditEntry;
 use nono::{ApprovalBackend, CapabilitySet, NonoError, Result, Sandbox};
+use rand::RngExt;
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::io::Write;
 use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
-use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 #[cfg(debug_assertions)]
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::time::SystemTime;
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
 use windows_sys::Win32::Security::{
     CreateWellKnownSid, DuplicateTokenEx, SecurityImpersonation, SetTokenInformation,
@@ -37,8 +39,9 @@ use windows_sys::Win32::System::JobObjects::{
 };
 use windows_sys::Win32::System::SystemServices::SE_GROUP_INTEGRITY;
 use windows_sys::Win32::System::Threading::{
-    CreateProcessAsUserW, GetCurrentProcess, GetExitCodeProcess, OpenProcessToken,
-    WaitForSingleObject, CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION, STARTUPINFOW,
+    CreateProcessAsUserW, CreateProcessW, GetCurrentProcess, GetExitCodeProcess, OpenProcessToken,
+    ResumeThread, TerminateProcess, WaitForSingleObject, CREATE_SUSPENDED,
+    CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION, STARTUPINFOW,
 };
 
 pub(crate) use env_sanitization::is_dangerous_env_var;
@@ -328,8 +331,7 @@ impl WindowsSupervisorLifecycleState {
 }
 
 enum WindowsSupervisedChild {
-    Standard(std::process::Child),
-    LowIntegrity {
+    Native {
         process: OwnedHandle,
         _thread: OwnedHandle,
     },
@@ -338,11 +340,7 @@ enum WindowsSupervisedChild {
 impl WindowsSupervisedChild {
     fn poll_exit_code(&mut self) -> Result<Option<i32>> {
         match self {
-            Self::Standard(child) => Ok(child
-                .try_wait()
-                .map_err(NonoError::CommandExecution)?
-                .map(|status| status.code().unwrap_or(1))),
-            Self::LowIntegrity { process, .. } => {
+            Self::Native { process, .. } => {
                 let wait_result = unsafe {
                     // SAFETY: `process.0` is a valid process handle owned by this child wrapper.
                     WaitForSingleObject(process.0, 0)
@@ -587,14 +585,9 @@ fn delete_firewall_rule(name: &str) -> Result<()> {
 }
 
 fn unique_windows_firewall_rule_suffix() -> String {
-    format!(
-        "{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    )
+    let mut bytes = [0u8; 16];
+    rand::rng().fill(&mut bytes);
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn stage_program_for_blocked_network_launch(program: &Path) -> Result<(PathBuf, PathBuf)> {
@@ -2025,15 +2018,14 @@ fn create_process_containment() -> Result<ProcessContainment> {
     Ok(ProcessContainment { job })
 }
 
-fn apply_process_containment(
+fn apply_process_handle_to_containment(
     containment: &ProcessContainment,
-    child: &std::process::Child,
+    process: HANDLE,
 ) -> Result<()> {
-    let process = child.as_raw_handle() as HANDLE;
     let ok = unsafe {
         // SAFETY: `containment.job` is a live job handle owned by the current
-        // process, and `process` is the live child process handle returned by
-        // std::process::Command::spawn().
+        // process, and `process` is a live process handle returned by
+        // CreateProcessW/CreateProcessAsUserW.
         AssignProcessToJobObject(containment.job, process)
     };
     if ok == 0 {
@@ -2044,19 +2036,26 @@ fn apply_process_containment(
     Ok(())
 }
 
-fn apply_process_handle_to_containment(
-    containment: &ProcessContainment,
-    process: HANDLE,
-) -> Result<()> {
-    let ok = unsafe {
-        // SAFETY: `containment.job` is a live job handle owned by the current
-        // process, and `process` is a live process handle returned by
-        // CreateProcessAsUserW.
-        AssignProcessToJobObject(containment.job, process)
+fn terminate_suspended_process(process: HANDLE, reason: &str) {
+    let _ = unsafe {
+        // SAFETY: `process` is a live process handle that the caller owns for the
+        // duration of this cleanup path. Best-effort termination preserves fail-closed behavior.
+        TerminateProcess(process, 1)
     };
-    if ok == 0 {
+    tracing::debug!("terminated suspended Windows child after containment failure: {reason}");
+}
+
+fn resume_contained_process(process: HANDLE, thread: HANDLE) -> Result<()> {
+    let resume_result = unsafe {
+        // SAFETY: `thread` is the live primary thread handle returned by
+        // CreateProcessW/CreateProcessAsUserW. Resuming it starts execution only
+        // after containment has already been attached.
+        ResumeThread(thread)
+    };
+    if resume_result == u32::MAX {
+        terminate_suspended_process(process, "ResumeThread failed");
         return Err(NonoError::SandboxInit(
-            "Failed to assign Windows child process to process containment job object".to_string(),
+            "Failed to resume Windows child process after attaching containment".to_string(),
         ));
     }
     Ok(())
@@ -2591,7 +2590,7 @@ fn spawn_low_integrity_windows_child(
             std::ptr::null(),
             std::ptr::null(),
             0,
-            CREATE_UNICODE_ENVIRONMENT,
+            CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
             environment_block.as_mut_ptr() as *mut _,
             current_dir.as_ptr(),
             &startup_info,
@@ -2608,8 +2607,12 @@ fn spawn_low_integrity_windows_child(
     let process = OwnedHandle(process_info.hProcess);
     let thread = OwnedHandle(process_info.hThread);
 
-    apply_process_handle_to_containment(containment, process.raw())?;
-    Ok(WindowsSupervisedChild::LowIntegrity {
+    if let Err(err) = apply_process_handle_to_containment(containment, process.raw()) {
+        terminate_suspended_process(process.raw(), "AssignProcessToJobObject failed");
+        return Err(err);
+    }
+    resume_contained_process(process.raw(), thread.raw())?;
+    Ok(WindowsSupervisedChild::Native {
         process,
         _thread: thread,
     })
@@ -2630,16 +2633,79 @@ fn spawn_supervised_with_standard_token(
     containment: &ProcessContainment,
 ) -> Result<WindowsSupervisedChild> {
     let cmd_args = prepare_runtime_hardened_args(launch_program, &config.command[1..]);
-    let mut cmd = Command::new(launch_program);
-    cmd.env_clear();
-    cmd.current_dir(config.current_dir);
-    for (key, value) in build_child_env(config) {
-        cmd.env(key, value);
+    spawn_windows_child_with_current_token(config, launch_program, containment, &cmd_args)
+}
+
+fn spawn_windows_child_with_current_token(
+    config: &ExecConfig<'_>,
+    launch_program: &Path,
+    containment: &ProcessContainment,
+    cmd_args: &[String],
+) -> Result<WindowsSupervisedChild> {
+    let env_pairs = build_child_env(config);
+    let mut environment_block = build_windows_environment_block(&env_pairs);
+    let application_name: Vec<u16> = launch_program
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut command_line = build_command_line(launch_program, cmd_args);
+    let current_dir: Vec<u16> = config
+        .current_dir
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let startup_info = STARTUPINFOW {
+        cb: size_of::<STARTUPINFOW>() as u32,
+        ..unsafe {
+            // SAFETY: STARTUPINFOW is a plain FFI struct; zero initialization
+            // is valid before filling the documented fields.
+            std::mem::zeroed()
+        }
+    };
+    let mut process_info = PROCESS_INFORMATION {
+        ..unsafe {
+            // SAFETY: PROCESS_INFORMATION is a plain FFI struct populated by CreateProcessW.
+            std::mem::zeroed()
+        }
+    };
+
+    let created = unsafe {
+        // SAFETY: All pointers either refer to valid, nul-terminated UTF-16 buffers
+        // or are null as documented by CreateProcessW.
+        CreateProcessW(
+            application_name.as_ptr(),
+            command_line.as_mut_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            0,
+            CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
+            environment_block.as_mut_ptr() as *mut _,
+            current_dir.as_ptr(),
+            &startup_info,
+            &mut process_info,
+        )
+    };
+    if created == 0 {
+        return Err(NonoError::SandboxInit(format!(
+            "Failed to launch Windows child process with containment staging (GetLastError={})",
+            unsafe { GetLastError() }
+        )));
     }
-    cmd.args(&cmd_args);
-    let child = cmd.spawn().map_err(NonoError::CommandExecution)?;
-    apply_process_containment(containment, &child)?;
-    Ok(WindowsSupervisedChild::Standard(child))
+
+    let process = OwnedHandle(process_info.hProcess);
+    let thread = OwnedHandle(process_info.hThread);
+
+    if let Err(err) = apply_process_handle_to_containment(containment, process.raw()) {
+        terminate_suspended_process(process.raw(), "AssignProcessToJobObject failed");
+        return Err(err);
+    }
+    resume_contained_process(process.raw(), thread.raw())?;
+    Ok(WindowsSupervisedChild::Native {
+        process,
+        _thread: thread,
+    })
 }
 
 pub fn execute_direct(config: &ExecConfig<'_>) -> Result<i32> {
@@ -2652,17 +2718,14 @@ pub fn execute_direct(config: &ExecConfig<'_>) -> Result<i32> {
         return execute_direct_with_low_integrity(config, launch_program, &containment, &cmd_args);
     }
 
-    let mut cmd = Command::new(launch_program);
-    cmd.env_clear();
-    cmd.current_dir(config.current_dir);
-    for (key, value) in build_child_env(config) {
-        cmd.env(key, value);
+    let mut child =
+        spawn_windows_child_with_current_token(config, launch_program, &containment, &cmd_args)?;
+    loop {
+        if let Some(exit_code) = child.poll_exit_code()? {
+            return Ok(exit_code);
+        }
+        std::thread::sleep(WINDOWS_SUPERVISOR_POLL_INTERVAL);
     }
-    cmd.args(&cmd_args);
-    let mut child = cmd.spawn().map_err(NonoError::CommandExecution)?;
-    apply_process_containment(&containment, &child)?;
-    let status = child.wait().map_err(NonoError::CommandExecution)?;
-    Ok(status.code().unwrap_or(1))
 }
 
 pub fn execute_supervised(
@@ -3308,6 +3371,20 @@ mod tests {
         cleanup_network_enforcement_staging(&staged_dir);
 
         assert!(!staged_dir.exists(), "staged directory should be removed");
+    }
+
+    #[test]
+    fn test_unique_windows_firewall_rule_suffix_is_hex() {
+        let suffix = unique_windows_firewall_rule_suffix();
+        assert_eq!(suffix.len(), 32);
+        assert!(suffix.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_unique_windows_firewall_rule_suffix_is_unpredictable_across_calls() {
+        let first = unique_windows_firewall_rule_suffix();
+        let second = unique_windows_firewall_rule_suffix();
+        assert_ne!(first, second);
     }
 
     #[test]
