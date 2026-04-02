@@ -3668,6 +3668,19 @@ mod tests {
         SandboxArgs::default()
     }
 
+    fn repo_local_tempdir() -> tempfile::TempDir {
+        let root = std::env::current_dir()
+            .expect("cwd")
+            .join("target")
+            .join("test-tmp")
+            .join("nono-cli-main");
+        std::fs::create_dir_all(&root).expect("mkdir test temp root");
+        tempfile::Builder::new()
+            .prefix("nono-cli-")
+            .tempdir_in(root)
+            .expect("tempdir")
+    }
+
     #[test]
     fn test_sensitive_paths_defined() {
         let loaded_policy = policy::load_embedded_policy().expect("policy must load");
@@ -3865,7 +3878,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn test_validate_windows_preview_direct_execution_allows_supported_directory_subset() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = repo_local_tempdir();
         let workdir = dir.path().join("workspace");
         std::fs::create_dir_all(&workdir).expect("mkdir workspace");
         let caps = CapabilitySet::new()
@@ -3908,7 +3921,7 @@ mod tests {
     #[test]
     fn test_validate_windows_preview_direct_execution_allows_override_deny_when_policy_is_supported(
     ) {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = repo_local_tempdir();
         let flags = ExecutionFlags {
             strategy: exec_strategy::ExecStrategy::Direct,
             workdir: dir.path().to_path_buf(),
@@ -4002,7 +4015,7 @@ mod tests {
 
     #[test]
     fn test_execution_start_dir_keeps_workdir_when_covered() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = repo_local_tempdir();
         let canonical = dir.path().canonicalize().expect("canonicalize");
         let mut caps = CapabilitySet::new();
         caps.add_fs(FsCapability::new_dir(dir.path(), AccessMode::Read).expect("grant"));
@@ -4014,7 +4027,7 @@ mod tests {
 
     #[test]
     fn test_execution_start_dir_falls_back_to_root_when_not_covered() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = repo_local_tempdir();
         let caps = CapabilitySet::new();
 
         let start_dir = execution_start_dir(dir.path(), &caps).expect("start dir");

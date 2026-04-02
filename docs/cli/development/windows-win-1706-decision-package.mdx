@@ -1,0 +1,113 @@
+---
+title: WIN-1706 Decision Package
+description: Maintainer decision package for promoting Windows to first-class supported status
+---
+
+# WIN-1706 Decision Package
+
+`WIN-1706` is blocked on a product/support-contract decision, not on packaging or signing.
+
+Already complete on this branch:
+
+- release automation stages signed Windows `.exe`, machine MSI, user MSI, and zip artifacts
+- Authenticode verification is wired into the release path
+- MSI contract validation is automated
+- docs/help/setup wording now describes the active Windows command surface accurately
+
+Still blocked:
+
+- [windows.rs](/cli/development/windows-security-model) support reporting still describes Windows as `partial`
+- the library-wide `Sandbox::apply()` path is still not the backend path the CLI uses for supported Windows execution
+
+That leaves two honest paths for maintainers.
+
+## Option 1: Library/Runtime Alignment
+
+Definition:
+
+- Windows promotion requires the core library support contract to match the supported CLI/runtime behavior.
+
+Result:
+
+- Windows can only be called first-class supported after `Sandbox::support_info()` and `Sandbox::apply()` tell the same story as the CLI.
+
+Primary code touch points:
+
+- [windows.rs](C:/Users/omack/Nono/crates/nono/src/sandbox/windows.rs)
+  - promote `support_info()` from `partial` to a first-class supported status only when true
+  - replace the current `UnsupportedPlatform` `apply()` path with the real backend path or a support-aligned equivalent
+- [mod.rs](C:/Users/omack/Nono/crates/nono/src/sandbox/mod.rs)
+  - ensure top-level support reporting and dispatch remain internally consistent
+- [setup.rs](C:/Users/omack/Nono/crates/nono-cli/src/setup.rs)
+  - support-status output can then move from `partial` to the final release claim
+- [main.rs](C:/Users/omack/Nono/crates/nono-cli/src/main.rs)
+  - final runtime/support wording can be simplified once the library contract matches the CLI contract
+
+Primary docs touch points:
+
+- [windows-promotion-criteria.mdx](C:/Users/omack/Nono/docs/cli/development/windows-promotion-criteria.mdx)
+- [windows-security-model.mdx](C:/Users/omack/Nono/docs/cli/development/windows-security-model.mdx)
+- [security-model.mdx](C:/Users/omack/Nono/docs/cli/internals/security-model.mdx)
+- [README.md](C:/Users/omack/Nono/README.md)
+- [installation.mdx](C:/Users/omack/Nono/docs/cli/getting_started/installation.mdx)
+
+Tradeoff:
+
+- This is the stricter and cleaner definition of support.
+- It requires real backend/library alignment work before promotion can be claimed.
+
+## Option 2: CLI Surface Is The Product
+
+Definition:
+
+- Windows promotion is defined by the supported CLI command surface, even if the library remains partial.
+
+Result:
+
+- Windows can be called first-class supported at the CLI/release level while the library remains intentionally narrower.
+
+Primary code touch points:
+
+- [windows.rs](C:/Users/omack/Nono/crates/nono/src/sandbox/windows.rs)
+  - keep library support reporting intentionally partial, but document the narrower contract explicitly
+- [setup.rs](C:/Users/omack/Nono/crates/nono-cli/src/setup.rs)
+  - stop presenting library support status as the overall product support status
+- [main.rs](C:/Users/omack/Nono/crates/nono-cli/src/main.rs)
+  - keep the runtime contract framed as a supported Windows command surface rather than a library-wide support claim
+- potentially add an explicit CLI-vs-library support distinction in CLI diagnostics instead of reusing the library status directly
+
+Primary docs touch points:
+
+- [windows-promotion-criteria.mdx](C:/Users/omack/Nono/docs/cli/development/windows-promotion-criteria.mdx)
+- [windows-feature-gap-matrix.mdx](C:/Users/omack/Nono/docs/cli/development/windows-feature-gap-matrix.mdx)
+- [windows-security-model.mdx](C:/Users/omack/Nono/docs/cli/development/windows-security-model.mdx)
+- [security-model.mdx](C:/Users/omack/Nono/docs/cli/internals/security-model.mdx)
+- [README.md](C:/Users/omack/Nono/README.md)
+
+Tradeoff:
+
+- This unblocks product promotion faster.
+- It creates a permanent distinction between “CLI supported” and “library partially supported,” which must stay explicit in code and docs.
+
+## Recommendation
+
+If maintainers want the cleanest long-term support story, choose **Option 1**.
+
+If maintainers want to optimize for product readiness on the supported Windows CLI surface and are comfortable documenting a narrower library contract, choose **Option 2**.
+
+What should not happen:
+
+- claiming first-class Windows support in README/help/release messaging while neither option has been explicitly adopted
+- changing `support_info()` wording alone without deciding whether the product bar is library-wide or CLI-surface-specific
+
+## Current PR Review Disposition
+
+Remaining PR comments on `#555` fall into these buckets:
+
+- stale/already fixed:
+  - the `GUID::from_u128` compile comment is obsolete on current branch state
+- addressed in branch behavior:
+  - WFP service install idempotency is already handled in the Windows exec strategy
+- valid follow-up, not merge-blocking:
+  - the named-pipe pair implementation could become a single duplex named pipe later, but that is an architectural improvement rather than a correctness issue for this slice
+  - request-field error construction can stay lean and allocation-aware without changing the service contract

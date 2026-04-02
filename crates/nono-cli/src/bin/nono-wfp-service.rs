@@ -101,17 +101,24 @@ fn build_protocol_mismatch_response(
     }
 }
 
-fn build_invalid_activation_response(
-    request: &WfpRuntimeActivationRequest,
+fn build_invalid_activation_response_for(
+    request_kind: &str,
+    runtime_target: &str,
 ) -> WfpRuntimeActivationResponse {
     WfpRuntimeActivationResponse {
         protocol_version: WFP_RUNTIME_PROTOCOL_VERSION,
         status: "invalid-request".to_string(),
         details: format!(
             "unsupported WFP runtime activation request kind `{}` for {}",
-            request.request_kind, request.runtime_target
+            request_kind, runtime_target
         ),
     }
+}
+
+fn build_invalid_activation_response(
+    request: &WfpRuntimeActivationRequest,
+) -> WfpRuntimeActivationResponse {
+    build_invalid_activation_response_for(&request.request_kind, &request.runtime_target)
 }
 
 fn build_prerequisites_missing_response(details: String) -> WfpRuntimeActivationResponse {
@@ -193,19 +200,21 @@ fn current_driver_binary_path() -> Result<std::path::PathBuf, String> {
 fn validate_target_request_fields(
     request: &WfpRuntimeActivationRequest,
 ) -> Result<(std::path::PathBuf, String, String), WfpRuntimeActivationResponse> {
+    let invalid_request =
+        || build_invalid_activation_response_for(&request.request_kind, &request.runtime_target);
     let target_program = request
         .target_program_path
         .as_ref()
         .map(std::path::PathBuf::from)
-        .ok_or_else(|| build_invalid_activation_response(request))?;
+        .ok_or_else(invalid_request)?;
     let outbound_rule = request
         .outbound_rule_name
         .clone()
-        .ok_or_else(|| build_invalid_activation_response(request))?;
+        .ok_or_else(invalid_request)?;
     let inbound_rule = request
         .inbound_rule_name
         .clone()
-        .ok_or_else(|| build_invalid_activation_response(request))?;
+        .ok_or_else(invalid_request)?;
     Ok((target_program, outbound_rule, inbound_rule))
 }
 

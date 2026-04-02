@@ -148,3 +148,5 @@ The Windows release candidate gate is complete when:
 ## Promotion Criteria
 
 Before promoting Windows to a first-class release target, review the draft gates in the [Windows Promotion Criteria](/cli/development/windows-promotion-criteria) document and confirm they are truly satisfied. The RC checklist gates above are the operational pre-release verification; the promotion criteria document is the future-state promotion checklist rather than a declaration that promotion is already complete.
+
+If packaging/signing/CI gates are green but promotion is still blocked, use the [WIN-1706 Decision Package](/cli/development/windows-win-1706-decision-package) to decide whether Windows promotion is defined by library/runtime alignment or by the supported CLI surface.

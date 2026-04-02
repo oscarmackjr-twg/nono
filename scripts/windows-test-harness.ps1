@@ -117,13 +117,16 @@ $regressionTests = @(
     @{ Package = "nono"; Filter = "normalize_windows_path_strips_verbatim_prefix" },
     @{ Package = "nono"; Filter = "normalize_windows_path_strips_unc_verbatim_prefix" },
     @{ Package = "nono"; Filter = "windows_paths_start_with_case_insensitive_matches_drive_case" },
+    @{ Package = "nono"; Filter = "low_integrity_compatible_dir_matches_localappdata_temp_low" },
     @{ Package = "nono-cli"; Filter = "windows_protected_path_check_handles_verbatim_prefix_and_case_insensitive_drive_letters" },
     @{ Package = "nono-cli"; Filter = "windows_path_overlaps_filter_handles_verbatim_prefix_and_drive_case" },
     @{ Package = "nono-cli"; Filter = "test_validate_windows_preview_direct_execution_allows_override_deny_when_policy_is_supported" },
     @{ Package = "nono-cli"; Filter = "windows_run_prefers_managed_low_integrity_runtime_root_inside_allowlist" },
-    @{ Package = "nono-cli"; Filter = "windows_run_blocks_unverified_runtime_root_override" },
+    @{ Package = "nono-cli"; Filter = "windows_run_ignores_unverified_localappdata_override_when_runtime_root_is_verified" },
     @{ Package = "nono-cli"; Filter = "windows_run_redirects_temp_vars_into_writable_allowlist" },
-    @{ Package = "nono-cli"; Filter = "windows_run_redirects_profile_state_vars_into_writable_allowlist" }
+    @{ Package = "nono-cli"; Filter = "windows_run_redirects_profile_state_vars_into_writable_allowlist" },
+    @{ Package = "nono-cli"; Filter = "config_with_valid_manifest_is_accepted" },
+    @{ Package = "nono-cli"; Filter = "test_show_format_manifest_round_trip" }
 )
 
 $suites = if ($Suite -eq "all") {
