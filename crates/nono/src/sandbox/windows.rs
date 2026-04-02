@@ -140,13 +140,13 @@ This is an explicit Windows product-surface limitation, not a silent fallback.",
         }
         WindowsPreviewEntryPoint::Shell => Err(NonoError::UnsupportedPlatform(
             "Live `nono shell` is intentionally unavailable on Windows. \
-Interactive shell hosts remain a current Windows product limitation rather than a partially-enforced preview mode. \
+Interactive shell hosts remain a current Windows product limitation rather than a partially-enforced support claim. \
 Use `nono run -- <command>` for supported execution or `nono shell --dry-run` to inspect shell policy."
                 .to_string(),
         )),
         WindowsPreviewEntryPoint::Wrap => Err(NonoError::UnsupportedPlatform(
             "Live `nono wrap` is intentionally unavailable on Windows. \
-One-way wrap/apply mode remains a current Windows product limitation rather than a partially-enforced preview mode. \
+One-way wrap/apply mode remains a current Windows product limitation rather than a partially-enforced support claim. \
 Use `nono run -- <command>` for supported execution or `nono wrap --dry-run` to inspect wrap policy."
                 .to_string(),
         )),

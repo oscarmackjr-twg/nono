@@ -2254,6 +2254,35 @@ fn windows_run_smoke_validates_stdout_stderr_and_exit_code() {
 
 #[cfg(target_os = "windows")]
 #[test]
+fn windows_root_help_reports_supported_command_surface_without_full_parity_claim() {
+    let output = nono_bin()
+        .args(["--help"])
+        .output()
+        .expect("failed to run nono --help");
+
+    let text = combined_output(&output);
+    assert!(
+        output.status.success(),
+        "Windows root help should succeed, output:\n{text}"
+    );
+    assert!(
+        text.contains("Windows restricted execution plus explicit command-surface limitations."),
+        "expected root help to describe the current Windows command surface, got:\n{text}"
+    );
+    assert!(
+        text.contains(
+            "Unsupported Windows flows fail closed instead of implying full sandbox parity."
+        ),
+        "expected root help to avoid implying full Windows parity, got:\n{text}"
+    );
+    assert!(
+        !text.contains("first-class supported"),
+        "root help must not claim first-class Windows support yet, got:\n{text}"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
 fn windows_shell_help_reports_documented_limitation() {
     let output = nono_bin()
         .args(["shell", "--help"])
@@ -2272,6 +2301,14 @@ fn windows_shell_help_reports_documented_limitation() {
     assert!(
         text.contains("product limitation"),
         "expected product-limitation wording in shell help output, got:\n{text}"
+    );
+    assert!(
+        !text.contains("preview path"),
+        "shell help should not regress to preview-path wording, got:\n{text}"
+    );
+    assert!(
+        !text.contains("first-class supported"),
+        "shell help must not imply first-class Windows support yet, got:\n{text}"
     );
 }
 
@@ -2295,6 +2332,33 @@ fn windows_shell_live_reports_documented_limitation() {
     assert!(
         text.contains("Use `nono run -- <command>`"),
         "expected actionable alternative in shell limitation message, got:\n{text}"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_shell_live_reports_supported_alternative_without_preview_claim() {
+    let output = nono_bin()
+        .args(["shell"])
+        .output()
+        .expect("failed to run nono shell");
+
+    let text = combined_output(&output);
+    assert!(
+        !output.status.success(),
+        "Windows shell live execution should fail closed, output:\n{text}"
+    );
+    assert!(
+        text.contains("Use `nono run -- <command>`"),
+        "expected shell failure to point at the supported Windows execution path, got:\n{text}"
+    );
+    assert!(
+        !text.contains("preview"),
+        "shell failure should not regress to preview-era messaging, got:\n{text}"
+    );
+    assert!(
+        !text.contains("first-class supported"),
+        "shell failure must not imply first-class Windows support yet, got:\n{text}"
     );
 }
 
@@ -2399,6 +2463,33 @@ fn windows_setup_check_only_reports_live_profile_subset() {
     assert!(
         !text.contains("Live profile enforcement is still preview-only on Windows."),
         "setup output should not regress to preview-only profile wording, got:\n{text}"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_setup_check_only_reports_partial_support_without_first_class_claim() {
+    let output = nono_bin()
+        .args(["setup", "--check-only"])
+        .output()
+        .expect("failed to run nono setup --check-only");
+
+    let text = combined_output(&output);
+    assert!(
+        output.status.success(),
+        "Windows setup --check-only should succeed, output:\n{text}"
+    );
+    assert!(
+        text.contains("Support status: partial"),
+        "expected setup output to keep the honest partial support label, got:\n{text}"
+    );
+    assert!(
+        text.contains("current restricted-execution command surface"),
+        "expected setup output to describe the current supported Windows surface, got:\n{text}"
+    );
+    assert!(
+        !text.contains("first-class supported"),
+        "setup output must not claim first-class Windows support yet, got:\n{text}"
     );
 }
 
@@ -2650,6 +2741,14 @@ fn windows_wrap_help_reports_documented_limitation() {
         text.contains("product limitation"),
         "expected product-limitation wording in wrap help output, got:\n{text}"
     );
+    assert!(
+        !text.contains("preview path"),
+        "wrap help should not regress to preview-path wording, got:\n{text}"
+    );
+    assert!(
+        !text.contains("first-class supported"),
+        "wrap help must not imply first-class Windows support yet, got:\n{text}"
+    );
 }
 
 #[cfg(target_os = "windows")]
@@ -2672,5 +2771,32 @@ fn windows_wrap_reports_documented_limitation() {
     assert!(
         text.contains("Use `nono run -- <command>`"),
         "expected actionable alternative in wrap limitation message, got:\n{text}"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_wrap_live_reports_supported_alternative_without_preview_claim() {
+    let output = nono_bin()
+        .args(["wrap", "--", "cmd", "/c", "echo", "test"])
+        .output()
+        .expect("failed to run nono");
+
+    let text = combined_output(&output);
+    assert!(
+        !output.status.success(),
+        "Windows wrap should fail closed, output:\n{text}"
+    );
+    assert!(
+        text.contains("Use `nono run -- <command>`"),
+        "expected wrap failure to point at the supported Windows execution path, got:\n{text}"
+    );
+    assert!(
+        !text.contains("preview"),
+        "wrap failure should not regress to preview-era messaging, got:\n{text}"
+    );
+    assert!(
+        !text.contains("first-class supported"),
+        "wrap failure must not imply first-class Windows support yet, got:\n{text}"
     );
 }

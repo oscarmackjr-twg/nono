@@ -22,7 +22,7 @@ const SHELL_AFTER_HELP: &str = "\x1b[1mEXAMPLES\x1b[0m
 \x1b[1mWINDOWS\x1b[0m
   Live `nono shell` is intentionally unavailable on Windows.
   Interactive shell mode is a current Windows product limitation,
-  not a silent fallback or partially-enforced preview path.
+  not a silent fallback or partially-enforced support claim.
   Use `nono run -- <command>` for supported direct execution,
   or `nono run --dry-run ...` to inspect policy.";
 
@@ -40,7 +40,7 @@ const WRAP_AFTER_HELP: &str = "\x1b[1mEXAMPLES\x1b[0m
 \x1b[1mWINDOWS\x1b[0m
   Live `nono wrap` is intentionally unavailable on Windows.
   One-way wrap/apply mode is a current Windows product limitation,
-  not a silent fallback or partially-enforced preview path.
+  not a silent fallback or partially-enforced support claim.
   Use `nono run -- <command>` for supported execution,
   or `nono wrap --dry-run ...` to inspect wrap policy.";
 

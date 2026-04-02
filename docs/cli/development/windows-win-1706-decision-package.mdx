@@ -56,6 +56,23 @@ Tradeoff:
 - This is the stricter and cleaner definition of support.
 - It requires real backend/library alignment work before promotion can be claimed.
 
+Concrete execution checklist:
+
+1. Implement a real Windows library apply path.
+   Update [windows.rs](C:/Users/omack/Nono/crates/nono/src/sandbox/windows.rs) so `Sandbox::apply()` no longer returns `UnsupportedPlatform` for the Windows surface the CLI already supports.
+2. Align top-level library dispatch and support reporting.
+   Update [mod.rs](C:/Users/omack/Nono/crates/nono/src/sandbox/mod.rs) and [windows.rs](C:/Users/omack/Nono/crates/nono/src/sandbox/windows.rs) so `support_info()`, `apply()`, and backend classification all describe the same Windows contract.
+3. Add or update library tests first.
+   Cover promoted Windows `support_info()` behavior, `apply()` dispatch, and any newly-supported capability shapes in [windows.rs](C:/Users/omack/Nono/crates/nono/src/sandbox/windows.rs) and adjacent sandbox tests.
+4. Update CLI support output only after the library is honest.
+   Change [setup.rs](C:/Users/omack/Nono/crates/nono-cli/src/setup.rs), [main.rs](C:/Users/omack/Nono/crates/nono-cli/src/main.rs), and [output.rs](C:/Users/omack/Nono/crates/nono-cli/src/output.rs) so Windows no longer reports `partial` once the library contract truly matches.
+5. Expand integration coverage around the promoted contract.
+   Update [env_vars.rs](C:/Users/omack/Nono/crates/nono-cli/tests/env_vars.rs), [windows-test-harness.ps1](C:/Users/omack/Nono/scripts/windows-test-harness.ps1), and [.github/workflows/ci.yml](C:/Users/omack/Nono/.github/workflows/ci.yml) so CI proves the promoted support boundary.
+6. Only then update product/release docs.
+   Change [windows-promotion-criteria.mdx](C:/Users/omack/Nono/docs/cli/development/windows-promotion-criteria.mdx), [windows-security-model.mdx](C:/Users/omack/Nono/docs/cli/development/windows-security-model.mdx), [security-model.mdx](C:/Users/omack/Nono/docs/cli/internals/security-model.mdx), [README.md](C:/Users/omack/Nono/README.md), and [installation.mdx](C:/Users/omack/Nono/docs/cli/getting_started/installation.mdx) to call Windows first-class supported.
+7. Close `WIN-1706` only after the full gate is green.
+   Require `cargo fmt --all -- --check`, `cargo build --workspace`, `cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::unwrap_used`, `cargo test --workspace`, the Windows regression harness, and release/docs checks to pass on the promoted state.
+
 ## Option 2: CLI Surface Is The Product
 
 Definition:
@@ -88,6 +105,23 @@ Tradeoff:
 
 - This unblocks product promotion faster.
 - It creates a permanent distinction between “CLI supported” and “library partially supported,” which must stay explicit in code and docs.
+
+Concrete execution checklist:
+
+1. Make the product boundary explicit in code.
+   Update [setup.rs](C:/Users/omack/Nono/crates/nono-cli/src/setup.rs), [main.rs](C:/Users/omack/Nono/crates/nono-cli/src/main.rs), and [output.rs](C:/Users/omack/Nono/crates/nono-cli/src/output.rs) so CLI/release support is described independently from library `support_info()`.
+2. Preserve the narrower library contract deliberately.
+   Keep [windows.rs](C:/Users/omack/Nono/crates/nono/src/sandbox/windows.rs) at `partial`, but document in code comments and diagnostics that this is a library boundary, not a contradiction in product messaging.
+3. Add explicit CLI-vs-library messaging tests.
+   Extend [env_vars.rs](C:/Users/omack/Nono/crates/nono-cli/tests/env_vars.rs) so setup/help/runtime messaging can claim supported CLI Windows behavior without ever claiming library-wide parity.
+4. Update release and support docs to carry the distinction everywhere.
+   Revise [windows-promotion-criteria.mdx](C:/Users/omack/Nono/docs/cli/development/windows-promotion-criteria.mdx), [windows-feature-gap-matrix.mdx](C:/Users/omack/Nono/docs/cli/development/windows-feature-gap-matrix.mdx), [windows-security-model.mdx](C:/Users/omack/Nono/docs/cli/development/windows-security-model.mdx), [security-model.mdx](C:/Users/omack/Nono/docs/cli/internals/security-model.mdx), and [README.md](C:/Users/omack/Nono/README.md) so “CLI supported” and “library partial” never drift apart.
+5. Add an operator-facing note to setup/release docs.
+   Update [installation.mdx](C:/Users/omack/Nono/docs/cli/getting_started/installation.mdx), [windows-release-candidate-checklist.mdx](C:/Users/omack/Nono/docs/cli/development/windows-release-candidate-checklist.mdx), and [windows-signing-guide.mdx](C:/Users/omack/Nono/docs/cli/development/windows-signing-guide.mdx) so the release/operator audience understands the exact promoted boundary.
+6. Re-run Windows regression coverage against the messaging split.
+   Keep [.github/workflows/ci.yml](C:/Users/omack/Nono/.github/workflows/ci.yml) and [windows-test-harness.ps1](C:/Users/omack/Nono/scripts/windows-test-harness.ps1) focused on the supported CLI surface, not implied library parity.
+7. Close `WIN-1706` only after the distinction is stable and test-covered.
+   Require the same full Rust/docs gate, plus explicit review that no help/setup/README text overstates library support.
 
 ## Recommendation
 
