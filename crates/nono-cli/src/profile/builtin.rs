@@ -314,6 +314,18 @@ mod tests {
         use crate::capability_ext::CapabilitySetExt;
         use tempfile::tempdir;
 
+        let _guard = match crate::test_env::ENV_LOCK.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let _env = crate::test_env::EnvVarGuard::set_all(&[
+            ("HOME", "/home/nono-test"),
+            ("XDG_CONFIG_HOME", "/home/nono-test/.config"),
+            ("XDG_DATA_HOME", "/home/nono-test/.local/share"),
+            ("XDG_STATE_HOME", "/home/nono-test/.local/state"),
+            ("XDG_CACHE_HOME", "/home/nono-test/.cache"),
+        ]);
+
         let workdir = tempdir().expect("tmpdir");
         let args = crate::cli::SandboxArgs::default();
 
