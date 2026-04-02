@@ -43,6 +43,9 @@ mod update_check;
 #[cfg(target_os = "windows")]
 mod windows_wfp_contract;
 
+#[cfg(test)]
+mod test_env;
+
 use capability_ext::CapabilitySetExt;
 use clap::Parser;
 use cli::{

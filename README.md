@@ -186,7 +186,7 @@ nono run --profile claude-code --allow-net -- claude
 On Linux, seccomp user notification intercepts syscalls when the agent needs access outside its sandbox. The supervisor prompts the user, then injects the file descriptor directly — the agent never executes its own `open()`. Sensitive paths are never-grantable regardless of approval.
 
 ```bash
-nono run --rollback --supervised --profile claude-code --allow-cwd -- claude
+nono run --rollback --capability-elevation --profile claude-code --allow-cwd -- claude
 ```
 
 ### Undo and Snapshots

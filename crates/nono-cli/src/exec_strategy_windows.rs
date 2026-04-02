@@ -22,9 +22,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 #[cfg(debug_assertions)]
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
 #[cfg(test)]
 use std::time::SystemTime;
+use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
 use windows_sys::Win32::Security::{
     CreateWellKnownSid, DuplicateTokenEx, SecurityImpersonation, SetTokenInformation,
