@@ -25,7 +25,7 @@ use nono::{
 };
 use std::collections::HashSet;
 use std::ffi::{CString, OsStr};
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::os::fd::FromRawFd;
 #[cfg(target_os = "linux")]
 use std::os::fd::RawFd;
@@ -34,8 +34,6 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
@@ -79,6 +77,82 @@ fn print_terminal_safe_stderr(message: &str) {
     } else {
         let _ = writeln!(stderr, "{}", message);
     }
+}
+
+fn prompt_startup_termination(timeout_cfg: StartupTimeoutConfig<'_>, has_output: bool) -> bool {
+    let description = if has_output {
+        format!(
+            "[nono] Startup appears blocked: `{}` has not become interactive after {} seconds.",
+            timeout_cfg.program,
+            timeout_cfg.timeout.as_secs()
+        )
+    } else {
+        format!(
+            "[nono] Startup appears blocked: `{}` produced no terminal output after {} seconds.",
+            timeout_cfg.program,
+            timeout_cfg.timeout.as_secs()
+        )
+    };
+
+    let tty_in = match std::fs::File::open("/dev/tty") {
+        Ok(file) => file,
+        Err(_) => {
+            print_terminal_safe_stderr(&format!(
+                "{}\n[nono] `{}` usually needs the built-in `{}` profile.\n[nono] Try: nono run --profile {} -- {}",
+                description,
+                timeout_cfg.program,
+                timeout_cfg.profile,
+                timeout_cfg.profile,
+                timeout_cfg.program,
+            ));
+            return false;
+        }
+    };
+
+    let mut tty_out = match std::fs::OpenOptions::new().write(true).open("/dev/tty") {
+        Ok(file) => file,
+        Err(_) => {
+            print_terminal_safe_stderr(&format!(
+                "{}\n[nono] `{}` usually needs the built-in `{}` profile.\n[nono] Try: nono run --profile {} -- {}",
+                description,
+                timeout_cfg.program,
+                timeout_cfg.profile,
+                timeout_cfg.profile,
+                timeout_cfg.program,
+            ));
+            return false;
+        }
+    };
+
+    let _ = writeln!(tty_out);
+    let _ = writeln!(tty_out, "{}", description);
+    let _ = writeln!(
+        tty_out,
+        "[nono] `{}` usually needs the built-in `{}` profile.",
+        timeout_cfg.program, timeout_cfg.profile
+    );
+    let _ = writeln!(
+        tty_out,
+        "[nono] Try: nono run --profile {} -- {}",
+        timeout_cfg.profile, timeout_cfg.program
+    );
+    let _ = write!(tty_out, "[nono] Do you wish to terminate? [y/N] ");
+    let _ = tty_out.flush();
+
+    let mut reader = io::BufReader::new(tty_in);
+    let mut input = String::new();
+    if reader.read_line(&mut input).is_err() {
+        let _ = writeln!(tty_out, "\n[nono] Continuing to wait.");
+        return false;
+    }
+
+    let affirmative = matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes");
+    if affirmative {
+        let _ = writeln!(tty_out, "[nono] Terminating startup-blocked process.");
+    } else {
+        let _ = writeln!(tty_out, "[nono] Continuing to wait.");
+    }
+    affirmative
 }
 
 #[cfg(target_os = "linux")]
@@ -1028,35 +1102,6 @@ pub fn execute_supervised(
             setup_signal_forwarding(child, pty_proxy.as_ref().map(|p| p.poll_fds().0));
             let _signal_forwarding_guard = SignalForwardingGuard;
 
-            let startup_timeout_completed = if config.startup_timeout.is_some()
-                && pty_proxy.is_none()
-            {
-                let completed = Arc::new(AtomicBool::new(false));
-                if let Some(timeout_cfg) = config.startup_timeout {
-                    let timeout = timeout_cfg.timeout;
-                    let program = timeout_cfg.program.to_string();
-                    let profile = timeout_cfg.profile.to_string();
-                    let completed_flag = Arc::clone(&completed);
-                    std::thread::spawn(move || {
-                        std::thread::sleep(timeout);
-                        if !completed_flag.load(Ordering::SeqCst) {
-                            print_terminal_safe_stderr(&format!(
-                                "[nono] Startup timed out: `{}` did not become ready.\n[nono] `{}` usually needs the built-in `{}` profile.\n[nono] Try: nono run --profile {} -- {}",
-                                program,
-                                program,
-                                profile,
-                                profile,
-                                program,
-                            ));
-                            let _ = signal::kill(child, Signal::SIGKILL);
-                        }
-                    });
-                }
-                Some(completed)
-            } else {
-                None
-            };
-
             // NOTE: peer_pid() is NOT called here. For socketpair() created
             // before fork, LOCAL_PEERPID/SO_PEERCRED return the parent's own PID
             // (credentials are captured at creation time, not updated after fork).
@@ -1122,10 +1167,6 @@ pub fn execute_supervised(
                         wait_for_child_with_pty(child, pty_proxy.as_mut(), config.startup_timeout)?;
                     (status, Vec::new())
                 };
-
-            if let Some(done) = startup_timeout_completed {
-                done.store(true, Ordering::SeqCst);
-            }
 
             let exit_code = match status {
                 WaitStatus::Exited(_, code) => {
@@ -1252,6 +1293,7 @@ fn wait_for_child_with_pty(
         None => return wait_for_child_with_startup_timeout(child, startup_timeout),
     };
     let startup_deadline = startup_timeout.map(|cfg| (Instant::now() + cfg.timeout, cfg));
+    let mut startup_prompted = false;
 
     loop {
         let (master_fd, client_fd, attach_fd, resize_fd) = pty.poll_fds();
@@ -1312,18 +1354,19 @@ fn wait_for_child_with_pty(
         match waitpid(child, Some(WaitPidFlag::WNOHANG)) {
             Ok(WaitStatus::StillAlive) => {
                 if let Some((deadline, timeout_cfg)) = startup_deadline {
-                    if Instant::now() >= deadline && !pty.has_observed_output() {
-                        print_terminal_safe_stderr(&format!(
-                            "[nono] Startup timed out: `{}` produced no terminal output.\n[nono] `{}` usually needs the built-in `{}` profile.\n[nono] Try: nono run --profile {} -- {}",
-                            timeout_cfg.program,
-                            timeout_cfg.program,
-                            timeout_cfg.profile,
-                            timeout_cfg.profile,
-                            timeout_cfg.program,
-                        ));
-                        let _ = signal::kill(child, Signal::SIGKILL);
-                        let status = wait_for_child(child)?;
-                        return Ok(status);
+                    let has_output = pty.has_observed_output();
+                    if Instant::now() >= deadline && !has_output && !startup_prompted {
+                        startup_prompted = true;
+                        let paused_terminal = pty.pause_terminal_for_prompt();
+                        let terminate = prompt_startup_termination(timeout_cfg, has_output);
+                        if paused_terminal {
+                            pty.resume_terminal_after_prompt();
+                        }
+                        if terminate {
+                            let _ = signal::kill(child, Signal::SIGKILL);
+                            let status = wait_for_child(child)?;
+                            return Ok(status);
+                        }
                     }
                 }
                 continue;
@@ -1352,22 +1395,18 @@ fn wait_for_child_with_startup_timeout(
     startup_timeout: Option<StartupTimeoutConfig<'_>>,
 ) -> Result<WaitStatus> {
     let startup_deadline = startup_timeout.map(|cfg| (Instant::now() + cfg.timeout, cfg));
+    let mut startup_prompted = false;
 
     loop {
         match waitpid(child, Some(WaitPidFlag::WNOHANG)) {
             Ok(WaitStatus::StillAlive) => {
                 if let Some((deadline, timeout_cfg)) = startup_deadline {
-                    if Instant::now() >= deadline {
-                        print_terminal_safe_stderr(&format!(
-                            "[nono] Startup timed out: `{}` did not become ready.\n[nono] `{}` usually needs the built-in `{}` profile.\n[nono] Try: nono run --profile {} -- {}",
-                            timeout_cfg.program,
-                            timeout_cfg.program,
-                            timeout_cfg.profile,
-                            timeout_cfg.profile,
-                            timeout_cfg.program,
-                        ));
-                        let _ = signal::kill(child, Signal::SIGKILL);
-                        return wait_for_child(child);
+                    if Instant::now() >= deadline && !startup_prompted {
+                        startup_prompted = true;
+                        if prompt_startup_termination(timeout_cfg, true) {
+                            let _ = signal::kill(child, Signal::SIGKILL);
+                            return wait_for_child(child);
+                        }
                     }
                 }
                 std::thread::sleep(Duration::from_millis(200));
@@ -1640,6 +1679,7 @@ fn run_supervisor_loop(
     let mut denials = Vec::new();
     let mut seen_request_ids = HashSet::new();
     let startup_deadline = startup_timeout.map(|cfg| (Instant::now() + cfg.timeout, cfg));
+    let mut startup_prompted = false;
 
     loop {
         let (pty_master, pty_client, pty_attach, pty_resize) =
@@ -1741,17 +1781,21 @@ fn run_supervisor_loop(
             Ok(WaitStatus::StillAlive) => {
                 if let Some((deadline, timeout_cfg)) = startup_deadline {
                     let has_output = pty.as_ref().is_some_and(|p| p.has_observed_output());
-                    if Instant::now() >= deadline && !has_output {
-                        print_terminal_safe_stderr(&format!(
-                            "[nono] Startup timed out: `{}` did not become ready.\n[nono] `{}` usually needs the built-in `{}` profile.\n[nono] Try: nono run --profile {} -- {}",
-                            timeout_cfg.program,
-                            timeout_cfg.program,
-                            timeout_cfg.profile,
-                            timeout_cfg.profile,
-                            timeout_cfg.program,
-                        ));
-                        let _ = signal::kill(child, Signal::SIGKILL);
-                        return Ok((wait_for_child(child)?, denials));
+                    if Instant::now() >= deadline && !has_output && !startup_prompted {
+                        startup_prompted = true;
+                        let paused_terminal = pty
+                            .as_mut()
+                            .is_some_and(|proxy| proxy.pause_terminal_for_prompt());
+                        let terminate = prompt_startup_termination(timeout_cfg, has_output);
+                        if let Some(proxy) = pty.as_mut() {
+                            if paused_terminal {
+                                proxy.resume_terminal_after_prompt();
+                            }
+                        }
+                        if terminate {
+                            let _ = signal::kill(child, Signal::SIGKILL);
+                            return Ok((wait_for_child(child)?, denials));
+                        }
                     }
                 }
                 continue;
@@ -1821,6 +1865,7 @@ fn run_supervisor_loop(
     let mut seen_request_ids = HashSet::new();
     let mut sock_fd_active = true;
     let startup_deadline = startup_timeout.map(|cfg| (Instant::now() + cfg.timeout, cfg));
+    let mut startup_prompted = false;
 
     loop {
         let mut pfds: Vec<libc::pollfd> = vec![libc::pollfd {
@@ -1986,17 +2031,21 @@ fn run_supervisor_loop(
             Ok(WaitStatus::StillAlive) => {
                 if let Some((deadline, timeout_cfg)) = startup_deadline {
                     let has_output = pty.as_ref().is_some_and(|p| p.has_observed_output());
-                    if Instant::now() >= deadline && !has_output {
-                        print_terminal_safe_stderr(&format!(
-                            "[nono] Startup timed out: `{}` did not become ready.\n[nono] `{}` usually needs the built-in `{}` profile.\n[nono] Try: nono run --profile {} -- {}",
-                            timeout_cfg.program,
-                            timeout_cfg.program,
-                            timeout_cfg.profile,
-                            timeout_cfg.profile,
-                            timeout_cfg.program,
-                        ));
-                        let _ = signal::kill(child, Signal::SIGTERM);
-                        return Ok((wait_for_child(child)?, denials));
+                    if Instant::now() >= deadline && !has_output && !startup_prompted {
+                        startup_prompted = true;
+                        let paused_terminal = pty
+                            .as_mut()
+                            .is_some_and(|proxy| proxy.pause_terminal_for_prompt());
+                        let terminate = prompt_startup_termination(timeout_cfg, has_output);
+                        if let Some(proxy) = pty.as_mut() {
+                            if paused_terminal {
+                                proxy.resume_terminal_after_prompt();
+                            }
+                        }
+                        if terminate {
+                            let _ = signal::kill(child, Signal::SIGTERM);
+                            return Ok((wait_for_child(child)?, denials));
+                        }
                     }
                 }
                 continue;
