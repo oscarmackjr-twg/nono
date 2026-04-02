@@ -619,6 +619,53 @@ mod tests {
             .expect("from_args caps should match default profile deny policy");
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_from_args_skips_linux_temp_root_when_home_is_nested() {
+        let _guard = match crate::test_env::ENV_LOCK.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let original_home = std::env::var("HOME").ok();
+        let original_tmpdir = std::env::var("TMPDIR").ok();
+
+        let temp_root = tempdir().expect("tmpdir");
+        let home = temp_root.path().join("home");
+        let allowed = temp_root.path().join("other");
+        std::fs::create_dir_all(&home).expect("create home");
+        std::fs::create_dir_all(&allowed).expect("create allowed dir");
+
+        std::env::set_var("HOME", &home);
+        std::env::set_var("TMPDIR", temp_root.path());
+
+        let args = SandboxArgs {
+            allow: vec![allowed.clone()],
+            ..sandbox_args()
+        };
+
+        let result = CapabilitySet::from_args(&args);
+
+        match original_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        match original_tmpdir {
+            Some(value) => std::env::set_var("TMPDIR", value),
+            None => std::env::remove_var("TMPDIR"),
+        }
+
+        let (caps, _) = result.expect(
+            "from_args should succeed when HOME is nested under TMPDIR and the user grants a sibling path",
+        );
+        let allowed_canonical = allowed.canonicalize().expect("canonicalize allowed dir");
+        assert!(
+            caps.fs_capabilities()
+                .iter()
+                .any(|cap| !cap.is_file && cap.resolved == allowed_canonical),
+            "explicit user grant under TMPDIR should still be present"
+        );
+    }
+
     #[test]
     fn test_from_profile_allowed_commands() {
         let dir = tempdir().expect("tmpdir");
