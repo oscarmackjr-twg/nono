@@ -290,7 +290,6 @@ fn low_integrity_runtime_prefixes() -> Vec<PathBuf> {
         prefixes.push(normalize_windows_path(&appdata_root.join("LocalLow")));
     }
 
-    prefixes.retain(|prefix| prefix.exists());
     prefixes.sort();
     prefixes.dedup();
     prefixes

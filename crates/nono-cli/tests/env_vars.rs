@@ -1335,7 +1335,7 @@ fn windows_run_allows_cmd_write_into_redirected_tmp_runtime_dir() {
 
 #[cfg(target_os = "windows")]
 #[test]
-fn windows_run_blocks_unverified_runtime_root_override() {
+fn windows_run_ignores_unverified_localappdata_override_when_runtime_root_is_verified() {
     let dir = tempfile::tempdir().expect("tmpdir");
     let workspace = dir.path().join("workspace");
     std::fs::create_dir_all(&workspace).expect("mkdir workspace");
@@ -1363,13 +1363,12 @@ fn windows_run_blocks_unverified_runtime_root_override() {
 
     let text = combined_output(&output);
     assert!(
-        !output.status.success(),
-        "Windows preview should fail closed when runtime root is not low-integrity-compatible, output:\n{text}"
+        output.status.success(),
+        "Windows preview should keep using the verified runtime root inside the writable allowlist, output:\n{text}"
     );
     assert!(
-        text.contains("LOCALAPPDATA override")
-            && text.contains("does not match the OS LocalAppData directory"),
-        "expected explicit LOCALAPPDATA override failure, got:\n{text}"
+        !text.contains("LOCALAPPDATA override"),
+        "expected verified runtime root selection to ignore the unrelated LOCALAPPDATA override, got:\n{text}"
     );
 }
 
