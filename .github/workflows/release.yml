@@ -17,6 +17,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+  WIX_VERSION: 4.0.6
 
 jobs:
   build:
@@ -81,7 +82,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          dotnet tool install --global wix --version 4.*
+          dotnet tool install --global wix --version $env:WIX_VERSION
           Add-Content -Path $env:GITHUB_PATH -Value "$env:USERPROFILE\.dotnet\tools"
 
       - name: Package (Unix)

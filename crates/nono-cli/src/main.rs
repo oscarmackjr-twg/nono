@@ -9,7 +9,7 @@ mod config;
 #[cfg(not(target_os = "windows"))]
 mod exec_strategy;
 #[cfg(target_os = "windows")]
-#[path = "exec_strategy_windows.rs"]
+#[path = "exec_strategy_windows/mod.rs"]
 mod exec_strategy;
 mod hooks;
 mod instruction_deny;

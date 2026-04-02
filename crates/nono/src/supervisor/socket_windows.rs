@@ -10,9 +10,10 @@ use crate::supervisor::types::{ResourceGrant, SupervisorMessage, SupervisorRespo
 use getrandom::fill as random_fill;
 use sha2::{Digest, Sha256};
 use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use windows_sys::Win32::Foundation::{
     DuplicateHandle, DUPLICATE_SAME_ACCESS, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY,
     ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
@@ -21,8 +22,9 @@ use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
 };
 use windows_sys::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, CreatePipe, DisconnectNamedPipe, WaitNamedPipeW,
-    PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
+    ConnectNamedPipe, CreateNamedPipeW, CreatePipe, DisconnectNamedPipe,
+    GetNamedPipeServerProcessId, WaitNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
+    PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
@@ -35,6 +37,12 @@ const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
 /// Default wait for pipe availability during startup.
 const PIPE_CONNECT_TIMEOUT_MS: u32 = 5_000;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PipeRendezvousInfo {
+    pipe_name: String,
+    server_pid: u32,
+}
+
 /// A Windows named pipe used for supervisor IPC.
 #[derive(Debug)]
 pub struct SupervisorSocket {
@@ -42,6 +50,7 @@ pub struct SupervisorSocket {
     writer: File,
     transport_name: String,
     disconnect_on_drop: bool,
+    cleanup_rendezvous_path: Option<PathBuf>,
 }
 
 /// Windows process target for brokered handle duplication.
@@ -67,20 +76,28 @@ impl SupervisorSocket {
                 writer: parent_writer,
                 transport_name: transport_name.clone(),
                 disconnect_on_drop: false,
+                cleanup_rendezvous_path: None,
             },
             Self {
                 reader: child_reader,
                 writer: child_writer,
                 transport_name,
                 disconnect_on_drop: false,
+                cleanup_rendezvous_path: None,
             },
         ))
     }
 
-    /// Bind a named pipe derived from the provided path and wait for a client.
+    /// Bind a named pipe for the provided rendezvous path and wait for a client.
     pub fn bind(path: &Path) -> Result<Self> {
-        let pipe_name = pipe_name_from_path(path);
+        let (pipe_name, cleanup_rendezvous_path) = prepare_bind_pipe_name(path)?;
         let server_handle = create_named_pipe(&pipe_name, false)?;
+        if let Err(err) = write_pipe_rendezvous(path, &pipe_name) {
+            // SAFETY: `server_handle` is an owned handle created above and must
+            // be reclaimed if rendezvous publication fails before conversion.
+            drop(unsafe { OwnedHandle::from_raw_handle(server_handle) });
+            return Err(err);
+        }
         let server_file = finalize_server_connection(server_handle, &pipe_name)?;
         Ok(Self {
             reader: server_file
@@ -89,20 +106,22 @@ impl SupervisorSocket {
             writer: server_file,
             transport_name: pipe_name,
             disconnect_on_drop: true,
+            cleanup_rendezvous_path,
         })
     }
 
-    /// Connect to a named pipe derived from the provided path.
+    /// Connect to a named pipe published for the provided rendezvous path.
     pub fn connect(path: &Path) -> Result<Self> {
-        let pipe_name = pipe_name_from_path(path);
-        let file = connect_named_pipe(&pipe_name)?;
+        let rendezvous = resolve_connect_pipe_name(path)?;
+        let file = connect_named_pipe(&rendezvous)?;
         Ok(Self {
             reader: file
                 .try_clone()
                 .map_err(|e| NonoError::SandboxInit(format!("Failed to clone pipe handle: {e}")))?,
             writer: file,
-            transport_name: pipe_name,
+            transport_name: rendezvous.pipe_name,
             disconnect_on_drop: false,
+            cleanup_rendezvous_path: None,
         })
     }
 
@@ -265,6 +284,9 @@ impl Drop for SupervisorSocket {
                 }
             }
         }
+        if let Some(path) = self.cleanup_rendezvous_path.take() {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 
@@ -282,13 +304,28 @@ fn unique_pair_name() -> Result<String> {
     ))
 }
 
-fn pipe_name_from_path(path: &Path) -> String {
+fn explicit_pipe_name(path: &Path) -> Option<String> {
     let display = path.to_string_lossy();
     if display.starts_with(r"\\.\pipe\") {
-        return display.into_owned();
+        Some(display.into_owned())
+    } else {
+        None
     }
+}
 
+fn create_nonce_hex() -> Result<String> {
+    let mut nonce = [0u8; 16];
+    random_fill(&mut nonce)
+        .map_err(|e| NonoError::SandboxInit(format!("Failed to generate pipe nonce: {e}")))?;
+    Ok(nonce
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>())
+}
+
+fn pipe_name_from_rendezvous_path(path: &Path, nonce_hex: &str) -> String {
     let mut hasher = Sha256::new();
+    let display = path.to_string_lossy();
     hasher.update(display.as_bytes());
     let digest = hasher.finalize();
     let short_hash = digest[..8]
@@ -312,7 +349,112 @@ fn pipe_name_from_path(path: &Path) -> String {
         })
         .collect::<String>();
 
-    format!(r"\\.\pipe\nono-{}-{short_hash}", safe_leaf)
+    format!(r"\\.\pipe\nono-{}-{short_hash}-{nonce_hex}", safe_leaf)
+}
+
+fn prepare_bind_pipe_name(path: &Path) -> Result<(String, Option<PathBuf>)> {
+    if let Some(pipe_name) = explicit_pipe_name(path) {
+        return Ok((pipe_name, None));
+    }
+
+    let nonce_hex = create_nonce_hex()?;
+    Ok((
+        pipe_name_from_rendezvous_path(path, &nonce_hex),
+        Some(path.to_path_buf()),
+    ))
+}
+
+fn resolve_connect_pipe_name(path: &Path) -> Result<PipeRendezvousInfo> {
+    if let Some(pipe_name) = explicit_pipe_name(path) {
+        return Ok(PipeRendezvousInfo {
+            pipe_name,
+            server_pid: 0,
+        });
+    }
+
+    read_pipe_rendezvous(path)
+}
+
+fn write_pipe_rendezvous(path: &Path, pipe_name: &str) -> Result<()> {
+    if explicit_pipe_name(path).is_some() {
+        return Ok(());
+    }
+
+    let parent = path.parent().ok_or_else(|| {
+        NonoError::SandboxInit(format!(
+            "Windows supervisor rendezvous path {} has no parent directory",
+            path.display()
+        ))
+    })?;
+    std::fs::create_dir_all(parent).map_err(|e| {
+        NonoError::SandboxInit(format!(
+            "Failed to create Windows supervisor rendezvous directory {}: {e}",
+            parent.display()
+        ))
+    })?;
+
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| {
+            NonoError::SandboxInit(format!(
+                "Failed to publish Windows supervisor rendezvous {}: {e}",
+                path.display()
+            ))
+        })?;
+    let payload = format!("{pipe_name}\n{}", std::process::id());
+    file.write_all(payload.as_bytes()).map_err(|e| {
+        NonoError::SandboxInit(format!(
+            "Failed to write Windows supervisor rendezvous {}: {e}",
+            path.display()
+        ))
+    })?;
+    file.flush().map_err(|e| {
+        NonoError::SandboxInit(format!(
+            "Failed to flush Windows supervisor rendezvous {}: {e}",
+            path.display()
+        ))
+    })?;
+    Ok(())
+}
+
+fn read_pipe_rendezvous(path: &Path) -> Result<PipeRendezvousInfo> {
+    let contents = std::fs::read_to_string(path).map_err(|e| {
+        NonoError::SandboxInit(format!(
+            "Failed to read Windows supervisor pipe rendezvous {}: {e}. \
+Ensure the supervisor created the control channel before launching the child.",
+            path.display()
+        ))
+    })?;
+    let mut lines = contents.lines();
+    let pipe_name = lines.next().unwrap_or_default().trim();
+    if !pipe_name.starts_with(r"\\.\pipe\") {
+        return Err(NonoError::SandboxInit(format!(
+            "Windows supervisor pipe rendezvous {} did not contain a valid pipe name",
+            path.display()
+        )));
+    }
+    let server_pid = lines
+        .next()
+        .ok_or_else(|| {
+            NonoError::SandboxInit(format!(
+                "Windows supervisor pipe rendezvous {} did not include a server PID",
+                path.display()
+            ))
+        })?
+        .trim()
+        .parse::<u32>()
+        .map_err(|e| {
+            NonoError::SandboxInit(format!(
+                "Windows supervisor pipe rendezvous {} contained an invalid server PID: {e}",
+                path.display()
+            ))
+        })?;
+    Ok(PipeRendezvousInfo {
+        pipe_name: pipe_name.to_string(),
+        server_pid,
+    })
 }
 
 fn create_named_pipe(pipe_name: &str, first_instance: bool) -> Result<HANDLE> {
@@ -328,7 +470,7 @@ fn create_named_pipe(pipe_name: &str, first_instance: bool) -> Result<HANDLE> {
         CreateNamedPipeW(
             wide_name.as_ptr(),
             open_mode,
-            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
             1,
             MAX_MESSAGE_SIZE,
             MAX_MESSAGE_SIZE,
@@ -366,8 +508,8 @@ Ensure the child process received the correct pipe name and startup token."
     Ok(file_from_handle(server_handle))
 }
 
-fn connect_named_pipe(pipe_name: &str) -> Result<File> {
-    let wide_name = to_wide(pipe_name);
+fn connect_named_pipe(rendezvous: &PipeRendezvousInfo) -> Result<File> {
+    let wide_name = to_wide(&rendezvous.pipe_name);
     let mut last_error: Option<std::io::Error> = None;
 
     for _ in 0..3 {
@@ -386,7 +528,11 @@ fn connect_named_pipe(pipe_name: &str) -> Result<File> {
         };
 
         if handle != INVALID_HANDLE_VALUE {
-            return Ok(file_from_handle(handle));
+            let file = file_from_handle(handle);
+            if rendezvous.server_pid != 0 {
+                verify_connected_server_pid(file.as_raw_handle() as HANDLE, rendezvous)?;
+            }
+            return Ok(file);
         }
 
         let err = std::io::Error::last_os_error();
@@ -404,16 +550,41 @@ fn connect_named_pipe(pipe_name: &str) -> Result<File> {
         }
 
         return Err(NonoError::SandboxInit(format!(
-            "Failed to connect to Windows supervisor pipe {pipe_name}: {err}. \
-Ensure the supervisor created the control channel before launching the child."
+            "Failed to connect to Windows supervisor pipe {}: {err}. \
+Ensure the supervisor created the control channel before launching the child.",
+            rendezvous.pipe_name
         )));
     }
 
     let err = last_error.unwrap_or_else(std::io::Error::last_os_error);
     Err(NonoError::SandboxInit(format!(
-        "Timed out waiting for Windows supervisor pipe {pipe_name}: {err}. \
-Ensure the parent process is listening before the child attempts to connect."
+        "Timed out waiting for Windows supervisor pipe {}: {err}. \
+Ensure the parent process is listening before the child attempts to connect.",
+        rendezvous.pipe_name
     )))
+}
+
+fn verify_connected_server_pid(handle: HANDLE, rendezvous: &PipeRendezvousInfo) -> Result<()> {
+    let mut actual_server_pid = 0u32;
+    let ok = unsafe {
+        // SAFETY: `handle` is a live pipe handle returned by `CreateFileW` and
+        // `actual_server_pid` points to writable storage for the queried PID.
+        GetNamedPipeServerProcessId(handle, &mut actual_server_pid)
+    };
+    if ok == 0 {
+        return Err(NonoError::SandboxInit(format!(
+            "Failed to verify Windows supervisor pipe server PID for {}: {}",
+            rendezvous.pipe_name,
+            std::io::Error::last_os_error()
+        )));
+    }
+    if actual_server_pid != rendezvous.server_pid {
+        return Err(NonoError::SandboxInit(format!(
+            "Windows supervisor pipe peer validation failed for {}: expected server PID {}, got {}",
+            rendezvous.pipe_name, rendezvous.server_pid, actual_server_pid
+        )));
+    }
+    Ok(())
 }
 
 fn file_from_handle(handle: HANDLE) -> File {
@@ -543,6 +714,65 @@ mod tests {
                 || message.contains("Ensure the parent process is listening")
                 || message.contains("Timed out waiting for Windows supervisor pipe")
         );
+    }
+
+    #[test]
+    fn test_rendezvous_paths_publish_nonce_backed_pipe_names() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rendezvous = dir.path().join("supervisor.pipe");
+
+        let (pipe_name_one, cleanup_one) =
+            prepare_bind_pipe_name(&rendezvous).expect("prepare first pipe");
+        let (pipe_name_two, cleanup_two) =
+            prepare_bind_pipe_name(&rendezvous).expect("prepare second pipe");
+
+        assert_ne!(pipe_name_one, pipe_name_two);
+        assert_eq!(cleanup_one.as_deref(), Some(rendezvous.as_path()));
+        assert_eq!(cleanup_two.as_deref(), Some(rendezvous.as_path()));
+        assert!(pipe_name_one.starts_with(r"\\.\pipe\nono-"));
+        assert!(pipe_name_two.starts_with(r"\\.\pipe\nono-"));
+    }
+
+    #[test]
+    fn test_explicit_pipe_paths_are_preserved() {
+        let explicit = PathBuf::from(r"\\.\pipe\nono-explicit");
+        let (pipe_name, cleanup_path) =
+            prepare_bind_pipe_name(&explicit).expect("prepare explicit pipe");
+
+        assert_eq!(pipe_name, r"\\.\pipe\nono-explicit");
+        assert!(cleanup_path.is_none());
+    }
+
+    #[test]
+    fn test_rendezvous_roundtrip_uses_published_pipe_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rendezvous = dir.path().join("socket.info");
+        let pipe_name = r"\\.\pipe\nono-test-roundtrip";
+
+        write_pipe_rendezvous(&rendezvous, pipe_name).expect("write rendezvous");
+        let resolved = resolve_connect_pipe_name(&rendezvous).expect("resolve rendezvous");
+
+        assert_eq!(resolved.pipe_name, pipe_name);
+        assert_eq!(resolved.server_pid, std::process::id());
+    }
+
+    #[test]
+    fn test_explicit_pipe_path_skips_server_pid_expectation() {
+        let explicit = PathBuf::from(r"\\.\pipe\nono-explicit-connect");
+        let resolved = resolve_connect_pipe_name(&explicit).expect("resolve explicit");
+
+        assert_eq!(resolved.pipe_name, r"\\.\pipe\nono-explicit-connect");
+        assert_eq!(resolved.server_pid, 0);
+    }
+
+    #[test]
+    fn test_read_pipe_rendezvous_rejects_missing_server_pid() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rendezvous = dir.path().join("socket.info");
+        std::fs::write(&rendezvous, r"\\.\pipe\nono-test-only").expect("write rendezvous");
+
+        let err = read_pipe_rendezvous(&rendezvous).expect_err("missing pid should fail");
+        assert!(err.to_string().contains("did not include a server PID"));
     }
 
     #[test]
