@@ -2921,6 +2921,9 @@ fn print_allow_launch_services_warning(silent: bool) {
 }
 
 fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> {
+    #[cfg(all(target_os = "windows", debug_assertions))]
+    exec_strategy::set_windows_wfp_test_force_ready(args.dangerous_force_wfp_ready);
+
     // Clean up stale state files from previous nono runs
     sandbox_state::cleanup_stale_state_files();
 

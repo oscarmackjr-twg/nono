@@ -750,11 +750,11 @@ fn windows_run_block_net_blocks_probe_connection() {
     let workdir = probe_dir.to_string_lossy().into_owned();
 
     let output = nono_bin()
-        .env("NONO_TEST_ONLY_WFP_FORCE_READY", "1")
         .args([
             "run",
             "--allow",
             &allowed,
+            "--dangerous-force-wfp-ready",
             "--block-net",
             "--workdir",
             &workdir,
@@ -806,11 +806,11 @@ fn windows_run_block_net_cleans_up_promoted_wfp_filters_after_exit() {
     let workdir = probe_dir.to_string_lossy().into_owned();
 
     let blocked_output = nono_bin()
-        .env("NONO_TEST_ONLY_WFP_FORCE_READY", "1")
         .args([
             "run",
             "--allow",
             &allowed,
+            "--dangerous-force-wfp-ready",
             "--block-net",
             "--workdir",
             &workdir,
@@ -894,13 +894,13 @@ fn windows_run_block_net_blocks_probe_connection_through_cmd_host() {
     let probe_text = probe.to_string_lossy().into_owned();
 
     let output = nono_bin()
-        .env("NONO_TEST_ONLY_WFP_FORCE_READY", "1")
         .args([
             "run",
             "--allow",
             &allowed,
             "--allow",
             r"C:\Windows",
+            "--dangerous-force-wfp-ready",
             "--block-net",
             "--workdir",
             &workdir,
@@ -2706,11 +2706,11 @@ fn windows_run_supervised_rollback_block_net_uses_promoted_wfp_backend() {
     let probe = probe.to_string_lossy().into_owned();
 
     let output = nono_bin()
-        .env("NONO_TEST_ONLY_WFP_FORCE_READY", "1")
         .args([
             "run",
             "--rollback",
             "--no-rollback-prompt",
+            "--dangerous-force-wfp-ready",
             "--block-net",
             "--allow",
             &allowed,

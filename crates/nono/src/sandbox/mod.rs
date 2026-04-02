@@ -7,67 +7,7 @@
 
 use crate::capability::CapabilitySet;
 use crate::error::Result;
-#[cfg(target_os = "windows")]
 use std::path::{Path, PathBuf};
-
-#[cfg(target_os = "windows")]
-fn windows_compare_path(path: &Path) -> PathBuf {
-    let raw = path.as_os_str().to_string_lossy();
-
-    if let Some(stripped) = raw.strip_prefix(r"\\?\UNC\") {
-        return PathBuf::from(format!(r"\\{stripped}"));
-    }
-    if let Some(stripped) = raw.strip_prefix(r"\\?\") {
-        return PathBuf::from(stripped);
-    }
-
-    path.to_path_buf()
-}
-
-#[cfg(target_os = "windows")]
-fn windows_paths_equal(left: &Path, right: &Path) -> bool {
-    let left = windows_compare_path(left);
-    let right = windows_compare_path(right);
-
-    let mut left_components = left.components();
-    let mut right_components = right.components();
-
-    loop {
-        match (left_components.next(), right_components.next()) {
-            (None, None) => return true,
-            (None, Some(_)) | (Some(_), None) => return false,
-            (Some(left_component), Some(right_component)) => {
-                let left_component = left_component.as_os_str().to_string_lossy();
-                let right_component = right_component.as_os_str().to_string_lossy();
-                if !left_component.eq_ignore_ascii_case(&right_component) {
-                    return false;
-                }
-            }
-        }
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn windows_path_starts_with(path: &Path, prefix: &Path) -> bool {
-    let path = windows_compare_path(path);
-    let prefix = windows_compare_path(prefix);
-    let mut path_components = path.components();
-    let mut prefix_components = prefix.components();
-
-    loop {
-        match (path_components.next(), prefix_components.next()) {
-            (_, None) => return true,
-            (None, Some(_)) => return false,
-            (Some(path_component), Some(prefix_component)) => {
-                let path_component = path_component.as_os_str().to_string_lossy();
-                let prefix_component = prefix_component.as_os_str().to_string_lossy();
-                if !path_component.eq_ignore_ascii_case(&prefix_component) {
-                    return false;
-                }
-            }
-        }
-    }
-}
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -568,7 +508,7 @@ impl WindowsFilesystemPolicy {
             if rule.is_file {
                 #[cfg(target_os = "windows")]
                 {
-                    windows_paths_equal(path, &rule.path)
+                    windows::windows_paths_equal_case_insensitive(path, &rule.path)
                 }
                 #[cfg(not(target_os = "windows"))]
                 {
@@ -577,7 +517,7 @@ impl WindowsFilesystemPolicy {
             } else {
                 #[cfg(target_os = "windows")]
                 {
-                    windows_path_starts_with(path, &rule.path)
+                    windows::windows_paths_start_with_case_insensitive(path, &rule.path)
                 }
                 #[cfg(not(target_os = "windows"))]
                 {
@@ -593,7 +533,7 @@ impl WindowsFilesystemPolicy {
             !rule.is_file && {
                 #[cfg(target_os = "windows")]
                 {
-                    windows_path_starts_with(path, &rule.path)
+                    windows::windows_paths_start_with_case_insensitive(path, &rule.path)
                 }
                 #[cfg(not(target_os = "windows"))]
                 {
@@ -609,7 +549,7 @@ impl WindowsFilesystemPolicy {
             !rule.is_file && rule.access.contains(crate::AccessMode::Write) && {
                 #[cfg(target_os = "windows")]
                 {
-                    windows_path_starts_with(path, &rule.path)
+                    windows::windows_paths_start_with_case_insensitive(path, &rule.path)
                 }
                 #[cfg(not(target_os = "windows"))]
                 {

@@ -20,6 +20,8 @@ use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+#[cfg(debug_assertions)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
 use windows_sys::Win32::Security::{
@@ -222,7 +224,8 @@ struct WfpProbeConfig {
     backend_service_args: &'static [&'static str],
 }
 
-const WINDOWS_WFP_TEST_FORCE_READY_ENV: &str = "NONO_TEST_ONLY_WFP_FORCE_READY";
+#[cfg(debug_assertions)]
+static WINDOWS_WFP_TEST_FORCE_READY: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WfpRuntimeProbeOutput {
@@ -239,6 +242,25 @@ enum WfpRuntimeActivationProbeStatus {
     CleanupSucceeded,
     FilteringProbeSucceeded,
     NotImplemented,
+}
+
+#[cfg(debug_assertions)]
+pub(crate) fn set_windows_wfp_test_force_ready(force_ready: bool) {
+    WINDOWS_WFP_TEST_FORCE_READY.store(force_ready, Ordering::Relaxed);
+}
+
+#[cfg(not(debug_assertions))]
+pub(crate) fn set_windows_wfp_test_force_ready(_force_ready: bool) {}
+
+fn windows_wfp_test_force_ready() -> bool {
+    #[cfg(debug_assertions)]
+    {
+        WINDOWS_WFP_TEST_FORCE_READY.load(Ordering::Relaxed)
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        false
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -782,7 +804,7 @@ fn build_wfp_probe_status(
 }
 
 fn probe_wfp_backend_status_with_config(config: &WfpProbeConfig) -> Result<WfpProbeStatus> {
-    if std::env::var_os(WINDOWS_WFP_TEST_FORCE_READY_ENV).is_some() {
+    if windows_wfp_test_force_ready() {
         return Ok(build_wfp_probe_status(
             config.backend_binary_path.exists(),
             config.backend_driver_binary_path.exists(),
@@ -3887,16 +3909,36 @@ mod tests {
             backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
         };
 
-        let prior = std::env::var_os(WINDOWS_WFP_TEST_FORCE_READY_ENV);
-        std::env::set_var(WINDOWS_WFP_TEST_FORCE_READY_ENV, "1");
+        set_windows_wfp_test_force_ready(true);
         let status = probe_wfp_backend_status_with_config(&config)
             .expect("forced ready probe status should resolve");
-        match prior {
-            Some(value) => std::env::set_var(WINDOWS_WFP_TEST_FORCE_READY_ENV, value),
-            None => std::env::remove_var(WINDOWS_WFP_TEST_FORCE_READY_ENV),
-        }
+        set_windows_wfp_test_force_ready(false);
 
         assert_eq!(status, WfpProbeStatus::Ready);
+    }
+
+    #[test]
+    fn test_probe_wfp_backend_status_with_config_ignores_legacy_force_ready_env_var() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = WfpProbeConfig {
+            platform_service: WINDOWS_WFP_PLATFORM_SERVICE,
+            backend_service: WINDOWS_WFP_BACKEND_SERVICE,
+            backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
+            backend_binary_path: temp.path().join("missing-service.exe"),
+            backend_driver_binary_path: temp.path().join("missing-driver.sys"),
+            backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
+        };
+
+        let prior = std::env::var_os("NONO_TEST_ONLY_WFP_FORCE_READY");
+        std::env::set_var("NONO_TEST_ONLY_WFP_FORCE_READY", "1");
+        let status =
+            probe_wfp_backend_status_with_config(&config).expect("probe status should resolve");
+        match prior {
+            Some(value) => std::env::set_var("NONO_TEST_ONLY_WFP_FORCE_READY", value),
+            None => std::env::remove_var("NONO_TEST_ONLY_WFP_FORCE_READY"),
+        }
+
+        assert_eq!(status, WfpProbeStatus::BackendBinaryMissing);
     }
 
     #[test]

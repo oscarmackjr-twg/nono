@@ -257,7 +257,31 @@ fn normalize_windows_path(path: &Path) -> PathBuf {
     normalized
 }
 
-fn windows_paths_start_with_case_insensitive(path: &Path, prefix: &Path) -> bool {
+pub(crate) fn windows_paths_equal_case_insensitive(left: &Path, right: &Path) -> bool {
+    let left = normalize_windows_path(left);
+    let right = normalize_windows_path(right);
+
+    let mut left_components = left.components();
+    let mut right_components = right.components();
+
+    loop {
+        match (left_components.next(), right_components.next()) {
+            (None, None) => return true,
+            (None, Some(_)) | (Some(_), None) => return false,
+            (Some(left_component), Some(right_component)) => {
+                let left_component = left_component.as_os_str().to_string_lossy();
+                let right_component = right_component.as_os_str().to_string_lossy();
+                if !left_component.eq_ignore_ascii_case(&right_component) {
+                    return false;
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn windows_paths_start_with_case_insensitive(path: &Path, prefix: &Path) -> bool {
+    let path = normalize_windows_path(path);
+    let prefix = normalize_windows_path(prefix);
     let mut path_components = path.components();
     let mut prefix_components = prefix.components();
 
@@ -1490,6 +1514,24 @@ mod tests {
         assert!(policy.covers_path(
             Path::new(r"c:\users\OMACK\workspace\child.txt"),
             AccessMode::Read
+        ));
+    }
+
+    #[test]
+    fn filesystem_policy_covers_directory_path_with_verbatim_prefix_case_insensitively() {
+        let policy = WindowsFilesystemPolicy {
+            rules: vec![WindowsFilesystemRule {
+                path: PathBuf::from(r"C:\Users\Omack\Workspace"),
+                access: AccessMode::ReadWrite,
+                is_file: false,
+                source: CapabilitySource::User,
+            }],
+            unsupported: Vec::new(),
+        };
+
+        assert!(policy.covers_path(
+            Path::new(r"\\?\c:\users\omack\workspace\child.txt"),
+            AccessMode::Write
         ));
     }
 

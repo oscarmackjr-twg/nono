@@ -743,6 +743,11 @@ pub struct SandboxArgs {
     #[arg(long, help_heading = "OPTIONS")]
     pub allow_launch_services: bool,
 
+    /// Internal: force WFP readiness for test-built Windows binaries.
+    #[cfg(debug_assertions)]
+    #[arg(long, hide = true, help_heading = "OPTIONS")]
+    pub dangerous_force_wfp_ready: bool,
+
     /// Capability manifest file (JSON). A fully-resolved sandbox specification —
     /// mutually exclusive with all other sandbox configuration flags.
     #[arg(
@@ -957,6 +962,8 @@ impl From<WrapSandboxArgs> for SandboxArgs {
             allow_launch_services: args.allow_launch_services,
             config: args.config,
             verbose: args.verbose,
+            #[cfg(debug_assertions)]
+            dangerous_force_wfp_ready: false,
             dry_run: args.dry_run,
         }
     }
