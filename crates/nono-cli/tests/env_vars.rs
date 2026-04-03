@@ -2489,12 +2489,12 @@ fn windows_setup_check_only_reports_live_profile_subset() {
         "Windows setup --check-only should succeed, output:\n{text}"
     );
     assert!(
-        text.contains("CLI support status: supported restricted command surface"),
-        "expected setup summary to describe the supported Windows CLI surface, got:\n{text}"
+        text.contains("Support status: supported"),
+        "expected unified setup summary support status, got:\n{text}"
     );
     assert!(
-        text.contains("Library support status: supported"),
-        "expected setup summary to report the promoted library support status, got:\n{text}"
+        !text.contains("Library support status:"),
+        "setup output must not have separate library support line, got:\n{text}"
     );
     assert!(
         text.contains("Use 'nono run --dry-run ...' to validate profiles and policy."),
@@ -2534,7 +2534,7 @@ fn windows_setup_check_only_reports_live_profile_subset() {
 
 #[cfg(target_os = "windows")]
 #[test]
-fn windows_setup_check_only_reports_partial_support_without_first_class_claim() {
+fn windows_setup_check_only_reports_unified_support_status() {
     let output = nono_bin()
         .args(["setup", "--check-only"])
         .output()
@@ -2546,20 +2546,20 @@ fn windows_setup_check_only_reports_partial_support_without_first_class_claim() 
         "Windows setup --check-only should succeed, output:\n{text}"
     );
     assert!(
-        text.contains("CLI support status: supported restricted command surface"),
-        "expected setup output to describe the supported Windows CLI surface, got:\n{text}"
+        text.contains("Support status: supported"),
+        "expected unified support status in setup output, got:\n{text}"
     );
     assert!(
-        text.contains("Library support status: supported"),
-        "expected setup output to report the promoted library support status, got:\n{text}"
+        !text.contains("CLI support status:"),
+        "setup output must not have separate CLI support line, got:\n{text}"
     );
     assert!(
-        text.contains("current restricted-execution command surface"),
-        "expected setup output to describe the current supported Windows surface, got:\n{text}"
+        !text.contains("Library support status:"),
+        "setup output must not have separate library support line, got:\n{text}"
     );
     assert!(
-        !text.contains("first-class supported"),
-        "setup output must not claim first-class Windows support yet, got:\n{text}"
+        !text.contains("restricted command surface"),
+        "setup output must not use old CLI support label, got:\n{text}"
     );
 }
 
