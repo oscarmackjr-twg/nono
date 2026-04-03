@@ -138,6 +138,7 @@ pub(crate) fn prepare_run_launch_plan(
     let trust_override = run_args.trust_override;
 
     let mut prepared = prepare_sandbox(&args, silent)?;
+    validate_rollback_destination(run_args.rollback_dest.as_ref(), &prepared)?;
 
     if prepared.allow_launch_services_active {
         print_allow_launch_services_warning(silent);
@@ -329,6 +330,44 @@ fn prepare_rollback_launch_options(
         exclude_globs,
         ..RollbackLaunchOptions::default()
     }
+}
+
+fn validate_rollback_destination(
+    rollback_dest: Option<&PathBuf>,
+    prepared: &PreparedSandbox,
+) -> Result<()> {
+    let Some(dest) = rollback_dest else {
+        return Ok(());
+    };
+
+    let dest_abs = {
+        let mut current = dest.clone();
+        loop {
+            match current.canonicalize() {
+                Ok(canonical) => break canonical,
+                Err(_) => match current.parent() {
+                    Some(parent) => current = parent.to_path_buf(),
+                    None => break dest.clone(),
+                },
+            }
+        }
+    };
+
+    let covered = prepared.caps.fs_capabilities().iter().any(|cap| {
+        matches!(cap.access, AccessMode::Write | AccessMode::ReadWrite)
+            && dest_abs.starts_with(&cap.resolved)
+    });
+
+    if covered {
+        return Ok(());
+    }
+
+    Err(NonoError::ConfigParse(format!(
+        "--rollback-dest '{}' is not covered by sandbox write permissions. \
+         Add --allow {} to grant access, or omit --rollback-dest to use the default path (~/.nono/rollbacks/).",
+        dest.display(),
+        dest.display()
+    )))
 }
 
 pub(crate) fn resolve_requested_workdir(workdir: Option<&PathBuf>) -> PathBuf {

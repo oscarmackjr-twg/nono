@@ -74,6 +74,26 @@ pub(crate) struct PreparedSandbox {
     pub(crate) override_deny_paths: Vec<PathBuf>,
 }
 
+fn finalize_prepared_sandbox(
+    prepared: PreparedSandbox,
+    args: &SandboxArgs,
+    silent: bool,
+) -> Result<PreparedSandbox> {
+    output::print_skipped_requested_paths(&collect_missing_cli_requested_paths(args), silent);
+    output::print_capabilities(&prepared.caps, args.verbose, silent);
+
+    #[cfg(target_os = "linux")]
+    output::print_abi_info(silent);
+
+    if !Sandbox::is_supported() {
+        return Err(NonoError::SandboxInit(Sandbox::support_info().details));
+    }
+
+    info!("{}", Sandbox::support_info().details);
+
+    Ok(prepared)
+}
+
 pub(crate) fn validate_external_proxy_bypass(
     args: &SandboxArgs,
     prepared: &PreparedSandbox,
@@ -161,6 +181,81 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
         .clone()
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
+
+    if let Some(ref config_path) = args.config {
+        let json = std::fs::read_to_string(config_path).map_err(|e| {
+            NonoError::ConfigParse(format!(
+                "failed to read manifest file '{}': {e}",
+                config_path.display()
+            ))
+        })?;
+        let mut manifest = nono::manifest::CapabilityManifest::from_json(&json)?;
+        manifest.validate()?;
+
+        if let Some(ref mut fs) = manifest.filesystem {
+            for grant in &mut fs.grants {
+                let expanded = profile::expand_vars(grant.path.as_str(), &workdir)?;
+                grant.path = expanded
+                    .to_string_lossy()
+                    .parse()
+                    .map_err(|e| NonoError::ConfigParse(format!("invalid path: {e}")))?;
+            }
+            for deny in &mut fs.deny {
+                let expanded = profile::expand_vars(deny.path.as_str(), &workdir)?;
+                deny.path = expanded
+                    .to_string_lossy()
+                    .parse()
+                    .map_err(|e| NonoError::ConfigParse(format!("invalid path: {e}")))?;
+            }
+        }
+
+        let caps = CapabilitySet::try_from(&manifest)?;
+        let protected_roots = protected_paths::ProtectedRoots::from_defaults()?;
+        protected_paths::validate_caps_against_protected_roots(&caps, protected_roots.as_paths())?;
+
+        let (rollback_exclude_patterns, rollback_exclude_globs) =
+            if let Some(ref rb) = manifest.rollback {
+                (rb.exclude_patterns.clone(), rb.exclude_globs.clone())
+            } else {
+                (Vec::new(), Vec::new())
+            };
+
+        let allow_domain = manifest
+            .network
+            .as_ref()
+            .map(|network| network.allow_domains.clone())
+            .unwrap_or_default();
+        let credentials = manifest
+            .credentials
+            .iter()
+            .map(|credential| credential.name.as_str().to_string())
+            .collect();
+
+        return finalize_prepared_sandbox(
+            PreparedSandbox {
+                caps,
+                secrets: Vec::new(),
+                rollback_exclude_patterns,
+                rollback_exclude_globs,
+                network_profile: None,
+                allow_domain,
+                credentials,
+                custom_credentials: HashMap::new(),
+                upstream_proxy: None,
+                upstream_bypass: Vec::new(),
+                listen_ports: Vec::new(),
+                capability_elevation: false,
+                #[cfg(target_os = "linux")]
+                wsl2_proxy_policy: crate::profile::Wsl2ProxyPolicy::default(),
+                allow_launch_services_active: false,
+                open_url_origins: Vec::new(),
+                open_url_allow_localhost: false,
+                override_deny_paths: Vec::new(),
+            },
+            args,
+            silent,
+        );
+    }
 
     let prepared_profile = prepare_profile(args, silent, &workdir)?;
     let crate::profile_runtime::PreparedProfile {
@@ -292,36 +387,28 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
         .unwrap_or_default();
     let loaded_secrets = load_env_credentials(args, &profile_secrets, silent)?;
 
-    output::print_skipped_requested_paths(&collect_missing_cli_requested_paths(args), silent);
-    output::print_capabilities(&caps, args.verbose, silent);
-
-    #[cfg(target_os = "linux")]
-    output::print_abi_info(silent);
-
-    if !Sandbox::is_supported() {
-        return Err(NonoError::SandboxInit(Sandbox::support_info().details));
-    }
-
-    info!("{}", Sandbox::support_info().details);
-
-    Ok(PreparedSandbox {
-        caps,
-        secrets: loaded_secrets,
-        rollback_exclude_patterns: profile_rollback_patterns,
-        rollback_exclude_globs: profile_rollback_globs,
-        network_profile: profile_network_profile,
-        allow_domain: profile_allow_domain,
-        credentials: profile_credentials,
-        custom_credentials: profile_custom_credentials,
-        upstream_proxy: profile_upstream_proxy,
-        upstream_bypass: profile_upstream_bypass,
-        listen_ports: profile_listen_ports,
-        capability_elevation,
-        #[cfg(target_os = "linux")]
-        wsl2_proxy_policy,
-        allow_launch_services_active,
-        open_url_origins,
-        open_url_allow_localhost,
-        override_deny_paths,
-    })
+    finalize_prepared_sandbox(
+        PreparedSandbox {
+            caps,
+            secrets: loaded_secrets,
+            rollback_exclude_patterns: profile_rollback_patterns,
+            rollback_exclude_globs: profile_rollback_globs,
+            network_profile: profile_network_profile,
+            allow_domain: profile_allow_domain,
+            credentials: profile_credentials,
+            custom_credentials: profile_custom_credentials,
+            upstream_proxy: profile_upstream_proxy,
+            upstream_bypass: profile_upstream_bypass,
+            listen_ports: profile_listen_ports,
+            capability_elevation,
+            #[cfg(target_os = "linux")]
+            wsl2_proxy_policy,
+            allow_launch_services_active,
+            open_url_origins,
+            open_url_allow_localhost,
+            override_deny_paths,
+        },
+        args,
+        silent,
+    )
 }
