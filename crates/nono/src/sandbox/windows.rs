@@ -194,7 +194,22 @@ pub fn compile_network_policy(caps: &CapabilitySet) -> WindowsNetworkPolicy {
         },
     };
 
-    let unsupported = Vec::new();
+    let mut unsupported = Vec::new();
+    if !caps.tcp_connect_ports().is_empty() {
+        unsupported.push(crate::sandbox::WindowsUnsupportedNetworkIssue {
+            kind: crate::sandbox::WindowsUnsupportedNetworkIssueKind::PortConnectAllowlist,
+        });
+    }
+    if !caps.tcp_bind_ports().is_empty() {
+        unsupported.push(crate::sandbox::WindowsUnsupportedNetworkIssue {
+            kind: crate::sandbox::WindowsUnsupportedNetworkIssueKind::PortBindAllowlist,
+        });
+    }
+    if !caps.localhost_ports().is_empty() {
+        unsupported.push(crate::sandbox::WindowsUnsupportedNetworkIssue {
+            kind: crate::sandbox::WindowsUnsupportedNetworkIssueKind::LocalhostPortAllowlist,
+        });
+    }
     let mut tcp_connect_ports = caps.tcp_connect_ports().to_vec();
     tcp_connect_ports.sort_unstable();
     tcp_connect_ports.dedup();
@@ -451,12 +466,24 @@ pub fn compile_filesystem_policy(caps: &CapabilitySet) -> WindowsFilesystemPolic
     let mut unsupported: Vec<crate::sandbox::WindowsUnsupportedIssue> = Vec::new();
 
     for cap in caps.fs_capabilities() {
-        rules.push(WindowsFilesystemRule {
-            path: normalize_windows_path(&cap.resolved),
-            access: cap.access,
-            is_file: cap.is_file,
-            source: cap.source.clone(),
-        });
+        if cap.is_file {
+            unsupported.push(crate::sandbox::WindowsUnsupportedIssue {
+                kind: crate::sandbox::WindowsUnsupportedIssueKind::SingleFileGrant,
+                path: normalize_windows_path(&cap.resolved),
+            });
+        } else if cap.access == crate::AccessMode::Write {
+            unsupported.push(crate::sandbox::WindowsUnsupportedIssue {
+                kind: crate::sandbox::WindowsUnsupportedIssueKind::WriteOnlyDirectoryGrant,
+                path: normalize_windows_path(&cap.resolved),
+            });
+        } else {
+            rules.push(WindowsFilesystemRule {
+                path: normalize_windows_path(&cap.resolved),
+                access: cap.access,
+                is_file: cap.is_file,
+                source: cap.source.clone(),
+            });
+        }
     }
 
     rules.sort_by(|a, b| a.path.cmp(&b.path));
@@ -1405,7 +1432,7 @@ mod tests {
 
         let policy = compile_network_policy(&caps);
         assert_eq!(policy.mode, WindowsNetworkPolicyMode::Blocked);
-        assert!(policy.unsupported_reason_labels().is_empty());
+        assert_eq!(policy.unsupported.len(), 3);
         assert_eq!(policy.tcp_connect_ports, vec![443]);
         assert_eq!(policy.tcp_bind_ports, vec![8080]);
         assert_eq!(policy.localhost_ports, vec![3000]);
@@ -1528,7 +1555,7 @@ mod tests {
     }
 
     #[test]
-    fn compile_filesystem_policy_keeps_single_file_rules() {
+    fn compile_filesystem_policy_classifies_single_file_as_unsupported() {
         let dir = tempdir().expect("tempdir");
         let file = dir.path().join("note.txt");
         std::fs::write(&file, "hello").expect("write file");
@@ -1536,31 +1563,29 @@ mod tests {
         caps.add_fs(FsCapability::new_file(&file, AccessMode::Read).expect("file cap"));
 
         let policy = compile_filesystem_policy(&caps);
-        assert!(policy.is_fully_supported());
-        assert_eq!(policy.rules.len(), 1);
+        assert!(!policy.is_fully_supported());
+        assert!(policy.rules.is_empty());
+        assert_eq!(policy.unsupported.len(), 1);
         assert_eq!(
-            policy.rules[0].path,
-            normalize_windows_path(&file.canonicalize().expect("canonical"))
+            policy.unsupported[0].kind,
+            crate::sandbox::WindowsUnsupportedIssueKind::SingleFileGrant
         );
-        assert_eq!(policy.rules[0].access, AccessMode::Read);
-        assert!(policy.rules[0].is_file);
     }
 
     #[test]
-    fn compile_filesystem_policy_keeps_write_only_directory_rules() {
+    fn compile_filesystem_policy_classifies_write_only_directory_as_unsupported() {
         let dir = tempdir().expect("tempdir");
         let mut caps = CapabilitySet::new();
         caps.add_fs(FsCapability::new_dir(dir.path(), AccessMode::Write).expect("dir cap"));
 
         let policy = compile_filesystem_policy(&caps);
-        assert!(policy.is_fully_supported());
-        assert_eq!(policy.rules.len(), 1);
+        assert!(!policy.is_fully_supported());
+        assert!(policy.rules.is_empty());
+        assert_eq!(policy.unsupported.len(), 1);
         assert_eq!(
-            policy.rules[0].path,
-            normalize_windows_path(&dir.path().canonicalize().expect("canonical"))
+            policy.unsupported[0].kind,
+            crate::sandbox::WindowsUnsupportedIssueKind::WriteOnlyDirectoryGrant
         );
-        assert_eq!(policy.rules[0].access, AccessMode::Write);
-        assert!(!policy.rules[0].is_file);
     }
 
     #[test]
@@ -1675,7 +1700,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_launch_paths_accepts_supported_single_file_policy_shapes() {
+    fn validate_launch_paths_rejects_single_file_policy_shapes_as_unsupported() {
         let dir = tempdir().expect("tempdir");
         let file = dir.path().join("note.txt");
         std::fs::write(&file, "hello").expect("write file");
@@ -1683,8 +1708,9 @@ mod tests {
         caps.add_fs(FsCapability::new_file(&file, AccessMode::Read).expect("file cap"));
         let policy = compile_filesystem_policy(&caps);
 
+        // Single-file grants are classified as unsupported, so validate_launch_paths must reject
         validate_launch_paths(&policy, &file, dir.path())
-            .expect("single-file executable path should validate");
+            .expect_err("single-file policy shapes must be rejected as unsupported");
     }
 
     #[test]
@@ -1715,31 +1741,41 @@ mod tests {
     }
 
     #[test]
-    fn preview_runtime_status_allows_single_file_only_policy_without_directory_coverage() {
+    fn preview_runtime_status_reports_requires_enforcement_for_single_file_policy() {
         let dir = tempdir().expect("tempdir");
         let file = dir.path().join("note.txt");
         std::fs::write(&file, "hello").expect("write file");
         let mut caps = CapabilitySet::new();
         caps.add_fs(FsCapability::new_file(&file, AccessMode::Read).expect("file cap"));
 
+        // Single-file grants are now classified as unsupported, so preview status
+        // must report RequiresEnforcement with the single-file grants label.
         let status = preview_runtime_status(
             &caps,
             Path::new(r"C:\outside-workdir"),
             WindowsPreviewContext::default(),
         );
-        assert!(status.is_advisory_only());
+        assert!(
+            matches!(status, PreviewRuntimeStatus::RequiresEnforcement { .. }),
+            "single-file policy should require enforcement: {status:?}"
+        );
     }
 
     #[test]
-    fn preview_runtime_status_allows_write_only_directory_when_workdir_is_inside_allowlist() {
+    fn preview_runtime_status_reports_requires_enforcement_for_write_only_directory() {
         let dir = tempdir().expect("tempdir");
         let work_dir = dir.path().join("work");
         std::fs::create_dir_all(&work_dir).expect("mkdir work");
         let mut caps = CapabilitySet::new();
         caps.add_fs(FsCapability::new_dir(dir.path(), AccessMode::Write).expect("dir cap"));
 
+        // Write-only directory grants are now classified as unsupported, so preview status
+        // must report RequiresEnforcement.
         let status = preview_runtime_status(&caps, &work_dir, WindowsPreviewContext::default());
-        assert!(status.is_advisory_only());
+        assert!(
+            matches!(status, PreviewRuntimeStatus::RequiresEnforcement { .. }),
+            "write-only directory policy should require enforcement: {status:?}"
+        );
     }
 
     #[test]
