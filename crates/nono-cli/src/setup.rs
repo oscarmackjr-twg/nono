@@ -374,7 +374,7 @@ impl SetupRunner {
             Err(err) => {
                 #[cfg(target_os = "windows")]
                 println!(
-                    "  * Sensitive path expansion: unavailable in this Windows preview ({})",
+                    "  * Sensitive path expansion: unavailable in the current Windows command surface ({})",
                     err
                 );
 
@@ -513,7 +513,7 @@ impl SetupRunner {
                 println!("  # Preview filesystem and network policy without launching");
                 println!("  nono run --dry-run --profile claude-code -- claude");
                 println!();
-                println!("  # Direct execution with the current supported Windows subset");
+                println!("  # Direct execution with the current supported Windows command surface");
                 println!("  nono run -- <command>");
                 println!();
                 println!("  # Check why a sensitive path is blocked");
@@ -521,7 +521,7 @@ impl SetupRunner {
                 println!();
                 println!("Documentation: https://github.com/always-further/nono#readme");
                 println!();
-                println!("Run 'nono run --help' to inspect the current Windows preview surface.");
+                println!("Run 'nono run --help' to inspect the current Windows command surface.");
             }
 
             #[cfg(not(target_os = "windows"))]
@@ -694,7 +694,7 @@ fn installation_platform_label() -> Result<&'static str> {
 
 #[cfg(target_os = "windows")]
 fn installation_platform_label() -> Result<&'static str> {
-    Ok("Windows (preview build)")
+    Ok("Windows (restricted execution)")
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -747,7 +747,8 @@ fn print_check_only_summary() {
     }
     print_windows_wfp_readiness_report("", &wfp);
     println!("Use 'nono run --dry-run ...' to validate profiles and policy.");
-    println!("Plain 'nono run -- <command>' is preview-safe direct execution only.");
+    println!("Plain 'nono run -- <command>' uses the current supported Windows command surface with backend-owned launch validation and low-integrity write boundaries.");
+    println!("Live 'nono shell' and 'nono wrap' remain intentionally unavailable on Windows; use their --dry-run forms to inspect policy.");
     println!("Run 'nono run --help' to inspect the current command surface.");
 }
 
@@ -903,7 +904,9 @@ mod tests {
     /// `resolve_user_config_dir()` returning `~/.config`. This test catches that.
     #[test]
     fn test_setup_profiles_loadable_by_name() {
-        let _guard = crate::test_env::ENV_LOCK.lock().expect("env lock");
+        let _guard = crate::config::test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let original_home = env::var("HOME").ok();
         let original_xdg = env::var("XDG_CONFIG_HOME").ok();
         #[cfg(target_os = "windows")]

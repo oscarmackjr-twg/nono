@@ -13,6 +13,9 @@ use crate::policy;
 use nono::{NonoError, Result};
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+use std::sync::Mutex;
+
 // ============================================================================
 // Environment variable validation
 // ============================================================================
@@ -40,8 +43,16 @@ pub fn validated_home() -> Result<String> {
 }
 
 fn resolve_home_env() -> Result<(String, &'static str)> {
+    #[cfg(not(target_os = "windows"))]
     if let Ok(home) = std::env::var("HOME") {
         return Ok((home, "HOME"));
+    }
+
+    #[cfg(target_os = "windows")]
+    if let Ok(home) = std::env::var("HOME") {
+        if Path::new(&home).is_absolute() {
+            return Ok((home, "HOME"));
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -96,6 +107,11 @@ pub fn user_state_dir() -> Option<PathBuf> {
     dirs::state_dir()
         .or_else(dirs::data_local_dir)
         .map(|p| p.join("nono"))
+}
+
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> &'static Mutex<()> {
+    &crate::test_env::ENV_LOCK
 }
 
 /// Legacy Windows state directory used by earlier preview builds.
@@ -229,32 +245,18 @@ mod tests {
 
     #[test]
     fn test_check_sensitive_path() {
-        #[cfg(target_os = "windows")]
-        {
-            let home = validated_home().expect("validated home");
-            assert!(check_sensitive_path(&format!(r"{home}\.ssh"))
-                .expect("should not fail")
-                .is_some());
-            assert!(check_sensitive_path(&format!(r"{home}\.aws"))
-                .expect("should not fail")
-                .is_some());
-            assert!(check_sensitive_path(&format!(r"{home}\.bashrc"))
-                .expect("should not fail")
-                .is_some());
-        }
-
-        #[cfg(not(target_os = "windows"))]
-        {
-            assert!(check_sensitive_path("~/.ssh")
-                .expect("should not fail")
-                .is_some());
-            assert!(check_sensitive_path("~/.aws")
-                .expect("should not fail")
-                .is_some());
-            assert!(check_sensitive_path("~/.bashrc")
-                .expect("should not fail")
-                .is_some());
-        }
+        let _guard = test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        assert!(check_sensitive_path("~/.ssh")
+            .expect("should not fail")
+            .is_some());
+        assert!(check_sensitive_path("~/.aws")
+            .expect("should not fail")
+            .is_some());
+        assert!(check_sensitive_path("~/.bashrc")
+            .expect("should not fail")
+            .is_some());
         // /tmp is a system path, not sensitive
         assert!(check_sensitive_path("/tmp")
             .expect("should not fail")
@@ -267,6 +269,9 @@ mod tests {
 
     #[test]
     fn test_check_sensitive_path_component_wise() {
+        let _guard = test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         // ~/.sshevil must NOT match ~/.ssh (component-wise comparison)
         let home = validated_home().expect("HOME must be set");
         let evil_path = format!("{}/.sshevil", home);
@@ -283,10 +288,36 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn test_validated_home_falls_back_to_userprofile() {
+        let _guard = test_env_lock().lock().expect("env lock");
         let original_home = std::env::var("HOME").ok();
         let original_userprofile = std::env::var("USERPROFILE").ok();
 
         std::env::remove_var("HOME");
+        std::env::set_var("USERPROFILE", r"C:\Users\tester");
+
+        let home = validated_home().expect("USERPROFILE should be accepted on Windows");
+        assert_eq!(home, r"C:\Users\tester");
+
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        if let Some(userprofile) = original_userprofile {
+            std::env::set_var("USERPROFILE", userprofile);
+        } else {
+            std::env::remove_var("USERPROFILE");
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_validated_home_ignores_non_absolute_home_when_userprofile_exists() {
+        let _guard = test_env_lock().lock().expect("env lock");
+        let original_home = std::env::var("HOME").ok();
+        let original_userprofile = std::env::var("USERPROFILE").ok();
+
+        std::env::set_var("HOME", "/home/user");
         std::env::set_var("USERPROFILE", r"C:\Users\tester");
 
         let home = validated_home().expect("USERPROFILE should be accepted on Windows");

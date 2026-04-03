@@ -14,21 +14,22 @@ fn nono_bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_nono"))
 }
 
-fn escaped_temp_dir() -> String {
-    let path = std::env::temp_dir().display().to_string();
-    #[cfg(target_os = "windows")]
-    {
-        path.replace('\\', "\\\\")
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        path
-    }
+#[cfg(target_os = "windows")]
+fn dry_run_command() -> [&'static str; 4] {
+    ["--", "cmd", "/c", "echo"]
 }
 
-fn json_string(path: &std::path::Path) -> String {
-    serde_json::to_string(&path.display().to_string()).expect("json path")
+#[cfg(not(target_os = "windows"))]
+fn dry_run_command() -> [&'static str; 2] {
+    ["--", "echo"]
+}
+
+fn escaped_json_path(path: &std::path::Path) -> String {
+    path.display().to_string().replace('\\', "\\\\")
+}
+
+fn escaped_temp_dir() -> String {
+    escaped_json_path(&std::env::temp_dir())
 }
 
 // ---------------------------------------------------------------------------
@@ -83,18 +84,17 @@ fn manifest_override_deny_removes_deny_from_export() {
     std::fs::create_dir_all(&denied_dir).expect("create dir");
 
     let profile_path = dir.path().join("override-test.json");
-    let denied_str = denied_dir.display().to_string();
+    let denied_str = denied_dir.to_str().expect("path str");
+    let denied_json = escaped_json_path(&denied_dir);
     std::fs::write(
         &profile_path,
         format!(
             r#"{{
             "meta": {{ "name": "override-test", "description": "test" }},
             "security": {{ "groups": ["deny_credentials"] }},
-            "filesystem": {{ "read": [{}] }},
-            "policy": {{ "override_deny": [{}] }}
-        }}"#,
-            json_string(&denied_dir),
-            json_string(&denied_dir)
+            "filesystem": {{ "read": ["{denied_json}"] }},
+            "policy": {{ "override_deny": ["{denied_json}"] }}
+        }}"#
         ),
     )
     .expect("write profile");
@@ -132,7 +132,7 @@ fn manifest_override_deny_removes_deny_from_export() {
 
     // The overridden path should NOT appear in deny
     assert!(
-        !deny_paths.iter().any(|p| p.contains(&denied_str)),
+        !deny_paths.iter().any(|p| p.contains(denied_str)),
         "override_deny path '{denied_str}' should not appear in manifest deny list, got: {deny_paths:?}"
     );
 }
@@ -207,10 +207,10 @@ fn manifest_includes_group_allow_paths() {
 
     #[cfg(target_os = "windows")]
     assert!(
-        grant_paths.iter().any(|p| {
-            p.contains(r"C:\Windows") || p.contains(".cargo") || p.contains(".rustup")
-        }),
-        "manifest grants should include Windows system/tooling read paths from groups, got: {grant_paths:?}"
+        grant_paths
+            .iter()
+            .any(|p| p.contains(":\\Windows") || p.contains("\\\\?\\C:\\Windows")),
+        "manifest grants should include Windows system read paths from groups, got: {grant_paths:?}"
     );
 }
 
@@ -362,52 +362,51 @@ fn manifest_proxy_mode_not_downgraded_to_blocked() {
     )
     .expect("write manifest");
 
-    let output = nono_bin()
-        .args([
-            "run",
-            "--config",
-            f.path().to_str().expect("path"),
-            "--dry-run",
-            "--",
-            "echo",
-            "hello",
-        ])
-        .output()
-        .expect("failed to run nono");
+    let mut command = nono_bin();
+    command.args([
+        "run",
+        "--config",
+        f.path().to_str().expect("path"),
+        "--dry-run",
+    ]);
+    command.args(dry_run_command());
+    command.arg("hello");
+    let output = command.output().expect("failed to run nono");
 
     #[cfg(not(target_os = "windows"))]
-    {
-        assert!(
-            output.status.success(),
-            "expected success for proxy manifest, stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let combined = format!("{stdout}{stderr}");
-        assert!(
-            combined.to_lowercase().contains("proxy")
-                || combined.to_lowercase().contains("credential")
-                || combined.to_lowercase().contains("allow_domain")
-                || combined.to_lowercase().contains("api.github.com"),
-            "dry-run output for proxy manifest should mention proxy/domain configuration, got:\n{combined}"
-        );
-    }
+    assert!(
+        output.status.success(),
+        "expected success for proxy manifest, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     #[cfg(target_os = "windows")]
     {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
             !output.status.success(),
-            "expected Windows manifest execution path to fail closed, stderr: {stderr}"
+            "expected Windows proxy manifest execution path to fail closed, stderr: {stderr}"
         );
         assert!(
-            stderr.contains("Windows preview build")
-                && stderr.contains("partial and still in progress"),
+            stderr.contains("Windows native builds support setup, dry-run, direct execution"),
             "expected current Windows command-surface failure, got: {stderr}"
         );
     }
+
+    // The dry-run output should indicate proxy mode, not just "blocked"
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let combined = format!("{stdout}{stderr}");
+
+    // After the fix, the output should mention proxy or credential routing.
+    // For now, this test documents the expectation.
+    assert!(
+        combined.to_lowercase().contains("proxy")
+            || combined.to_lowercase().contains("credential")
+            || combined.to_lowercase().contains("allow_domain")
+            || combined.to_lowercase().contains("api.github.com"),
+        "dry-run output for proxy manifest should mention proxy/domain configuration, got:\n{combined}"
+    );
 }
 
 #[test]
@@ -435,18 +434,16 @@ fn manifest_credentials_accepted_in_config() {
     )
     .expect("write manifest");
 
-    let output = nono_bin()
-        .args([
-            "run",
-            "--config",
-            f.path().to_str().expect("path"),
-            "--dry-run",
-            "--",
-            "echo",
-            "hello",
-        ])
-        .output()
-        .expect("failed to run nono");
+    let mut command = nono_bin();
+    command.args([
+        "run",
+        "--config",
+        f.path().to_str().expect("path"),
+        "--dry-run",
+    ]);
+    command.args(dry_run_command());
+    command.arg("hello");
+    let output = command.output().expect("failed to run nono");
 
     #[cfg(not(target_os = "windows"))]
     assert!(
@@ -460,11 +457,10 @@ fn manifest_credentials_accepted_in_config() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
             !output.status.success(),
-            "expected Windows manifest execution path to fail closed, stderr: {stderr}"
+            "expected Windows credential manifest execution path to fail closed, stderr: {stderr}"
         );
         assert!(
-            stderr.contains("Windows preview build")
-                && stderr.contains("partial and still in progress"),
+            stderr.contains("Windows native builds support setup, dry-run, direct execution"),
             "expected current Windows command-surface failure, got: {stderr}"
         );
     }
@@ -498,18 +494,16 @@ fn manifest_credential_env_var_accepted_and_round_trips() {
     )
     .expect("write manifest");
 
-    let output = nono_bin()
-        .args([
-            "run",
-            "--config",
-            f.path().to_str().expect("path"),
-            "--dry-run",
-            "--",
-            "echo",
-            "hello",
-        ])
-        .output()
-        .expect("failed to run nono");
+    let mut command = nono_bin();
+    command.args([
+        "run",
+        "--config",
+        f.path().to_str().expect("path"),
+        "--dry-run",
+    ]);
+    command.args(dry_run_command());
+    command.arg("hello");
+    let output = command.output().expect("failed to run nono");
 
     #[cfg(not(target_os = "windows"))]
     assert!(
@@ -523,11 +517,10 @@ fn manifest_credential_env_var_accepted_and_round_trips() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
             !output.status.success(),
-            "expected Windows manifest execution path to fail closed, stderr: {stderr}"
+            "expected Windows env-var manifest execution path to fail closed, stderr: {stderr}"
         );
         assert!(
-            stderr.contains("Windows preview build")
-                && stderr.contains("partial and still in progress"),
+            stderr.contains("Windows native builds support setup, dry-run, direct execution"),
             "expected current Windows command-surface failure, got: {stderr}"
         );
     }
@@ -604,10 +597,9 @@ fn rollback_enabled_without_supervised_fails_validation() {
                 "exclude_patterns": ["node_modules"]
             }},
             "filesystem": {{
-                "grants": [{{ "path": "{}", "access": "read" }}]
+                "grants": [{{ "path": "/tmp", "access": "read" }}]
             }}
-        }}"#,
-        escaped_temp_dir()
+        }}"#
     )
     .expect("write manifest");
 
@@ -658,18 +650,16 @@ fn rollback_enabled_with_supervised_is_accepted() {
     )
     .expect("write manifest");
 
-    let output = nono_bin()
-        .args([
-            "run",
-            "--config",
-            f.path().to_str().expect("path"),
-            "--dry-run",
-            "--",
-            "echo",
-            "hello",
-        ])
-        .output()
-        .expect("failed to run nono");
+    let mut command = nono_bin();
+    command.args([
+        "run",
+        "--config",
+        f.path().to_str().expect("path"),
+        "--dry-run",
+    ]);
+    command.args(dry_run_command());
+    command.arg("hello");
+    let output = command.output().expect("failed to run nono");
 
     #[cfg(not(target_os = "windows"))]
     assert!(
@@ -683,11 +673,10 @@ fn rollback_enabled_with_supervised_is_accepted() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
             !output.status.success(),
-            "expected Windows manifest execution path to fail closed, stderr: {stderr}"
+            "expected Windows supervised manifest execution path to fail closed, stderr: {stderr}"
         );
         assert!(
-            stderr.contains("Windows preview build")
-                && stderr.contains("partial and still in progress"),
+            stderr.contains("Windows native builds support setup, dry-run, direct execution"),
             "expected current Windows command-surface failure, got: {stderr}"
         );
     }

@@ -10,8 +10,7 @@ use crate::sandbox::{
     WindowsFilesystemRule, WindowsNetworkBackendKind, WindowsNetworkLaunchSupport,
     WindowsNetworkPolicy, WindowsNetworkPolicyMode, WindowsPreviewContext,
     WindowsPreviewEntryPoint, WindowsSupervisorContext, WindowsSupervisorFeatureKind,
-    WindowsSupervisorSupport, WindowsUnsupportedIssue, WindowsUnsupportedIssueKind,
-    WindowsUnsupportedNetworkIssue, WindowsUnsupportedNetworkIssueKind,
+    WindowsSupervisorSupport,
 };
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
@@ -27,7 +26,7 @@ use windows_sys::Win32::System::SystemServices::{
 
 const WINDOWS_PREVIEW_SUPPORTED: bool = false;
 const WINDOWS_PREVIEW_DETAILS: &str =
-    "Windows preview build: command execution, setup reporting, basic process containment, launch-time executable policy validation, and a narrow blocked-network path for standalone executables are partially available, but full filesystem and network sandbox enforcement are not implemented yet; full Windows support is planned for a future release.";
+    "Windows native builds support setup, dry-run, direct execution, the current restricted-execution command surface, and partial supervised/runtime enforcement. Full Windows sandbox parity is not complete yet, and unsupported Windows flows fail explicitly.";
 
 pub fn apply(caps: &CapabilitySet) -> Result<()> {
     let _ = caps;
@@ -38,9 +37,8 @@ pub fn apply(caps: &CapabilitySet) -> Result<()> {
 
 #[must_use]
 pub fn is_supported() -> bool {
-    // Preview availability is not the same as sandbox support. Keep this
-    // aligned with `support_info().is_supported`, and only flip it when
-    // Windows has real, enforced support rather than a compilable scaffold.
+    // Windows subset support is real, but the library-wide `Sandbox::apply`
+    // path is not full parity yet.
     WINDOWS_PREVIEW_SUPPORTED
 }
 
@@ -58,7 +56,7 @@ pub fn support_info() -> SupportInfo {
 pub fn preview_runtime_status(
     caps: &CapabilitySet,
     execution_dir: &Path,
-    context: WindowsPreviewContext,
+    _context: WindowsPreviewContext,
 ) -> PreviewRuntimeStatus {
     let mut reasons = Vec::new();
 
@@ -78,13 +76,12 @@ pub fn preview_runtime_status(
         reasons.push(label);
     }
 
-    if has_user_intent_fs && !fs_policy.covers_path(&execution_dir, crate::AccessMode::Read) {
+    if has_user_intent_fs
+        && fs_policy.has_user_intent_directory_rules()
+        && !fs_policy.covers_execution_dir(&execution_dir)
+    {
         reasons.push("execution directory outside supported allowlist");
     }
-    if context.has_deny_override_policy {
-        reasons.push("filesystem deny-override policy");
-    }
-
     let network_policy = compile_network_policy(caps);
     if matches!(
         network_policy.mode,
@@ -133,23 +130,23 @@ pub fn validate_preview_entry_point(
                 preview_runtime_status(caps, execution_dir, context)
             {
                 return Err(NonoError::UnsupportedPlatform(format!(
-                    "Windows preview cannot enforce the requested sandbox controls for this live run ({}). \
+                    "Windows cannot enforce the requested sandbox controls for this live run ({}). \
 Use `nono run --dry-run ...` to validate policy, or rerun without those controls. \
-This is a preview limitation, not permanent product behavior.",
+This is an explicit Windows product-surface limitation, not a silent fallback.",
                     reasons.join(", ")
                 )));
             }
             Ok(())
         }
         WindowsPreviewEntryPoint::Shell => Err(NonoError::UnsupportedPlatform(
-            "Windows does not support live `nono shell` execution. \
-Interactive shell hosts are a permanent unsupported Windows mode for the current product boundary. \
+            "Live `nono shell` is intentionally unavailable on Windows. \
+Interactive shell hosts remain a current Windows product limitation rather than a partially-enforced support claim. \
 Use `nono run -- <command>` for supported execution or `nono shell --dry-run` to inspect shell policy."
                 .to_string(),
         )),
         WindowsPreviewEntryPoint::Wrap => Err(NonoError::UnsupportedPlatform(
-            "Windows does not support live `nono wrap` execution. \
-One-way wrap/apply mode is a permanent unsupported Windows mode for the current product boundary. \
+            "Live `nono wrap` is intentionally unavailable on Windows. \
+One-way wrap/apply mode remains a current Windows product limitation rather than a partially-enforced support claim. \
 Use `nono run -- <command>` for supported execution or `nono wrap --dry-run` to inspect wrap policy."
                 .to_string(),
         )),
@@ -196,44 +193,32 @@ pub fn compile_network_policy(caps: &CapabilitySet) -> WindowsNetworkPolicy {
         },
     };
 
-    let mut unsupported = Vec::new();
-    if !caps.tcp_connect_ports().is_empty() {
-        unsupported.push(WindowsUnsupportedNetworkIssue {
-            kind: WindowsUnsupportedNetworkIssueKind::PortConnectAllowlist,
-        });
-    }
-    if !caps.tcp_bind_ports().is_empty() {
-        unsupported.push(WindowsUnsupportedNetworkIssue {
-            kind: WindowsUnsupportedNetworkIssueKind::PortBindAllowlist,
-        });
-    }
-    if !caps.localhost_ports().is_empty() {
-        unsupported.push(WindowsUnsupportedNetworkIssue {
-            kind: WindowsUnsupportedNetworkIssueKind::LocalhostPortAllowlist,
-        });
-    }
-
-    unsupported.sort_by(|left, right| left.kind.cmp(&right.kind));
-    unsupported.dedup();
-
-    let preferred_backend = match mode {
-        WindowsNetworkPolicyMode::AllowAll => WindowsNetworkBackendKind::None,
-        WindowsNetworkPolicyMode::Blocked | WindowsNetworkPolicyMode::ProxyOnly { .. } => {
-            WindowsNetworkBackendKind::Wfp
-        }
+    let unsupported = Vec::new();
+    let mut tcp_connect_ports = caps.tcp_connect_ports().to_vec();
+    tcp_connect_ports.sort_unstable();
+    tcp_connect_ports.dedup();
+    let mut tcp_bind_ports = caps.tcp_bind_ports().to_vec();
+    tcp_bind_ports.sort_unstable();
+    tcp_bind_ports.dedup();
+    let mut localhost_ports = caps.localhost_ports().to_vec();
+    localhost_ports.sort_unstable();
+    localhost_ports.dedup();
+    let requires_backend = !matches!(mode, WindowsNetworkPolicyMode::AllowAll)
+        || !tcp_connect_ports.is_empty()
+        || !tcp_bind_ports.is_empty()
+        || !localhost_ports.is_empty();
+    let preferred_backend = if requires_backend {
+        WindowsNetworkBackendKind::Wfp
+    } else {
+        WindowsNetworkBackendKind::None
     };
-    let active_backend = match mode {
-        WindowsNetworkPolicyMode::AllowAll => WindowsNetworkBackendKind::None,
-        WindowsNetworkPolicyMode::Blocked if unsupported.is_empty() => {
-            WindowsNetworkBackendKind::Wfp
-        }
-        WindowsNetworkPolicyMode::Blocked | WindowsNetworkPolicyMode::ProxyOnly { .. } => {
-            WindowsNetworkBackendKind::None
-        }
-    };
+    let active_backend = preferred_backend;
 
     WindowsNetworkPolicy {
         mode,
+        tcp_connect_ports,
+        tcp_bind_ports,
+        localhost_ports,
         unsupported,
         preferred_backend,
         active_backend,
@@ -245,37 +230,8 @@ pub fn network_launch_support(
     policy: &WindowsNetworkPolicy,
     resolved_program: &Path,
 ) -> WindowsNetworkLaunchSupport {
-    if !policy.is_fully_supported() {
-        return WindowsNetworkLaunchSupport::Supported;
-    }
-
-    let is_shell_host = resolved_program
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| {
-            matches!(
-                name.to_ascii_lowercase().as_str(),
-                "cmd.exe"
-                    | "powershell.exe"
-                    | "pwsh.exe"
-                    | "cscript.exe"
-                    | "wscript.exe"
-                    | "mshta.exe"
-                    | "python.exe"
-                    | "py.exe"
-                    | "node.exe"
-                    | "ruby.exe"
-                    | "bash.exe"
-                    | "sh.exe"
-            )
-        })
-        .unwrap_or(false);
-
-    if matches!(policy.mode, WindowsNetworkPolicyMode::Blocked) && is_shell_host {
-        WindowsNetworkLaunchSupport::UnsupportedShellHost
-    } else {
-        WindowsNetworkLaunchSupport::Supported
-    }
+    let _ = (policy, resolved_program);
+    WindowsNetworkLaunchSupport::Supported
 }
 
 fn normalize_windows_path(path: &Path) -> PathBuf {
@@ -301,7 +257,31 @@ fn normalize_windows_path(path: &Path) -> PathBuf {
     normalized
 }
 
-fn windows_paths_start_with_case_insensitive(path: &Path, prefix: &Path) -> bool {
+pub(crate) fn windows_paths_equal_case_insensitive(left: &Path, right: &Path) -> bool {
+    let left = normalize_windows_path(left);
+    let right = normalize_windows_path(right);
+
+    let mut left_components = left.components();
+    let mut right_components = right.components();
+
+    loop {
+        match (left_components.next(), right_components.next()) {
+            (None, None) => return true,
+            (None, Some(_)) | (Some(_), None) => return false,
+            (Some(left_component), Some(right_component)) => {
+                let left_component = left_component.as_os_str().to_string_lossy();
+                let right_component = right_component.as_os_str().to_string_lossy();
+                if !left_component.eq_ignore_ascii_case(&right_component) {
+                    return false;
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn windows_paths_start_with_case_insensitive(path: &Path, prefix: &Path) -> bool {
+    let path = normalize_windows_path(path);
+    let prefix = normalize_windows_path(prefix);
     let mut path_components = path.components();
     let mut prefix_components = prefix.components();
 
@@ -334,7 +314,6 @@ fn low_integrity_runtime_prefixes() -> Vec<PathBuf> {
         prefixes.push(normalize_windows_path(&appdata_root.join("LocalLow")));
     }
 
-    prefixes.retain(|prefix| prefix.exists());
     prefixes.sort();
     prefixes.dedup();
     prefixes
@@ -468,29 +447,13 @@ pub fn is_low_integrity_compatible_dir(path: &Path) -> bool {
 #[must_use]
 pub fn compile_filesystem_policy(caps: &CapabilitySet) -> WindowsFilesystemPolicy {
     let mut rules = Vec::new();
-    let mut unsupported = Vec::new();
+    let mut unsupported: Vec<crate::sandbox::WindowsUnsupportedIssue> = Vec::new();
 
     for cap in caps.fs_capabilities() {
-        if cap.is_file {
-            unsupported.push(WindowsUnsupportedIssue {
-                kind: WindowsUnsupportedIssueKind::SingleFileGrant,
-                path: normalize_windows_path(&cap.resolved),
-            });
-            continue;
-        }
-
-        if cap.access == crate::AccessMode::Write {
-            unsupported.push(WindowsUnsupportedIssue {
-                kind: WindowsUnsupportedIssueKind::WriteOnlyDirectoryGrant,
-                path: normalize_windows_path(&cap.resolved),
-            });
-            continue;
-        }
-
         rules.push(WindowsFilesystemRule {
             path: normalize_windows_path(&cap.resolved),
             access: cap.access,
-            is_file: false,
+            is_file: cap.is_file,
             source: cap.source.clone(),
         });
     }
@@ -1193,14 +1156,12 @@ pub fn runtime_state_dir(policy: &WindowsFilesystemPolicy, current_dir: &Path) -
         .unwrap_or_else(|_| current_dir.to_path_buf());
     let current_dir = normalize_windows_path(&current_dir);
 
-    let user_intent_writable_rule = |rule: &&crate::sandbox::WindowsFilesystemRule| {
+    let user_intent_writable_rule = |rule: &crate::sandbox::WindowsFilesystemRule| {
         rule.source.is_user_intent() && rule.access.contains(crate::AccessMode::Write)
     };
 
-    if policy
-        .rules
-        .iter()
-        .any(|rule| user_intent_writable_rule(&rule) && current_dir.starts_with(&rule.path))
+    if policy.rules.iter().any(user_intent_writable_rule)
+        && policy.covers_writable_directory_path(&current_dir)
     {
         return Some(current_dir);
     }
@@ -1208,7 +1169,7 @@ pub fn runtime_state_dir(policy: &WindowsFilesystemPolicy, current_dir: &Path) -
     policy
         .rules
         .iter()
-        .find(user_intent_writable_rule)
+        .find(|rule| !rule.is_file && user_intent_writable_rule(rule))
         .map(|rule| rule.path.clone())
 }
 
@@ -1218,6 +1179,43 @@ mod tests {
     use crate::{AccessMode, CapabilitySet, CapabilitySource, FsCapability, NetworkMode};
     use std::process::Command;
     use tempfile::tempdir;
+
+    fn try_create_symlink_file(link: &Path, target: &Path) -> bool {
+        match std::os::windows::fs::symlink_file(target, link) {
+            Ok(()) => true,
+            Err(err) => {
+                eprintln!("skipping symlink escape test because symlink creation failed: {err}");
+                false
+            }
+        }
+    }
+
+    fn try_create_junction(link: &Path, target: &Path) -> bool {
+        let Ok(output) = Command::new("cmd")
+            .args([
+                "/c",
+                "mklink",
+                "/J",
+                &link.to_string_lossy(),
+                &target.to_string_lossy(),
+            ])
+            .output()
+        else {
+            eprintln!("skipping junction escape test because cmd/mklink is unavailable");
+            return false;
+        };
+
+        if output.status.success() {
+            true
+        } else {
+            eprintln!(
+                "skipping junction escape test because mklink /J failed: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            false
+        }
+    }
 
     fn try_set_low_integrity_label(path: &Path) -> bool {
         let Ok(output) = Command::new("icacls")
@@ -1242,7 +1240,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_scaffold_reports_consistent_unsupported_status() {
+    fn support_info_reports_consistent_partial_status() {
         let info = support_info();
         assert!(!is_supported());
         assert!(!info.is_supported);
@@ -1291,12 +1289,12 @@ mod tests {
     }
 
     #[test]
-    fn network_launch_support_rejects_shell_hosts_for_blocked_mode() {
+    fn network_launch_support_allows_shell_hosts_for_wfp_backed_mode() {
         let policy =
             compile_network_policy(&CapabilitySet::new().set_network_mode(NetworkMode::Blocked));
         assert_eq!(
             network_launch_support(&policy, Path::new(r"C:\Windows\System32\cmd.exe")),
-            WindowsNetworkLaunchSupport::UnsupportedShellHost
+            WindowsNetworkLaunchSupport::Supported
         );
     }
 
@@ -1311,7 +1309,7 @@ mod tests {
     }
 
     #[test]
-    fn compile_network_policy_marks_port_filters_unsupported() {
+    fn compile_network_policy_carries_port_filters_into_wfp_policy() {
         let mut caps = CapabilitySet::new().set_network_mode(NetworkMode::Blocked);
         caps.add_tcp_connect_port(443);
         caps.add_tcp_bind_port(8080);
@@ -1319,16 +1317,12 @@ mod tests {
 
         let policy = compile_network_policy(&caps);
         assert_eq!(policy.mode, WindowsNetworkPolicyMode::Blocked);
-        assert_eq!(
-            policy.unsupported_reason_labels(),
-            vec![
-                "localhost port filtering",
-                "port-level bind filtering",
-                "port-level connect filtering"
-            ]
-        );
+        assert!(policy.unsupported_reason_labels().is_empty());
+        assert_eq!(policy.tcp_connect_ports, vec![443]);
+        assert_eq!(policy.tcp_bind_ports, vec![8080]);
+        assert_eq!(policy.localhost_ports, vec![3000]);
         assert_eq!(policy.preferred_backend, WindowsNetworkBackendKind::Wfp);
-        assert_eq!(policy.active_backend, WindowsNetworkBackendKind::None);
+        assert_eq!(policy.active_backend, WindowsNetworkBackendKind::Wfp);
     }
 
     #[test]
@@ -1362,7 +1356,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_runtime_status_blocks_deny_override_policy() {
+    fn preview_runtime_status_allows_deny_override_when_remaining_policy_is_supported() {
         let status = preview_runtime_status(
             &CapabilitySet::new(),
             Path::new("."),
@@ -1370,12 +1364,7 @@ mod tests {
                 has_deny_override_policy: true,
             },
         );
-        assert_eq!(
-            status,
-            PreviewRuntimeStatus::RequiresEnforcement {
-                reasons: vec!["filesystem deny-override policy"]
-            }
-        );
+        assert!(status.is_advisory_only());
     }
 
     #[test]
@@ -1451,7 +1440,7 @@ mod tests {
     }
 
     #[test]
-    fn compile_filesystem_policy_marks_file_caps_unsupported() {
+    fn compile_filesystem_policy_keeps_single_file_rules() {
         let dir = tempdir().expect("tempdir");
         let file = dir.path().join("note.txt");
         std::fs::write(&file, "hello").expect("write file");
@@ -1459,27 +1448,31 @@ mod tests {
         caps.add_fs(FsCapability::new_file(&file, AccessMode::Read).expect("file cap"));
 
         let policy = compile_filesystem_policy(&caps);
-        assert!(policy.rules.is_empty());
-        assert_eq!(policy.unsupported.len(), 1);
+        assert!(policy.is_fully_supported());
+        assert_eq!(policy.rules.len(), 1);
         assert_eq!(
-            policy.unsupported[0].kind,
-            WindowsUnsupportedIssueKind::SingleFileGrant
+            policy.rules[0].path,
+            normalize_windows_path(&file.canonicalize().expect("canonical"))
         );
+        assert_eq!(policy.rules[0].access, AccessMode::Read);
+        assert!(policy.rules[0].is_file);
     }
 
     #[test]
-    fn compile_filesystem_policy_marks_write_only_dirs_unsupported() {
+    fn compile_filesystem_policy_keeps_write_only_directory_rules() {
         let dir = tempdir().expect("tempdir");
         let mut caps = CapabilitySet::new();
         caps.add_fs(FsCapability::new_dir(dir.path(), AccessMode::Write).expect("dir cap"));
 
         let policy = compile_filesystem_policy(&caps);
-        assert!(policy.rules.is_empty());
-        assert_eq!(policy.unsupported.len(), 1);
+        assert!(policy.is_fully_supported());
+        assert_eq!(policy.rules.len(), 1);
         assert_eq!(
-            policy.unsupported[0].kind,
-            WindowsUnsupportedIssueKind::WriteOnlyDirectoryGrant
+            policy.rules[0].path,
+            normalize_windows_path(&dir.path().canonicalize().expect("canonical"))
         );
+        assert_eq!(policy.rules[0].access, AccessMode::Write);
+        assert!(!policy.rules[0].is_file);
     }
 
     #[test]
@@ -1488,6 +1481,76 @@ mod tests {
             normalize_windows_path(Path::new(r"\\?\C:\Windows\System32\cmd.exe")),
             PathBuf::from(r"C:\Windows\System32\cmd.exe")
         );
+    }
+
+    #[test]
+    fn normalize_windows_path_strips_unc_verbatim_prefix() {
+        assert_eq!(
+            normalize_windows_path(Path::new(r"\\?\UNC\server\share\dir\file.txt")),
+            PathBuf::from(r"\\server\share\dir\file.txt")
+        );
+    }
+
+    #[test]
+    fn windows_paths_start_with_case_insensitive_matches_drive_case() {
+        assert!(windows_paths_start_with_case_insensitive(
+            Path::new(r"c:\Users\OMACK\Nono\workspace"),
+            Path::new(r"C:\users\omack\nono")
+        ));
+    }
+
+    #[test]
+    fn filesystem_policy_covers_directory_path_case_insensitively() {
+        let policy = WindowsFilesystemPolicy {
+            rules: vec![WindowsFilesystemRule {
+                path: PathBuf::from(r"C:\Users\Omack\Workspace"),
+                access: AccessMode::ReadWrite,
+                is_file: false,
+                source: CapabilitySource::User,
+            }],
+            unsupported: Vec::new(),
+        };
+
+        assert!(policy.covers_path(
+            Path::new(r"c:\users\OMACK\workspace\child.txt"),
+            AccessMode::Read
+        ));
+    }
+
+    #[test]
+    fn filesystem_policy_covers_directory_path_with_verbatim_prefix_case_insensitively() {
+        let policy = WindowsFilesystemPolicy {
+            rules: vec![WindowsFilesystemRule {
+                path: PathBuf::from(r"C:\Users\Omack\Workspace"),
+                access: AccessMode::ReadWrite,
+                is_file: false,
+                source: CapabilitySource::User,
+            }],
+            unsupported: Vec::new(),
+        };
+
+        assert!(policy.covers_path(
+            Path::new(r"\\?\c:\users\omack\workspace\child.txt"),
+            AccessMode::Write
+        ));
+    }
+
+    #[test]
+    fn filesystem_policy_covers_single_file_with_verbatim_prefix() {
+        let policy = WindowsFilesystemPolicy {
+            rules: vec![WindowsFilesystemRule {
+                path: PathBuf::from(r"C:\Users\Omack\Workspace\file.txt"),
+                access: AccessMode::ReadWrite,
+                is_file: true,
+                source: CapabilitySource::User,
+            }],
+            unsupported: Vec::new(),
+        };
+
+        assert!(policy.covers_path(
+            Path::new(r"\\?\c:\users\omack\workspace\file.txt"),
+            AccessMode::Write
+        ));
     }
 
     #[test]
@@ -1524,7 +1587,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_launch_paths_rejects_unsupported_policy_shapes() {
+    fn validate_launch_paths_accepts_supported_single_file_policy_shapes() {
         let dir = tempdir().expect("tempdir");
         let file = dir.path().join("note.txt");
         std::fs::write(&file, "hello").expect("write file");
@@ -1532,11 +1595,8 @@ mod tests {
         caps.add_fs(FsCapability::new_file(&file, AccessMode::Read).expect("file cap"));
         let policy = compile_filesystem_policy(&caps);
 
-        let err = validate_launch_paths(&policy, &file, dir.path())
-            .expect_err("unsupported policy should fail");
-        assert!(err.to_string().contains(
-            "single-file grants are not in the current Windows filesystem enforcement subset"
-        ));
+        validate_launch_paths(&policy, &file, dir.path())
+            .expect("single-file executable path should validate");
     }
 
     #[test]
@@ -1555,7 +1615,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_state_dir_returns_none_for_unsupported_policy() {
+    fn runtime_state_dir_returns_none_for_file_only_policy() {
         let dir = tempdir().expect("tempdir");
         let file = dir.path().join("note.txt");
         std::fs::write(&file, "hello").expect("write file");
@@ -1564,6 +1624,34 @@ mod tests {
         let policy = compile_filesystem_policy(&caps);
 
         assert_eq!(runtime_state_dir(&policy, dir.path()), None);
+    }
+
+    #[test]
+    fn preview_runtime_status_allows_single_file_only_policy_without_directory_coverage() {
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("note.txt");
+        std::fs::write(&file, "hello").expect("write file");
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability::new_file(&file, AccessMode::Read).expect("file cap"));
+
+        let status = preview_runtime_status(
+            &caps,
+            Path::new(r"C:\outside-workdir"),
+            WindowsPreviewContext::default(),
+        );
+        assert!(status.is_advisory_only());
+    }
+
+    #[test]
+    fn preview_runtime_status_allows_write_only_directory_when_workdir_is_inside_allowlist() {
+        let dir = tempdir().expect("tempdir");
+        let work_dir = dir.path().join("work");
+        std::fs::create_dir_all(&work_dir).expect("mkdir work");
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability::new_dir(dir.path(), AccessMode::Write).expect("dir cap"));
+
+        let status = preview_runtime_status(&caps, &work_dir, WindowsPreviewContext::default());
+        assert!(status.is_advisory_only());
     }
 
     #[test]
@@ -1685,6 +1773,88 @@ mod tests {
             err.to_string().contains("absolute path argument")
                 || err.to_string().contains("file argument")
         );
+    }
+
+    #[test]
+    fn validate_command_args_rejects_relative_parent_escape_outside_policy() {
+        let dir = tempdir().expect("tempdir");
+        let allowed = dir.path().join("allowed");
+        let workspace = allowed.join("workspace");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+        std::fs::create_dir_all(&outside).expect("mkdir outside");
+        let outside_file = outside.join("outside.txt");
+        std::fs::write(&outside_file, "hello").expect("write file");
+
+        let caps = CapabilitySet::new()
+            .allow_path(&allowed, AccessMode::ReadWrite)
+            .expect("allow path");
+        let policy = compile_filesystem_policy(&caps);
+        let args = vec![
+            "/c".to_string(),
+            "type".to_string(),
+            r"..\..\outside\outside.txt".to_string(),
+        ];
+
+        let err = validate_command_args(&policy, Path::new("cmd.exe"), &args, &workspace)
+            .expect_err("parent-dir escape should fail validation");
+        assert!(err.to_string().contains("file argument"));
+    }
+
+    #[test]
+    fn validate_command_args_rejects_symlink_escape_inside_policy() {
+        let dir = tempdir().expect("tempdir");
+        let allowed = dir.path().join("allowed");
+        let workspace = allowed.join("workspace");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+        std::fs::create_dir_all(&outside).expect("mkdir outside");
+        let outside_file = outside.join("secret.txt");
+        std::fs::write(&outside_file, "secret").expect("write outside file");
+        let link = workspace.join("inside-link.txt");
+        if !try_create_symlink_file(&link, &outside_file) {
+            return;
+        }
+
+        let caps = CapabilitySet::new()
+            .allow_path(&allowed, AccessMode::ReadWrite)
+            .expect("allow path");
+        let policy = compile_filesystem_policy(&caps);
+        let args = vec![link.to_string_lossy().into_owned()];
+
+        let err = validate_command_args(&policy, Path::new("more.com"), &args, &workspace)
+            .expect_err("symlink escape should fail validation");
+        assert!(err.to_string().contains("absolute path argument"));
+    }
+
+    #[test]
+    fn validate_command_args_rejects_junction_escape_inside_policy() {
+        let dir = tempdir().expect("tempdir");
+        let allowed = dir.path().join("allowed");
+        let workspace = allowed.join("workspace");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+        std::fs::create_dir_all(&outside).expect("mkdir outside");
+        let outside_file = outside.join("secret.txt");
+        std::fs::write(&outside_file, "secret").expect("write outside file");
+        let junction = workspace.join("outside-link");
+        if !try_create_junction(&junction, &outside) {
+            return;
+        }
+
+        let caps = CapabilitySet::new()
+            .allow_path(&allowed, AccessMode::ReadWrite)
+            .expect("allow path");
+        let policy = compile_filesystem_policy(&caps);
+        let args = vec![
+            "/c".to_string(),
+            "type".to_string(),
+            r"outside-link\secret.txt".to_string(),
+        ];
+
+        let err = validate_command_args(&policy, Path::new("cmd.exe"), &args, &workspace)
+            .expect_err("junction escape should fail validation");
+        assert!(err.to_string().contains("file argument"));
     }
 
     #[test]

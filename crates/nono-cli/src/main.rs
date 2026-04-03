@@ -9,7 +9,7 @@ mod config;
 #[cfg(not(target_os = "windows"))]
 mod exec_strategy;
 #[cfg(target_os = "windows")]
-#[path = "exec_strategy_windows.rs"]
+#[path = "exec_strategy_windows/mod.rs"]
 mod exec_strategy;
 mod hooks;
 mod instruction_deny;
@@ -1514,10 +1514,10 @@ fn apply_pre_fork_sandbox(
                         has_deny_override_policy: false,
                     },
                 );
-                info!("Windows preview runtime status: {:?}", preview);
+                info!("Windows runtime status: {:?}", preview);
                 if !silent {
                     output::print_warning(
-                        "Windows preview: running with backend-owned Windows process containment plus the currently supported enforced subset for filesystem and blocked-network policy; unsupported Windows restrictions still fail closed with backend diagnostics",
+                        "Windows restricted execution is running with backend-owned Windows process containment plus the current supported command surface for filesystem and blocked-network policy; unsupported Windows restrictions still fail closed with backend diagnostics",
                     );
                     eprintln!();
                 }
@@ -1869,11 +1869,7 @@ fn try_prepare_low_integrity_runtime_root(
         return Ok(None);
     }
 
-    if Sandbox::windows_supports_direct_writable_dir(&managed_root) {
-        Ok(Some(managed_root))
-    } else {
-        Ok(None)
-    }
+    Ok(Some(managed_root))
 }
 
 #[cfg(target_os = "windows")]
@@ -1887,6 +1883,43 @@ fn try_set_low_integrity_label(path: &std::path::Path) -> bool {
     };
 
     output.status.success()
+}
+
+#[cfg(target_os = "windows")]
+fn normalize_windows_compare_path(path: &std::path::Path) -> String {
+    path.to_string_lossy()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_ascii_lowercase()
+}
+
+#[cfg(target_os = "windows")]
+fn trusted_windows_local_appdata() -> Result<std::path::PathBuf> {
+    let trusted = dirs::data_local_dir().ok_or_else(|| {
+        NonoError::SandboxInit(
+            "Failed to resolve the Windows LocalAppData directory from the OS".to_string(),
+        )
+    })?;
+
+    if let Some(env_local) = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from) {
+        let env_normalized = normalize_windows_compare_path(&env_local);
+        let trusted_normalized = normalize_windows_compare_path(&trusted);
+        if env_normalized != trusted_normalized {
+            return Err(NonoError::SandboxInit(format!(
+                "Failed to prepare Windows writable runtime root: LOCALAPPDATA override '{}' does not match the OS LocalAppData directory '{}'",
+                env_local.display(),
+                trusted.display()
+            )));
+        }
+    }
+
+    Ok(trusted)
+}
+
+#[cfg(target_os = "windows")]
+fn runtime_root_needs_low_integrity_label(path: &std::path::Path) -> bool {
+    let normalized = path.to_string_lossy().to_ascii_lowercase();
+    normalized.contains("\\temp\\low\\") || normalized.contains("\\locallow\\")
 }
 
 #[cfg(target_os = "windows")]
@@ -1912,10 +1945,9 @@ fn prepare_windows_runtime_env_vars(
     } else if let Some(managed_root) = try_prepare_low_integrity_runtime_root(runtime_state_dir)? {
         managed_root
     } else {
-        std::env::var_os("LOCALAPPDATA")
-            .map(std::path::PathBuf::from)
-            .map(|local| local.join("Temp").join("Low"))
-            .unwrap_or_else(|| runtime_state_dir.join(".nono-runtime-low"))
+        trusted_windows_local_appdata()?
+            .join("Temp")
+            .join("Low")
             .join("nono")
             .join(
                 runtime_state_dir
@@ -1924,16 +1956,23 @@ fn prepare_windows_runtime_env_vars(
             )
     };
     let layout = WindowsRuntimeLayout::new(runtime_root);
-    layout.ensure_dirs()?;
-    if !Sandbox::windows_supports_direct_writable_dir(&layout.runtime_root)
-        && layout
-            .runtime_root
-            .to_string_lossy()
-            .to_ascii_lowercase()
-            .contains("\\temp\\low\\")
+    std::fs::create_dir_all(&layout.runtime_root).map_err(|e| {
+        NonoError::SandboxInit(format!(
+            "Failed to prepare Windows runtime state directory {}: {}",
+            layout.runtime_root.display(),
+            e
+        ))
+    })?;
+    if runtime_root_needs_low_integrity_label(&layout.runtime_root)
+        && !Sandbox::windows_supports_direct_writable_dir(&layout.runtime_root)
+        && !try_set_low_integrity_label(&layout.runtime_root)
     {
-        let _ = try_set_low_integrity_label(&layout.runtime_root);
+        return Err(NonoError::SandboxInit(format!(
+            "Failed to prepare Windows writable runtime root {}: the directory is not low-integrity-compatible",
+            layout.runtime_root.display()
+        )));
     }
+    layout.ensure_dirs()?;
 
     if !Sandbox::windows_supports_direct_writable_dir(&layout.runtime_root) {
         return Err(NonoError::SandboxInit(format!(
@@ -2885,6 +2924,9 @@ fn print_allow_launch_services_warning(silent: bool) {
 }
 
 fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> {
+    #[cfg(all(target_os = "windows", debug_assertions))]
+    exec_strategy::set_windows_wfp_test_force_ready(args.dangerous_force_wfp_ready);
+
     // Clean up stale state files from previous nono runs
     sandbox_state::cleanup_stale_state_files();
 
@@ -3632,6 +3674,19 @@ mod tests {
         SandboxArgs::default()
     }
 
+    fn repo_local_tempdir() -> tempfile::TempDir {
+        let root = std::env::current_dir()
+            .expect("cwd")
+            .join("target")
+            .join("test-tmp")
+            .join("nono-cli-main");
+        std::fs::create_dir_all(&root).expect("mkdir test temp root");
+        tempfile::Builder::new()
+            .prefix("nono-cli-")
+            .tempdir_in(root)
+            .expect("tempdir")
+    }
+
     #[test]
     fn test_sensitive_paths_defined() {
         let loaded_policy = policy::load_embedded_policy().expect("policy must load");
@@ -3829,7 +3884,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn test_validate_windows_preview_direct_execution_allows_supported_directory_subset() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = repo_local_tempdir();
         let workdir = dir.path().join("workspace");
         std::fs::create_dir_all(&workdir).expect("mkdir workspace");
         let caps = CapabilitySet::new()
@@ -3870,8 +3925,9 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn test_validate_windows_preview_direct_execution_blocks_unsupported_override_deny() {
-        let dir = tempfile::tempdir().expect("tempdir");
+    fn test_validate_windows_preview_direct_execution_allows_override_deny_when_policy_is_supported(
+    ) {
+        let dir = repo_local_tempdir();
         let flags = ExecutionFlags {
             strategy: exec_strategy::ExecStrategy::Direct,
             workdir: dir.path().to_path_buf(),
@@ -3901,9 +3957,8 @@ mod tests {
             override_deny_paths: vec![dir.path().to_path_buf()],
         };
 
-        let err = validate_windows_preview_direct_execution(&flags, &CapabilitySet::new())
-            .expect_err("override_deny should remain blocked on Windows preview");
-        assert!(err.to_string().contains("deny-override"));
+        validate_windows_preview_direct_execution(&flags, &CapabilitySet::new())
+            .expect("override_deny preprocessing should not be blocked on Windows preview");
     }
 
     #[test]
@@ -3966,7 +4021,7 @@ mod tests {
 
     #[test]
     fn test_execution_start_dir_keeps_workdir_when_covered() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = repo_local_tempdir();
         let canonical = dir.path().canonicalize().expect("canonicalize");
         let mut caps = CapabilitySet::new();
         caps.add_fs(FsCapability::new_dir(dir.path(), AccessMode::Read).expect("grant"));
@@ -3978,7 +4033,7 @@ mod tests {
 
     #[test]
     fn test_execution_start_dir_falls_back_to_root_when_not_covered() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = repo_local_tempdir();
         let caps = CapabilitySet::new();
 
         let start_dir = execution_start_dir(dir.path(), &caps).expect("start dir");

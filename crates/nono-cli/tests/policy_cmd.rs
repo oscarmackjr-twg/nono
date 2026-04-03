@@ -8,19 +8,6 @@ fn nono_bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_nono"))
 }
 
-fn escaped_temp_dir() -> String {
-    let path = std::env::temp_dir().display().to_string();
-    #[cfg(target_os = "windows")]
-    {
-        path.replace('\\', "\\\\")
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        path
-    }
-}
-
 #[test]
 fn test_groups_list_output() {
     let output = nono_bin()
@@ -261,33 +248,35 @@ fn test_show_format_manifest_round_trip() {
     // then feed it back via --config --dry-run.
     let dir = tempfile::tempdir().expect("tempdir");
     let manifest_path = dir.path().join("manifest.json");
+    let temp_dir = std::env::temp_dir()
+        .display()
+        .to_string()
+        .replace('\\', "\\\\");
+    let manifest = serde_json::json!({
+        "version": "0.1.0",
+        "filesystem": {
+            "grants": [{ "path": temp_dir, "access": "read" }]
+        },
+        "network": { "mode": "blocked" }
+    });
     std::fs::write(
         &manifest_path,
-        format!(
-            r#"{{
-            "version": "0.1.0",
-            "filesystem": {{
-                "grants": [{{ "path": "{}", "access": "read" }}]
-            }},
-            "network": {{ "mode": "blocked" }}
-        }}"#,
-            escaped_temp_dir()
-        ),
+        serde_json::to_string_pretty(&manifest).expect("serialize manifest"),
     )
     .expect("write manifest");
 
-    let output = nono_bin()
-        .args([
-            "run",
-            "--config",
-            manifest_path.to_str().expect("path"),
-            "--dry-run",
-            "--",
-            "echo",
-            "hello",
-        ])
-        .output()
-        .expect("failed to run nono");
+    let mut command = nono_bin();
+    command.args([
+        "run",
+        "--config",
+        manifest_path.to_str().expect("path"),
+        "--dry-run",
+    ]);
+    #[cfg(target_os = "windows")]
+    command.args(["--", "cmd", "/c", "echo", "hello"]);
+    #[cfg(not(target_os = "windows"))]
+    command.args(["--", "echo", "hello"]);
+    let output = command.output().expect("failed to run nono");
 
     #[cfg(not(target_os = "windows"))]
     assert!(
@@ -301,11 +290,10 @@ fn test_show_format_manifest_round_trip() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
             !output.status.success(),
-            "expected Windows manifest execution path to fail closed, stderr: {stderr}"
+            "expected Windows manifest round-trip to fail closed, stderr: {stderr}"
         );
         assert!(
-            stderr.contains("Windows preview build")
-                && stderr.contains("partial and still in progress"),
+            stderr.contains("Windows native builds support setup, dry-run, direct execution"),
             "expected current Windows command-surface failure, got: {stderr}"
         );
     }

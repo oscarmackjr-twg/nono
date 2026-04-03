@@ -66,8 +66,7 @@ fn config_with_valid_manifest_is_accepted() {
             "expected Windows manifest execution path to fail closed, stderr: {stderr}"
         );
         assert!(
-            stderr.contains("Windows preview build")
-                && stderr.contains("partial and still in progress"),
+            stderr.contains("Windows native builds support setup, dry-run, direct execution"),
             "expected current Windows command-surface failure, got: {stderr}"
         );
     }

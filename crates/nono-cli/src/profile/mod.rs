@@ -932,8 +932,7 @@ where
 }
 
 /// A complete profile definition
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct Profile {
     /// Optional base profile(s) to inherit from (by name).
     /// Accepts either a single string `"extends": "base"` or an array
@@ -978,6 +977,73 @@ pub struct Profile {
     /// Treated like built-in heavy directories (for example `target`).
     #[serde(default)]
     pub skipdirs: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileDeserialize {
+    /// Optional JSON Schema URI for editor tooling. Parsed and ignored.
+    #[serde(rename = "$schema", default)]
+    _schema: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_extends")]
+    extends: Option<Vec<String>>,
+    #[serde(default)]
+    meta: ProfileMeta,
+    #[serde(default)]
+    security: SecurityConfig,
+    #[serde(default)]
+    filesystem: FilesystemConfig,
+    #[serde(default)]
+    policy: PolicyPatchConfig,
+    #[serde(default)]
+    network: NetworkConfig,
+    #[serde(default, alias = "secrets")]
+    env_credentials: SecretsConfig,
+    #[serde(default)]
+    workdir: WorkdirConfig,
+    #[serde(default)]
+    hooks: HooksConfig,
+    #[serde(default, alias = "undo")]
+    rollback: RollbackConfig,
+    #[serde(default)]
+    open_urls: Option<OpenUrlConfig>,
+    #[serde(default)]
+    allow_launch_services: Option<bool>,
+    #[serde(default)]
+    interactive: bool,
+    #[serde(default)]
+    skipdirs: Vec<String>,
+}
+
+impl From<ProfileDeserialize> for Profile {
+    fn from(raw: ProfileDeserialize) -> Self {
+        Self {
+            extends: raw.extends,
+            meta: raw.meta,
+            security: raw.security,
+            filesystem: raw.filesystem,
+            policy: raw.policy,
+            network: raw.network,
+            env_credentials: raw.env_credentials,
+            workdir: raw.workdir,
+            hooks: raw.hooks,
+            rollback: raw.rollback,
+            open_urls: raw.open_urls,
+            allow_launch_services: raw.allow_launch_services,
+            interactive: raw.interactive,
+            skipdirs: raw.skipdirs,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Profile {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = ProfileDeserialize::deserialize(deserializer)?;
+        Ok(raw.into())
+    }
 }
 
 /// Check whether a profile name is loaded from a user file rather than the built-in set.
@@ -1702,7 +1768,7 @@ mod tests {
 
     #[test]
     fn test_expand_vars() {
-        let _guard = crate::test_env::ENV_LOCK.lock().unwrap();
+        let _guard = crate::test_env::lock_env();
         // Save original HOME to restore after test (avoid polluting other parallel tests)
         let original_home = env::var("HOME").ok();
 
@@ -1723,7 +1789,7 @@ mod tests {
 
     #[test]
     fn test_expand_vars_xdg_state_home() {
-        let _guard = crate::test_env::ENV_LOCK.lock().unwrap();
+        let _guard = crate::test_env::lock_env();
         // $XDG_STATE_HOME must be expanded so that profiles and deny rules
         // can reference it portably. Without this, users cannot write
         // add_deny_access: ["$XDG_STATE_HOME"] and the variable is treated
@@ -1763,7 +1829,7 @@ mod tests {
 
     #[test]
     fn test_expand_vars_xdg_cache_home() {
-        let _guard = crate::test_env::ENV_LOCK.lock().unwrap();
+        let _guard = crate::test_env::lock_env();
         let original_home = env::var("HOME").ok();
         let original_cache = env::var("XDG_CACHE_HOME").ok();
 
@@ -1793,7 +1859,7 @@ mod tests {
 
     #[test]
     fn test_expand_vars_xdg_runtime_dir() {
-        let _guard = crate::test_env::ENV_LOCK.lock().unwrap();
+        let _guard = crate::test_env::lock_env();
         let original_runtime = env::var("XDG_RUNTIME_DIR").ok();
 
         env::set_var("XDG_RUNTIME_DIR", test_xdg_runtime_dir());
@@ -1851,7 +1917,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn test_resolve_user_config_dir_uses_appdata() {
-        let _guard = crate::test_env::ENV_LOCK
+        let _guard = crate::config::test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let tmp = tempdir().expect("tmpdir");
@@ -1882,7 +1948,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn test_expand_vars_uses_windows_home_and_appdata() {
-        let _guard = crate::test_env::ENV_LOCK
+        let _guard = crate::config::test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let original_home = env::var("HOME").ok();
@@ -3783,6 +3849,19 @@ mod tests {
             set.network.network_profile,
             InheritableValue::Set("developer".to_string())
         );
+    }
+
+    #[test]
+    fn test_top_level_schema_field_allowed_in_profile() {
+        let profile: Profile = serde_json::from_str(
+            r#"{
+                "$schema": "https://nono.dev/schemas/nono-profile.schema.json",
+                "meta": { "name": "schema-ok" }
+            }"#,
+        )
+        .expect("top-level $schema must be accepted");
+
+        assert_eq!(profile.meta.name, "schema-ok");
     }
 
     #[test]

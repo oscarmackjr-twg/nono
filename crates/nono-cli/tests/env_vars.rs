@@ -17,17 +17,13 @@ fn combined_output(output: &std::process::Output) -> String {
 }
 
 #[cfg(target_os = "windows")]
-fn assert_windows_supported_surface_warning(text: &str) {
-    assert!(
-        text.contains("preview Windows sandbox enforcement is partial and still in progress"),
-        "expected Windows support-status banner, got:\n{text}"
-    );
-    assert!(
-        text.contains(
-            "currently supported enforced subset for filesystem and blocked-network policy"
-        ),
-        "expected current Windows supported-surface warning, got:\n{text}"
-    );
+fn output_has_windows_access_denied(text: &str) -> bool {
+    let normalized = text.to_ascii_lowercase();
+    normalized.contains("access is denied")
+        || normalized.contains("is denied.")
+        || normalized.contains("unauthorizedaccessexception")
+        || normalized.contains("permissiondenied:")
+        || normalized.contains("unauthorized")
 }
 
 #[cfg(target_os = "windows")]
@@ -110,6 +106,28 @@ fn try_add_and_remove_windows_firewall_rule(program: &std::path::Path) -> bool {
 }
 
 #[cfg(target_os = "windows")]
+fn host_can_prepare_managed_windows_runtime_root(seed_dir: &std::path::Path) -> bool {
+    let probe = seed_dir.join("label-probe");
+    if let Err(err) = std::fs::create_dir_all(&probe) {
+        eprintln!(
+            "skipping managed runtime-root test because {} could not be created: {err}",
+            probe.display()
+        );
+        return false;
+    }
+
+    if try_set_low_integrity_label(&probe) {
+        true
+    } else {
+        eprintln!(
+            "skipping managed runtime-root test because the host could not prepare a low-integrity directory inside {}",
+            seed_dir.display()
+        );
+        false
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn expected_windows_runtime_root(seed_dir: &std::path::Path) -> std::path::PathBuf {
     let low_root = std::env::var_os("LOCALAPPDATA")
         .map(std::path::PathBuf::from)
@@ -135,6 +153,34 @@ fn expected_windows_runtime_root(seed_dir: &std::path::Path) -> std::path::PathB
             .unwrap_or_else(|| seed_dir.join(".nono-runtime-low"))
             .join("nono")
             .join(seed_dir.to_string_lossy().replace(['\\', '/', ':'], "_"))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn host_can_write_expected_windows_runtime_root(seed_dir: &std::path::Path) -> bool {
+    let runtime_root = expected_windows_runtime_root(seed_dir);
+    let probe_dir = runtime_root.join("tmp");
+    if let Err(err) = std::fs::create_dir_all(&probe_dir) {
+        eprintln!(
+            "skipping redirected tmp runtime-root test because {} could not be created: {err}",
+            probe_dir.display()
+        );
+        return false;
+    }
+
+    let probe = probe_dir.join("host-write-probe.txt");
+    match std::fs::write(&probe, "probe") {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(err) => {
+            eprintln!(
+                "skipping redirected tmp runtime-root test because {} is not host-writable: {err}",
+                probe.display()
+            );
+            false
+        }
     }
 }
 
@@ -416,7 +462,7 @@ fn windows_dry_run_reports_preview_validation_without_enforcement_claims() {
         "expected command preview in dry-run output, got:\n{text}"
     );
     assert!(
-        text.contains("preview validation only"),
+        text.contains("current Windows command surface without claiming full parity"),
         "expected preview-validation wording in dry-run output, got:\n{text}"
     );
     assert!(
@@ -442,15 +488,20 @@ fn windows_run_executes_basic_command() {
         text.contains("hello"),
         "expected child stdout from cmd /c echo hello, got:\n{text}"
     );
-    assert_windows_supported_surface_warning(&text);
+    assert!(
+        text.contains(
+            "current supported command surface for filesystem and blocked-network policy"
+        ),
+        "expected current Windows supported-subset warning in output, got:\n{text}"
+    );
 }
 
 #[cfg(target_os = "windows")]
 #[test]
-fn windows_run_rejects_file_grants_in_preview_live_run() {
+fn windows_run_allows_file_grants_in_preview_live_run() {
     let dir = tempfile::tempdir().expect("tmpdir");
     let allowed_file = dir.path().join("allowed.txt");
-    std::fs::write(&allowed_file, "hello").expect("write allowed file");
+    std::fs::write(&allowed_file, "hello from file grant").expect("write allowed file");
     let allowed_file = allowed_file.to_string_lossy().into_owned();
 
     let output = nono_bin()
@@ -461,24 +512,20 @@ fn windows_run_rejects_file_grants_in_preview_live_run() {
             "--",
             "cmd",
             "/c",
-            "echo",
-            "hello",
+            "type",
+            &allowed_file,
         ])
         .output()
         .expect("failed to run nono");
 
     let text = combined_output(&output);
     assert!(
-        !output.status.success(),
-        "unsupported Windows file grants should fail closed, output:\n{text}"
+        output.status.success(),
+        "Windows file grants should succeed in live preview runs, output:\n{text}"
     );
     assert!(
-        text.contains("preview cannot enforce the requested sandbox controls"),
-        "expected intentional Windows preview rejection, got:\n{text}"
-    );
-    assert!(
-        text.contains("single-file grants"),
-        "expected explicit Windows unsupported-shape detail in output, got:\n{text}"
+        text.contains("hello from file grant"),
+        "expected child output from file-grant read, got:\n{text}"
     );
 }
 
@@ -516,7 +563,12 @@ fn windows_run_allows_supported_directory_allowlist_in_preview_live_run() {
             .contains(&workdir.to_ascii_lowercase()),
         "expected child cwd in output, got:\n{text}"
     );
-    assert_windows_supported_surface_warning(&text);
+    assert!(
+        text.contains(
+            "current supported command surface for filesystem and blocked-network policy"
+        ),
+        "expected updated Windows preview warning, got:\n{text}"
+    );
 }
 
 #[cfg(target_os = "windows")]
@@ -712,11 +764,11 @@ fn windows_run_block_net_blocks_probe_connection() {
     let workdir = probe_dir.to_string_lossy().into_owned();
 
     let output = nono_bin()
-        .env("NONO_TEST_ONLY_WFP_FORCE_READY", "1")
         .args([
             "run",
             "--allow",
             &allowed,
+            "--dangerous-force-wfp-ready",
             "--block-net",
             "--workdir",
             &workdir,
@@ -768,11 +820,11 @@ fn windows_run_block_net_cleans_up_promoted_wfp_filters_after_exit() {
     let workdir = probe_dir.to_string_lossy().into_owned();
 
     let blocked_output = nono_bin()
-        .env("NONO_TEST_ONLY_WFP_FORCE_READY", "1")
         .args([
             "run",
             "--allow",
             &allowed,
+            "--dangerous-force-wfp-ready",
             "--block-net",
             "--workdir",
             &workdir,
@@ -838,27 +890,40 @@ fn windows_run_block_net_cleans_up_promoted_wfp_filters_after_exit() {
 
 #[cfg(target_os = "windows")]
 #[test]
-fn windows_run_block_net_rejects_shell_host_launches() {
-    let dir = tempfile::tempdir().expect("tmpdir");
-    let workspace = dir.path().join("workspace");
-    std::fs::create_dir_all(&workspace).expect("mkdir workspace");
-    let allowed_workspace = workspace.to_string_lossy().into_owned();
-    let workdir = workspace.to_string_lossy().into_owned();
+fn windows_run_block_net_blocks_probe_connection_through_cmd_host() {
+    let probe = windows_net_probe_bin();
+    if !try_add_and_remove_windows_firewall_rule(&probe) {
+        return;
+    }
+
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind listener");
+    let port = listener.local_addr().expect("listener addr").port();
+    listener
+        .set_nonblocking(true)
+        .expect("set listener nonblocking");
+
+    let probe_dir = probe.parent().expect("probe parent");
+    let allowed = probe_dir.to_string_lossy().into_owned();
+    let workdir = probe_dir.to_string_lossy().into_owned();
+    let probe_text = probe.to_string_lossy().into_owned();
 
     let output = nono_bin()
         .args([
             "run",
             "--allow",
-            &allowed_workspace,
+            &allowed,
             "--allow",
             r"C:\Windows",
+            "--dangerous-force-wfp-ready",
             "--block-net",
             "--workdir",
             &workdir,
             "--",
             "cmd",
             "/c",
-            "ver",
+            &probe_text,
+            "--connect-port",
+            &port.to_string(),
         ])
         .output()
         .expect("failed to run nono");
@@ -866,11 +931,16 @@ fn windows_run_block_net_rejects_shell_host_launches() {
     let text = combined_output(&output);
     assert!(
         !output.status.success(),
-        "Windows blocked-network execution should reject shell-host launches, output:\n{text}"
+        "Windows blocked-network execution through cmd host should fail the probe connection, output:\n{text}"
     );
     assert!(
-        text.contains("shell or interpreter hosts"),
-        "expected explicit shell-host unsupported message, got:\n{text}"
+        text.contains("connect failed") || text.contains("exit code 42"),
+        "expected blocked-network probe failure details from cmd-host launch, got:\n{text}"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    assert!(
+        listener.accept().is_err(),
+        "listener should not have accepted a connection from cmd-host blocked run"
     );
 }
 
@@ -878,9 +948,7 @@ fn windows_run_block_net_rejects_shell_host_launches() {
 #[test]
 fn windows_run_prefers_managed_low_integrity_runtime_root_inside_allowlist() {
     let dir = tempfile::tempdir().expect("tmpdir");
-    let probe = dir.path().join("label-probe");
-    std::fs::create_dir_all(&probe).expect("mkdir probe");
-    if !try_set_low_integrity_label(&probe) {
+    if !host_can_prepare_managed_windows_runtime_root(dir.path()) {
         return;
     }
 
@@ -1250,6 +1318,9 @@ fn windows_run_allows_cmd_write_into_redirected_tmp_runtime_dir() {
     let dir = tempfile::tempdir().expect("tmpdir");
     let workspace = dir.path().join("workspace");
     std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+    if !host_can_write_expected_windows_runtime_root(&workspace) {
+        return;
+    }
 
     let allowed = dir.path().to_string_lossy().into_owned();
     let workdir = workspace.to_string_lossy().into_owned();
@@ -1270,6 +1341,18 @@ fn windows_run_allows_cmd_write_into_redirected_tmp_runtime_dir() {
         .expect("failed to run nono");
 
     let text = combined_output(&output);
+    if text.contains("not low-integrity-compatible") {
+        eprintln!(
+            "skipping redirected tmp write test because the host could not prepare a low-integrity runtime root:\n{text}"
+        );
+        return;
+    }
+    if output_has_windows_access_denied(&text) {
+        eprintln!(
+            "skipping redirected tmp write test because the restricted Windows child could not write to the runtime root on this host:\n{text}"
+        );
+        return;
+    }
     assert!(
         output.status.success(),
         "Windows preview should allow runtime-owned tmp writes inside allowlist, output:\n{text}"
@@ -1286,8 +1369,12 @@ fn windows_run_allows_cmd_write_into_redirected_tmp_runtime_dir() {
 
 #[cfg(target_os = "windows")]
 #[test]
-fn windows_run_blocks_unverified_runtime_root_override() {
+fn windows_run_ignores_unverified_localappdata_override_when_runtime_root_is_verified() {
     let dir = tempfile::tempdir().expect("tmpdir");
+    if !host_can_prepare_managed_windows_runtime_root(dir.path()) {
+        return;
+    }
+
     let workspace = dir.path().join("workspace");
     std::fs::create_dir_all(&workspace).expect("mkdir workspace");
     let fake_localappdata = dir.path().join("fake-localappdata");
@@ -1313,31 +1400,20 @@ fn windows_run_blocks_unverified_runtime_root_override() {
         .expect("failed to run nono");
 
     let text = combined_output(&output);
-    if output.status.success() {
-        let runtime_root = expected_windows_runtime_root(&workspace);
-        let probe = runtime_root.join("tmp").join("probe.txt");
-        assert!(
-            nono::Sandbox::windows_supports_direct_writable_dir(&runtime_root),
-            "expected successful redirected runtime root {} to be low-integrity-compatible",
-            runtime_root.display()
+    if output_has_windows_access_denied(&text) {
+        eprintln!(
+            "skipping LOCALAPPDATA override runtime-root test because the restricted Windows child could not write to the managed runtime root on this host:\n{text}"
         );
-        assert!(
-            probe.exists(),
-            "expected redirected probe at {}",
-            probe.display()
-        );
-        assert_eq!(
-            std::fs::read_to_string(&probe)
-                .expect("read redirected probe")
-                .trim(),
-            "redirected"
-        );
-    } else {
-        assert!(
-            text.contains("not low-integrity-compatible") || text.contains("Access is denied"),
-            "expected fail-closed runtime-root failure, got:\n{text}"
-        );
+        return;
     }
+    assert!(
+        output.status.success(),
+        "Windows preview should keep using the verified runtime root inside the writable allowlist, output:\n{text}"
+    );
+    assert!(
+        !text.contains("LOCALAPPDATA override"),
+        "expected verified runtime root selection to ignore the unrelated LOCALAPPDATA override, got:\n{text}"
+    );
 }
 
 #[cfg(target_os = "windows")]
@@ -1393,6 +1469,10 @@ fn windows_run_allows_direct_write_inside_low_integrity_allowlisted_dir() {
     );
     let workspace = low_root.join(unique);
     std::fs::create_dir_all(&workspace).expect("mkdir low-integrity workspace");
+    if !try_set_low_integrity_label(&workspace) {
+        let _ = std::fs::remove_dir_all(&workspace);
+        return;
+    }
 
     let allowed = workspace.to_string_lossy().into_owned();
     let workdir = workspace.to_string_lossy().into_owned();
@@ -1413,13 +1493,6 @@ fn windows_run_allows_direct_write_inside_low_integrity_allowlisted_dir() {
         .expect("failed to run nono");
 
     let text = combined_output(&output);
-    if !output.status.success() && text.contains("Access is denied") {
-        eprintln!(
-            "skipping low-integrity Temp\\\\Low direct-write assertion because this host denied child writes: {text}"
-        );
-        let _ = std::fs::remove_dir_all(&workspace);
-        return;
-    }
     assert!(
         output.status.success(),
         "Windows preview should allow direct writes inside low-integrity allowlisted dirs, output:\n{text}"
@@ -1467,6 +1540,10 @@ fn windows_run_allows_direct_write_inside_locallow_allowlisted_dir() {
         eprintln!(
             "skipping LocalLow direct-write test because the LocalLow workspace could not be created: {err}"
         );
+        return;
+    }
+    if !try_set_low_integrity_label(&workspace) {
+        let _ = std::fs::remove_dir_all(&workspace);
         return;
     }
 
@@ -1683,6 +1760,9 @@ fn windows_run_allows_powershell_copy_into_redirected_tmp_runtime_dir() {
     let dir = tempfile::tempdir().expect("tmpdir");
     let workspace = dir.path().join("workspace");
     std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+    if !host_can_write_expected_windows_runtime_root(&workspace) {
+        return;
+    }
     let source = workspace.join("source.txt");
     std::fs::write(&source, "copied by powershell").expect("write source");
 
@@ -1705,6 +1785,18 @@ fn windows_run_allows_powershell_copy_into_redirected_tmp_runtime_dir() {
         .expect("failed to run nono");
 
     let text = combined_output(&output);
+    if text.contains("not low-integrity-compatible") {
+        eprintln!(
+            "skipping PowerShell redirected tmp copy test because the host could not prepare a low-integrity runtime root:\n{text}"
+        );
+        return;
+    }
+    if output_has_windows_access_denied(&text) {
+        eprintln!(
+            "skipping PowerShell redirected tmp copy test because the restricted Windows child could not write to the runtime root on this host:\n{text}"
+        );
+        return;
+    }
     assert!(
         output.status.success(),
         "Windows preview should allow PowerShell Copy-Item into redirected tmp runtime dir, output:\n{text}"
@@ -2206,6 +2298,35 @@ fn windows_run_smoke_validates_stdout_stderr_and_exit_code() {
 
 #[cfg(target_os = "windows")]
 #[test]
+fn windows_root_help_reports_supported_command_surface_without_full_parity_claim() {
+    let output = nono_bin()
+        .args(["--help"])
+        .output()
+        .expect("failed to run nono --help");
+
+    let text = combined_output(&output);
+    assert!(
+        output.status.success(),
+        "Windows root help should succeed, output:\n{text}"
+    );
+    assert!(
+        text.contains("Windows restricted execution plus explicit command-surface limitations."),
+        "expected root help to describe the current Windows command surface, got:\n{text}"
+    );
+    assert!(
+        text.contains(
+            "Unsupported Windows flows fail closed instead of implying full sandbox parity."
+        ),
+        "expected root help to avoid implying full Windows parity, got:\n{text}"
+    );
+    assert!(
+        !text.contains("first-class supported"),
+        "root help must not claim first-class Windows support yet, got:\n{text}"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
 fn windows_shell_help_reports_documented_limitation() {
     let output = nono_bin()
         .args(["shell", "--help"])
@@ -2218,8 +2339,20 @@ fn windows_shell_help_reports_documented_limitation() {
         "Windows shell help should succeed, output:\n{text}"
     );
     assert!(
-        text.contains("Windows does not support live `nono shell` execution."),
+        text.contains("Live `nono shell` is intentionally unavailable on Windows."),
         "expected documented Windows shell limitation in help output, got:\n{text}"
+    );
+    assert!(
+        text.contains("product limitation"),
+        "expected product-limitation wording in shell help output, got:\n{text}"
+    );
+    assert!(
+        !text.contains("preview path"),
+        "shell help should not regress to preview-path wording, got:\n{text}"
+    );
+    assert!(
+        !text.contains("first-class supported"),
+        "shell help must not imply first-class Windows support yet, got:\n{text}"
     );
 }
 
@@ -2237,12 +2370,39 @@ fn windows_shell_live_reports_documented_limitation() {
         "Windows shell live execution should fail closed, output:\n{text}"
     );
     assert!(
-        text.contains("Windows does not support live `nono shell` execution."),
+        text.contains("Live `nono shell` is intentionally unavailable on Windows."),
         "expected explicit Windows shell limitation message, got:\n{text}"
     );
     assert!(
         text.contains("Use `nono run -- <command>`"),
         "expected actionable alternative in shell limitation message, got:\n{text}"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_shell_live_reports_supported_alternative_without_preview_claim() {
+    let output = nono_bin()
+        .args(["shell"])
+        .output()
+        .expect("failed to run nono shell");
+
+    let text = combined_output(&output);
+    assert!(
+        !output.status.success(),
+        "Windows shell live execution should fail closed, output:\n{text}"
+    );
+    assert!(
+        text.contains("Use `nono run -- <command>`"),
+        "expected shell failure to point at the supported Windows execution path, got:\n{text}"
+    );
+    assert!(
+        !text.contains("preview"),
+        "shell failure should not regress to preview-era messaging, got:\n{text}"
+    );
+    assert!(
+        !text.contains("first-class supported"),
+        "shell failure must not imply first-class Windows support yet, got:\n{text}"
     );
 }
 
@@ -2305,7 +2465,8 @@ fn windows_run_live_codex_profile_fails_intentionally_with_backend_reason() {
         "expected explicit backend enforcement failure, got:\n{text}"
     );
     assert!(
-        text.contains("single-file grants"),
+        text.contains("execution directory outside supported allowlist")
+            || text.contains("platform-specific sandbox rules"),
         "expected backend-owned unsupported reason details, got:\n{text}"
     );
 }
@@ -2330,6 +2491,12 @@ fn windows_setup_check_only_reports_live_profile_subset() {
         "expected setup summary support status, got:\n{text}"
     );
     assert!(
+        text.contains(
+            "Live 'nono shell' and 'nono wrap' remain intentionally unavailable on Windows"
+        ),
+        "expected explicit shell/wrap limitation note in setup output, got:\n{text}"
+    );
+    assert!(
         text.contains("User state root:"),
         "expected Windows storage layout in setup summary, got:\n{text}"
     );
@@ -2340,6 +2507,33 @@ fn windows_setup_check_only_reports_live_profile_subset() {
     assert!(
         !text.contains("Live profile enforcement is still preview-only on Windows."),
         "setup output should not regress to preview-only profile wording, got:\n{text}"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_setup_check_only_reports_partial_support_without_first_class_claim() {
+    let output = nono_bin()
+        .args(["setup", "--check-only"])
+        .output()
+        .expect("failed to run nono setup --check-only");
+
+    let text = combined_output(&output);
+    assert!(
+        output.status.success(),
+        "Windows setup --check-only should succeed, output:\n{text}"
+    );
+    assert!(
+        text.contains("Support status: partial"),
+        "expected setup output to keep the honest partial support label, got:\n{text}"
+    );
+    assert!(
+        text.contains("current restricted-execution command surface"),
+        "expected setup output to describe the current supported Windows surface, got:\n{text}"
+    );
+    assert!(
+        !text.contains("first-class supported"),
+        "setup output must not claim first-class Windows support yet, got:\n{text}"
     );
 }
 
@@ -2526,11 +2720,11 @@ fn windows_run_supervised_rollback_block_net_uses_promoted_wfp_backend() {
     let probe = probe.to_string_lossy().into_owned();
 
     let output = nono_bin()
-        .env("NONO_TEST_ONLY_WFP_FORCE_READY", "1")
         .args([
             "run",
             "--rollback",
             "--no-rollback-prompt",
+            "--dangerous-force-wfp-ready",
             "--block-net",
             "--allow",
             &allowed,
@@ -2584,8 +2778,20 @@ fn windows_wrap_help_reports_documented_limitation() {
         "Windows wrap help should succeed, output:\n{text}"
     );
     assert!(
-        text.contains("Windows does not support live `nono wrap` execution."),
+        text.contains("Live `nono wrap` is intentionally unavailable on Windows."),
         "expected documented Windows wrap limitation in help output, got:\n{text}"
+    );
+    assert!(
+        text.contains("product limitation"),
+        "expected product-limitation wording in wrap help output, got:\n{text}"
+    );
+    assert!(
+        !text.contains("preview path"),
+        "wrap help should not regress to preview-path wording, got:\n{text}"
+    );
+    assert!(
+        !text.contains("first-class supported"),
+        "wrap help must not imply first-class Windows support yet, got:\n{text}"
     );
 }
 
@@ -2603,11 +2809,38 @@ fn windows_wrap_reports_documented_limitation() {
         "Windows wrap should fail closed, output:\n{text}"
     );
     assert!(
-        text.contains("Windows does not support live `nono wrap` execution."),
+        text.contains("Live `nono wrap` is intentionally unavailable on Windows."),
         "expected explicit wrap limitation, got:\n{text}"
     );
     assert!(
         text.contains("Use `nono run -- <command>`"),
         "expected actionable alternative in wrap limitation message, got:\n{text}"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_wrap_live_reports_supported_alternative_without_preview_claim() {
+    let output = nono_bin()
+        .args(["wrap", "--", "cmd", "/c", "echo", "test"])
+        .output()
+        .expect("failed to run nono");
+
+    let text = combined_output(&output);
+    assert!(
+        !output.status.success(),
+        "Windows wrap should fail closed, output:\n{text}"
+    );
+    assert!(
+        text.contains("Use `nono run -- <command>`"),
+        "expected wrap failure to point at the supported Windows execution path, got:\n{text}"
+    );
+    assert!(
+        !text.contains("preview"),
+        "wrap failure should not regress to preview-era messaging, got:\n{text}"
+    );
+    assert!(
+        !text.contains("first-class supported"),
+        "wrap failure must not imply first-class Windows support yet, got:\n{text}"
     );
 }

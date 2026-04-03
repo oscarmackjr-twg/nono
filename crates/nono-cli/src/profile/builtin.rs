@@ -220,7 +220,8 @@ mod tests {
             "deny_macos_private".to_string(),
             "deny_shell_configs".to_string(),
             "deny_shell_history".to_string(),
-            "homebrew".to_string(),
+            "homebrew_linux".to_string(),
+            "homebrew_macos".to_string(),
             "system_read_linux_core".to_string(),
             "system_read_macos".to_string(),
             "system_read_windows".to_string(),
@@ -297,7 +298,6 @@ mod tests {
             );
         }
     }
-
     /// Regression test: verifies that all built-in profiles — regardless of
     /// their signal_mode setting — will produce Seatbelt rules that allow
     /// signaling child processes within the same sandbox.
@@ -314,6 +314,24 @@ mod tests {
     fn test_all_profiles_signal_mode_resolves() {
         use crate::capability_ext::CapabilitySetExt;
         use tempfile::tempdir;
+
+        let _guard = crate::test_env::lock_env();
+        #[cfg(target_os = "windows")]
+        let _env = crate::test_env::EnvVarGuard::set_all(&[
+            ("HOME", r"C:\Users\nono-test"),
+            ("XDG_CONFIG_HOME", r"C:\Users\nono-test\.config"),
+            ("XDG_DATA_HOME", r"C:\Users\nono-test\.local\share"),
+            ("XDG_STATE_HOME", r"C:\Users\nono-test\.local\state"),
+            ("XDG_CACHE_HOME", r"C:\Users\nono-test\.cache"),
+        ]);
+        #[cfg(not(target_os = "windows"))]
+        let _env = crate::test_env::EnvVarGuard::set_all(&[
+            ("HOME", "/home/nono-test"),
+            ("XDG_CONFIG_HOME", "/home/nono-test/.config"),
+            ("XDG_DATA_HOME", "/home/nono-test/.local/share"),
+            ("XDG_STATE_HOME", "/home/nono-test/.local/state"),
+            ("XDG_CACHE_HOME", "/home/nono-test/.cache"),
+        ]);
 
         let workdir = tempdir().expect("tmpdir");
         let args = crate::cli::SandboxArgs::default();

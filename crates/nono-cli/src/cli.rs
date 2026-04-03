@@ -10,7 +10,7 @@ use std::path::PathBuf;
 const STYLES: Styles = Styles::plain().header(Style::new().bold());
 
 #[cfg(target_os = "windows")]
-const CLI_ABOUT: &str = "A capability-based shell for running untrusted AI agents and processes\nwith Windows preview sandbox support. Preview commands report limitations\nexplicitly and do not imply full sandbox parity yet.";
+const CLI_ABOUT: &str = "A capability-based shell for running untrusted AI agents and processes\nwith Windows restricted execution plus explicit command-surface limitations.\nUnsupported Windows flows fail closed instead of implying full sandbox parity.";
 
 #[cfg(not(target_os = "windows"))]
 const CLI_ABOUT: &str = "A capability-based shell for running untrusted AI agents and processes\nwith OS-enforced filesystem and network isolation.";
@@ -20,7 +20,9 @@ const SHELL_AFTER_HELP: &str = "\x1b[1mEXAMPLES\x1b[0m
   nono shell --dry-run --allow .              # Inspect shell policy without launching
 
 \x1b[1mWINDOWS\x1b[0m
-  Windows does not support live `nono shell` execution.
+  Live `nono shell` is intentionally unavailable on Windows.
+  Interactive shell mode is a current Windows product limitation,
+  not a silent fallback or partially-enforced support claim.
   Use `nono run -- <command>` for supported direct execution,
   or `nono run --dry-run ...` to inspect policy.";
 
@@ -36,25 +38,49 @@ const WRAP_AFTER_HELP: &str = "\x1b[1mEXAMPLES\x1b[0m
   nono wrap --dry-run -- cmd /c echo hello    # Inspect wrap policy without launching
 
 \x1b[1mWINDOWS\x1b[0m
-  Windows does not support live `nono wrap` execution.
+  Live `nono wrap` is intentionally unavailable on Windows.
+  One-way wrap/apply mode is a current Windows product limitation,
+  not a silent fallback or partially-enforced support claim.
   Use `nono run -- <command>` for supported execution,
   or `nono wrap --dry-run ...` to inspect wrap policy.";
 
-#[cfg(not(target_os = "windows"))]
-const WRAP_AFTER_HELP: &str = "\x1b[1mEXAMPLES\x1b[0m
-  nono wrap --allow . -- cargo build           # Sandbox and exec into cargo build
-  nono wrap --profile developer -- cargo test  # Use a named profile
+#[cfg(target_os = "windows")]
+const ROOT_HELP_TEMPLATE: &str = "\
+{about-with-newline}
+\x1b[1mUSAGE\x1b[0m
+  nono <command> [flags]
+
+\x1b[1mGETTING STARTED\x1b[0m
+  setup      Set up nono on this system
+
+\x1b[1mCORE USAGE\x1b[0m
+  run        Run a command inside the sandbox
+  shell      Inspect shell policy; live shell is unsupported on Windows
+  wrap       Inspect wrap policy or exec into command; live wrap is unsupported on Windows
+
+\x1b[1mEXPLORATION & DEBUGGING\x1b[0m
+  learn      Trace a command to discover required filesystem paths
+  why        Check why a path or network operation would be allowed or denied
+
+\x1b[1mSESSION MANAGEMENT\x1b[0m
+  rollback   Manage rollback sessions (browse, restore, cleanup)
+  audit      View audit trail of sandboxed commands
+  trust      Manage file trust and attestation
+
+\x1b[1mPOLICY & PROFILES\x1b[0m
+  policy     Inspect policy groups, profiles, and security rules
+  profile    Create and manage nono profiles
+
+\x1b[1mOPTIONS\x1b[0m
+{options}
+
+\x1b[1mLEARN MORE\x1b[0m
+  Use `nono <command> --help` for more information about a command.
+  Read the docs at https://nono.sh/docs
 ";
 
-/// nono - The opposite of YOLO
-///
-/// A capability-based shell for running untrusted AI agents and processes.
-#[derive(Parser, Debug)]
-#[command(name = "nono")]
-#[command(author, version, about = CLI_ABOUT, long_about = None)]
-#[command(styles = STYLES, next_help_heading = "OPTIONS")]
-#[command(subcommand_help_heading = "")]
-#[command(help_template = "\
+#[cfg(not(target_os = "windows"))]
+const ROOT_HELP_TEMPLATE: &str = "\
 {about-with-newline}
 \x1b[1mUSAGE\x1b[0m
   nono <command> [flags]
@@ -86,13 +112,29 @@ const WRAP_AFTER_HELP: &str = "\x1b[1mEXAMPLES\x1b[0m
 \x1b[1mLEARN MORE\x1b[0m
   Use `nono <command> --help` for more information about a command.
   Read the docs at https://nono.sh/docs
-")]
+";
+
+#[cfg(not(target_os = "windows"))]
+const WRAP_AFTER_HELP: &str = "\x1b[1mEXAMPLES\x1b[0m
+  nono wrap --allow . -- cargo build           # Sandbox and exec into cargo build
+  nono wrap --profile developer -- cargo test  # Use a named profile
+";
+
+/// nono - The opposite of YOLO
+///
+/// A capability-based shell for running untrusted AI agents and processes.
+#[derive(Parser, Debug)]
+#[command(name = "nono")]
+#[command(author, version, about = CLI_ABOUT, long_about = None)]
+#[command(styles = STYLES, next_help_heading = "OPTIONS")]
+#[command(subcommand_help_heading = "")]
+#[command(help_template = ROOT_HELP_TEMPLATE)]
 pub struct Cli {
     /// Silent mode - suppress all nono output (banner, summary, status)
     #[arg(long, short = 's', global = true, help_heading = "OPTIONS")]
     pub silent: bool,
 
-    /// Color theme for output (mocha, latte, frappe, macchiato, tokyo-night, minimal)
+    /// Color theme for output (mocha, latte, frappe, macchiato, tokyo-night, dark-factory, minimal)
     #[arg(
         long,
         global = true,
@@ -701,6 +743,11 @@ pub struct SandboxArgs {
     #[arg(long, help_heading = "OPTIONS")]
     pub allow_launch_services: bool,
 
+    /// Internal: force WFP readiness for test-built Windows binaries.
+    #[cfg(debug_assertions)]
+    #[arg(long, hide = true, help_heading = "OPTIONS")]
+    pub dangerous_force_wfp_ready: bool,
+
     /// Capability manifest file (JSON). A fully-resolved sandbox specification —
     /// mutually exclusive with all other sandbox configuration flags.
     #[arg(
@@ -915,6 +962,8 @@ impl From<WrapSandboxArgs> for SandboxArgs {
             allow_launch_services: args.allow_launch_services,
             config: args.config,
             verbose: args.verbose,
+            #[cfg(debug_assertions)]
+            dangerous_force_wfp_ready: false,
             dry_run: args.dry_run,
         }
     }
@@ -1713,7 +1762,7 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn test_root_help_mentions_windows_preview() {
+    fn test_root_help_mentions_windows_restricted_execution_surface() {
         let mut cmd = Cli::command();
         let mut buf = Vec::new();
         cmd.write_long_help(&mut buf)
@@ -1721,8 +1770,16 @@ mod tests {
         let help = String::from_utf8(buf).expect("help is not utf-8");
 
         assert!(
-            help.contains("Windows preview sandbox support"),
-            "root help should mention Windows preview status"
+            help.contains("Windows restricted execution plus explicit command-surface limitations"),
+            "root help should mention the Windows command surface"
+        );
+        assert!(
+            help.contains("live shell is unsupported on Windows"),
+            "root help should make shell limitation explicit on Windows"
+        );
+        assert!(
+            help.contains("live wrap is unsupported on Windows"),
+            "root help should make wrap limitation explicit on Windows"
         );
     }
 

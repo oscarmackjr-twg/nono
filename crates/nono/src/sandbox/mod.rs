@@ -7,7 +7,6 @@
 
 use crate::capability::CapabilitySet;
 use crate::error::Result;
-#[cfg(target_os = "windows")]
 use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "linux")]
@@ -307,7 +306,6 @@ pub enum WindowsNetworkPolicyMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowsNetworkLaunchSupport {
     Supported,
-    UnsupportedShellHost,
 }
 
 /// Windows backend selection for a given network enforcement shape.
@@ -382,6 +380,12 @@ impl WindowsUnsupportedNetworkIssue {
 pub struct WindowsNetworkPolicy {
     /// The primary network mode requested by the capability set.
     pub mode: WindowsNetworkPolicyMode,
+    /// Explicit outbound connect allowlist ports.
+    pub tcp_connect_ports: Vec<u16>,
+    /// Explicit inbound bind allowlist ports.
+    pub tcp_bind_ports: Vec<u16>,
+    /// Loopback-only ports allowed for both connect and bind paths.
+    pub localhost_ports: Vec<u16>,
     /// Network capability shapes that are intentionally not in the first
     /// enforceable subset.
     pub unsupported: Vec<WindowsUnsupportedNetworkIssue>,
@@ -429,6 +433,13 @@ impl WindowsNetworkPolicy {
             self.preferred_backend.label(),
             self.active_backend.label()
         )
+    }
+
+    #[must_use]
+    pub fn has_port_rules(&self) -> bool {
+        !self.tcp_connect_ports.is_empty()
+            || !self.tcp_bind_ports.is_empty()
+            || !self.localhost_ports.is_empty()
     }
 }
 
@@ -490,8 +501,69 @@ impl WindowsFilesystemPolicy {
     #[must_use]
     pub fn covers_path(&self, path: &Path, required: crate::AccessMode) -> bool {
         self.rules.iter().any(|rule| {
-            !rule.is_file && path.starts_with(&rule.path) && rule.access.contains(required)
+            if !rule.access.contains(required) {
+                return false;
+            }
+
+            if rule.is_file {
+                #[cfg(target_os = "windows")]
+                {
+                    windows::windows_paths_equal_case_insensitive(path, &rule.path)
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    path == rule.path
+                }
+            } else {
+                #[cfg(target_os = "windows")]
+                {
+                    windows::windows_paths_start_with_case_insensitive(path, &rule.path)
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    path.starts_with(&rule.path)
+                }
+            }
         })
+    }
+
+    #[must_use]
+    pub fn covers_execution_dir(&self, path: &Path) -> bool {
+        self.rules.iter().any(|rule| {
+            !rule.is_file && {
+                #[cfg(target_os = "windows")]
+                {
+                    windows::windows_paths_start_with_case_insensitive(path, &rule.path)
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    path.starts_with(&rule.path)
+                }
+            }
+        })
+    }
+
+    #[must_use]
+    pub fn covers_writable_directory_path(&self, path: &Path) -> bool {
+        self.rules.iter().any(|rule| {
+            !rule.is_file && rule.access.contains(crate::AccessMode::Write) && {
+                #[cfg(target_os = "windows")]
+                {
+                    windows::windows_paths_start_with_case_insensitive(path, &rule.path)
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    path.starts_with(&rule.path)
+                }
+            }
+        })
+    }
+
+    #[must_use]
+    pub fn has_user_intent_directory_rules(&self) -> bool {
+        self.rules
+            .iter()
+            .any(|rule| !rule.is_file && rule.source.is_user_intent())
     }
 
     #[must_use]
