@@ -151,6 +151,18 @@ pub struct CustomCredentialDef {
     /// When non-empty, only matching method+path combinations are allowed.
     #[serde(default)]
     pub endpoint_rules: Vec<nono_proxy::config::EndpointRule>,
+
+    /// Optional path to a PEM-encoded CA certificate file for upstream TLS.
+    ///
+    /// When set, the proxy trusts this CA in addition to the system roots
+    /// when connecting to the upstream for this route. Required for upstreams
+    /// with self-signed or private CA certificates (e.g., Kubernetes API servers).
+    ///
+    /// Supports absolute paths and tilde (`~/…`) expansion. Relative paths
+    /// resolve against the working directory; prefer absolute paths to avoid
+    /// ambiguity.
+    #[serde(default)]
+    pub tls_ca: Option<String>,
 }
 
 fn default_inject_header() -> String {
@@ -1712,6 +1724,7 @@ pub fn list_profiles() -> Vec<String> {
 mod tests {
     use super::*;
     use std::env;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
     use tempfile::tempdir;
 
     #[cfg(target_os = "windows")]
@@ -1754,6 +1767,14 @@ mod tests {
         "/run/user/1000"
     }
 
+    fn env_lock() -> MutexGuard<'static, ()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        match ENV_LOCK.get_or_init(|| Mutex::new(())).lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
     #[test]
     fn test_valid_profile_names() {
         assert!(is_valid_profile_name("claude-code"));
@@ -1768,7 +1789,7 @@ mod tests {
 
     #[test]
     fn test_expand_vars() {
-        let _guard = crate::test_env::ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         // Save original HOME to restore after test (avoid polluting other parallel tests)
         let original_home = env::var("HOME").ok();
 
@@ -1789,7 +1810,7 @@ mod tests {
 
     #[test]
     fn test_expand_vars_xdg_state_home() {
-        let _guard = crate::test_env::ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         // $XDG_STATE_HOME must be expanded so that profiles and deny rules
         // can reference it portably. Without this, users cannot write
         // add_deny_access: ["$XDG_STATE_HOME"] and the variable is treated
@@ -1829,7 +1850,7 @@ mod tests {
 
     #[test]
     fn test_expand_vars_xdg_cache_home() {
-        let _guard = crate::test_env::ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         let original_home = env::var("HOME").ok();
         let original_cache = env::var("XDG_CACHE_HOME").ok();
 
@@ -1859,7 +1880,7 @@ mod tests {
 
     #[test]
     fn test_expand_vars_xdg_runtime_dir() {
-        let _guard = crate::test_env::ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         let original_runtime = env::var("XDG_RUNTIME_DIR").ok();
 
         env::set_var("XDG_RUNTIME_DIR", test_xdg_runtime_dir());
@@ -1890,7 +1911,7 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn test_resolve_user_config_dir_uses_valid_absolute_xdg() {
-        let _guard = crate::test_env::ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         let tmp = tempdir().expect("tmpdir");
         env::set_var("XDG_CONFIG_HOME", tmp.path());
         let resolved = resolve_user_config_dir().expect("resolve user config dir");
@@ -1904,7 +1925,7 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn test_resolve_user_config_dir_falls_back_on_relative_xdg() {
-        let _guard = crate::test_env::ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         let expected_home = home_dir().expect("home dir");
         env::set_var("XDG_CONFIG_HOME", "relative/path");
 
@@ -2331,6 +2352,7 @@ mod tests {
             query_param_name: None,
             env_var: None,
             endpoint_rules: vec![],
+            tls_ca: None,
         }
     }
 
@@ -2490,6 +2512,7 @@ mod tests {
             query_param_name: None,
             env_var: None,
             endpoint_rules: vec![],
+            tls_ca: None,
         };
         assert!(validate_custom_credential("telegram", &cred).is_ok());
     }
@@ -2507,6 +2530,7 @@ mod tests {
             query_param_name: None,
             env_var: None,
             endpoint_rules: vec![],
+            tls_ca: None,
         };
         let result = validate_custom_credential("telegram", &cred);
         let err = result.expect_err("missing path_pattern should be rejected");
@@ -2526,6 +2550,7 @@ mod tests {
             query_param_name: None,
             env_var: None,
             endpoint_rules: vec![],
+            tls_ca: None,
         };
         let result = validate_custom_credential("telegram", &cred);
         let err = result.expect_err("pattern without {} should be rejected");
@@ -2545,6 +2570,7 @@ mod tests {
             query_param_name: None,
             env_var: None,
             endpoint_rules: vec![],
+            tls_ca: None,
         };
         assert!(validate_custom_credential("telegram", &cred).is_ok());
     }
@@ -2562,6 +2588,7 @@ mod tests {
             query_param_name: None,
             env_var: None,
             endpoint_rules: vec![],
+            tls_ca: None,
         };
         let result = validate_custom_credential("telegram", &cred);
         let err = result.expect_err("replacement without {} should be rejected");
@@ -2581,6 +2608,7 @@ mod tests {
             query_param_name: Some("key".to_string()),
             env_var: None,
             endpoint_rules: vec![],
+            tls_ca: None,
         };
         assert!(validate_custom_credential("google_maps", &cred).is_ok());
     }
@@ -2598,6 +2626,7 @@ mod tests {
             query_param_name: None, // Missing required field
             env_var: None,
             endpoint_rules: vec![],
+            tls_ca: None,
         };
         let result = validate_custom_credential("google_maps", &cred);
         let err = result.expect_err("missing query_param_name should be rejected");
@@ -2617,6 +2646,7 @@ mod tests {
             query_param_name: Some("".to_string()), // Empty
             env_var: None,
             endpoint_rules: vec![],
+            tls_ca: None,
         };
         let result = validate_custom_credential("google_maps", &cred);
         let err = result.expect_err("empty query_param_name should be rejected");
@@ -2636,6 +2666,7 @@ mod tests {
             query_param_name: None,
             env_var: None,
             endpoint_rules: vec![],
+            tls_ca: None,
         };
         // BasicAuth mode doesn't require additional fields
         // Credential value is expected to be "username:password" format
@@ -2956,6 +2987,7 @@ mod tests {
                 query_param_name: None,
                 env_var: None,
                 endpoint_rules: vec![],
+                tls_ca: None,
             },
         );
 
@@ -2973,6 +3005,7 @@ mod tests {
                 query_param_name: None,
                 env_var: None,
                 endpoint_rules: vec![],
+                tls_ca: None,
             },
         );
 
@@ -3108,6 +3141,7 @@ mod tests {
                 query_param_name: None,
                 env_var: None,
                 endpoint_rules: vec![],
+                tls_ca: None,
             },
         );
 
@@ -3125,6 +3159,7 @@ mod tests {
                 query_param_name: None,
                 env_var: None,
                 endpoint_rules: vec![],
+                tls_ca: None,
             },
         );
 
@@ -4287,6 +4322,7 @@ mod tests {
             query_param_name: None,
             endpoint_rules: vec![],
             env_var: Some("EXAMPLE_API_KEY".to_string()),
+            tls_ca: None,
         };
         assert!(
             validate_custom_credential("example", &cred).is_ok(),
@@ -4307,6 +4343,7 @@ mod tests {
             query_param_name: None,
             endpoint_rules: vec![],
             env_var: None,
+            tls_ca: None,
         };
         let result = validate_custom_credential("example", &cred);
         let err = result.expect_err("file:// URI without env_var should be rejected");
@@ -4330,6 +4367,7 @@ mod tests {
             query_param_name: None,
             endpoint_rules: vec![],
             env_var: Some("EXAMPLE_API_KEY".to_string()),
+            tls_ca: None,
         };
         let result = validate_custom_credential("example", &cred);
         let err = result.expect_err("file:// URI with relative path should be rejected");
@@ -4353,6 +4391,7 @@ mod tests {
             query_param_name: None,
             endpoint_rules: vec![],
             env_var: Some("EXAMPLE_API_KEY".to_string()),
+            tls_ca: None,
         };
         let result = validate_custom_credential("example", &cred);
         assert!(

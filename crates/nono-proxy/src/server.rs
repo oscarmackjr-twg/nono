@@ -109,9 +109,6 @@ impl ProxyHandle {
         vars.push(("https_proxy".to_string(), proxy_url));
         vars.push(("no_proxy".to_string(), no_proxy));
 
-        // Node.js v22.21.0+ / v24.0.0+ requires this flag for native fetch() to use HTTP_PROXY
-        vars.push(("NODE_USE_ENV_PROXY".to_string(), "1".to_string()));
-
         vars
     }
 
@@ -543,6 +540,12 @@ mod tests {
         assert!(token_var.is_some());
         assert_eq!(token_var.unwrap().1.len(), 64);
 
+        let node_proxy_flag = vars.iter().find(|(k, _)| k == "NODE_USE_ENV_PROXY");
+        assert!(
+            node_proxy_flag.is_none(),
+            "proxy env should avoid Node-specific flags that can perturb non-Node runtimes"
+        );
+
         handle.shutdown();
     }
 
@@ -561,6 +564,7 @@ mod tests {
                 query_param_name: None,
                 env_var: None,
                 endpoint_rules: vec![],
+                tls_ca: None,
             }],
             ..Default::default()
         };
@@ -601,6 +605,7 @@ mod tests {
                 query_param_name: None,
                 env_var: None, // No explicit env_var — should fall back to uppercase
                 endpoint_rules: vec![],
+                tls_ca: None,
             }],
             ..Default::default()
         };
@@ -650,6 +655,7 @@ mod tests {
                 query_param_name: None,
                 env_var: Some("OPENAI_API_KEY".to_string()),
                 endpoint_rules: vec![],
+                tls_ca: None,
             }],
             ..Default::default()
         };
@@ -705,6 +711,7 @@ mod tests {
                     query_param_name: None,
                     env_var: None,
                     endpoint_rules: vec![],
+                    tls_ca: None,
                 },
                 crate::config::RouteConfig {
                     prefix: "github".to_string(),
@@ -718,6 +725,7 @@ mod tests {
                     query_param_name: None,
                     env_var: Some("GITHUB_TOKEN".to_string()),
                     endpoint_rules: vec![],
+                    tls_ca: None,
                 },
             ],
             ..Default::default()

@@ -748,6 +748,7 @@ fn print_check_only_summary() {
     print_windows_wfp_readiness_report("", &wfp);
     println!("Use 'nono run --dry-run ...' to validate profiles and policy.");
     println!("Plain 'nono run -- <command>' uses the current supported Windows command surface with backend-owned launch validation and low-integrity write boundaries.");
+    println!("Blocked-network and other enforcement-dependent Windows flows require current backend readiness; check the WFP readiness lines above before treating them as available.");
     println!("Live 'nono shell' and 'nono wrap' remain intentionally unavailable on Windows; use their --dry-run forms to inspect policy.");
     println!("Run 'nono run --help' to inspect the current command surface.");
 }
@@ -895,6 +896,18 @@ mod tests {
     use std::env;
     use tempfile::tempdir;
 
+    #[cfg(not(target_os = "windows"))]
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    #[cfg(not(target_os = "windows"))]
+    fn env_lock() -> MutexGuard<'static, ()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env lock poisoned")
+    }
+
     /// Profiles written by `setup --profiles` must be loadable by `load_profile()`.
     ///
     /// This is a round-trip test: run setup_profiles() to write example profiles,
@@ -904,7 +917,12 @@ mod tests {
     /// `resolve_user_config_dir()` returning `~/.config`. This test catches that.
     #[test]
     fn test_setup_profiles_loadable_by_name() {
-        let _guard = crate::config::test_env_lock().lock().expect("env lock");
+        #[cfg(target_os = "windows")]
+        let _guard = crate::config::test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        #[cfg(not(target_os = "windows"))]
+        let _guard = env_lock();
         let original_home = env::var("HOME").ok();
         let original_xdg = env::var("XDG_CONFIG_HOME").ok();
         #[cfg(target_os = "windows")]
