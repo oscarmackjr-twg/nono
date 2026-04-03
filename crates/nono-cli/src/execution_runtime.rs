@@ -16,32 +16,9 @@ const PROFILE_HINT_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 fn apply_pre_fork_sandbox(
     strategy: exec_strategy::ExecStrategy,
     caps: &CapabilitySet,
-    #[cfg(target_os = "windows")] current_dir: &Path,
     silent: bool,
 ) -> Result<()> {
     if matches!(strategy, exec_strategy::ExecStrategy::Direct) {
-        #[cfg(target_os = "windows")]
-        {
-            let support = Sandbox::support_info();
-            if !support.is_supported {
-                let preview = Sandbox::preview_runtime_status(
-                    caps,
-                    current_dir,
-                    nono::WindowsPreviewContext {
-                        has_deny_override_policy: false,
-                    },
-                );
-                info!("Windows runtime status: {:?}", preview);
-                if !silent {
-                    output::print_warning(
-                        "Windows restricted execution is running with backend-owned Windows process containment plus the current supported command surface for filesystem policy; blocked-network and other enforcement-dependent flows require current backend readiness, and unsupported Windows restrictions still fail closed with backend diagnostics",
-                    );
-                    eprintln!();
-                }
-                return Ok(());
-            }
-        }
-
         output::print_applying_sandbox(silent);
 
         #[cfg(target_os = "linux")]
@@ -59,26 +36,6 @@ fn apply_pre_fork_sandbox(
         output::print_sandbox_active(silent);
     }
     Ok(())
-}
-
-#[cfg(target_os = "windows")]
-fn validate_windows_preview_direct_execution(
-    flags: &crate::launch_runtime::ExecutionFlags,
-    caps: &CapabilitySet,
-) -> Result<()> {
-    let support = Sandbox::support_info();
-    if support.is_supported {
-        return Ok(());
-    }
-
-    Sandbox::validate_windows_preview_entry_point(
-        nono::WindowsPreviewEntryPoint::RunDirect,
-        caps,
-        &flags.workdir,
-        nono::WindowsPreviewContext {
-            has_deny_override_policy: !flags.override_deny_paths.is_empty(),
-        },
-    )
 }
 
 fn cleanup_capability_state_file(cap_file_path: &std::path::Path) {
@@ -221,18 +178,8 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
     let proxy_handle = active_proxy.handle;
 
     let current_dir = execution_start_dir(&flags.workdir, &caps)?;
-    #[cfg(target_os = "windows")]
-    if matches!(strategy, exec_strategy::ExecStrategy::Direct) {
-        validate_windows_preview_direct_execution(&flags, &caps)?;
-    }
 
-    apply_pre_fork_sandbox(
-        strategy,
-        &caps,
-        #[cfg(target_os = "windows")]
-        &current_dir,
-        flags.silent,
-    )?;
+    apply_pre_fork_sandbox(strategy, &caps, flags.silent)?;
 
     let mut env_vars: Vec<(&str, &str)> = loaded_secrets
         .iter()

@@ -44,20 +44,6 @@ pub fn print_banner(silent: bool) {
         theme::fg(&format!("v{version}"), t.subtext),
     );
 
-    #[cfg(target_os = "windows")]
-    {
-        let support = nono::Sandbox::support_info();
-        if !support.is_supported {
-            eprintln!(
-                "  {} {}",
-                theme::fg("windows", t.yellow).bold(),
-                theme::fg(
-                    "Windows restricted execution covers the current supported command surface; unsupported flows fail explicitly",
-                    t.subtext
-                ),
-            );
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -312,22 +298,6 @@ pub fn print_supervised_info(silent: bool, rollback: bool, proxy_active: bool) {
     }
     features.push("supervisor");
 
-    #[cfg(target_os = "windows")]
-    {
-        let support = nono::Sandbox::support_info();
-        if !support.is_supported {
-            eprintln!(
-                "  {} {}",
-                fg("mode", t.subtext),
-                fg(
-                    &format!("supervised subset ({})", features.join(", ")),
-                    t.subtext,
-                ),
-            );
-            return;
-        }
-    }
-
     eprintln!(
         "  {} {}",
         fg("mode", t.subtext),
@@ -560,13 +530,6 @@ pub fn print_dry_run(
 }
 
 fn dry_run_summary(_support: &nono::SupportInfo) -> &'static str {
-    #[cfg(target_os = "windows")]
-    {
-        if !_support.is_supported {
-            return "dry-run validates the current Windows command surface without claiming full parity";
-        }
-    }
-
     "sandbox would be applied with above capabilities"
 }
 
