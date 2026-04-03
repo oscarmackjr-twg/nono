@@ -1373,16 +1373,17 @@ mod tests {
 
     #[test]
     fn public_key_cache_path_encodes_key_id() {
+        let _lock = match crate::test_env::ENV_LOCK.lock() {
+            Ok(lock) => lock,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         let dir = tempfile::tempdir().unwrap();
-        let original = std::env::var("XDG_CONFIG_HOME").ok();
-        std::env::set_var("XDG_CONFIG_HOME", dir.path());
+        let _env = crate::test_env::EnvVarGuard::set_all(&[(
+            "XDG_CONFIG_HOME",
+            dir.path().to_str().unwrap(),
+        )]);
 
         let path = public_key_cache_path("../default").unwrap();
-
-        match original {
-            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
 
         assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some("b64"));
         assert!(!path.to_string_lossy().contains("../"));
@@ -1394,19 +1395,21 @@ mod tests {
 
     #[test]
     fn load_public_key_bytes_prefers_disk_cache() {
+        let _lock = match crate::test_env::ENV_LOCK.lock() {
+            Ok(lock) => lock,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         let dir = tempfile::tempdir().unwrap();
-        let original = std::env::var("XDG_CONFIG_HOME").ok();
-        std::env::set_var("XDG_CONFIG_HOME", dir.path());
+        let home_dir = tempfile::tempdir().unwrap();
+        let _env = crate::test_env::EnvVarGuard::set_all(&[
+            ("XDG_CONFIG_HOME", dir.path().to_str().unwrap()),
+            ("HOME", home_dir.path().to_str().unwrap()),
+        ]);
 
         let expected = b"public key bytes";
         let encoded = base64_encode(expected);
         store_public_key_cache("default", &encoded).unwrap();
         let loaded = load_public_key_bytes("default").unwrap();
-
-        match original {
-            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
 
         assert_eq!(loaded, expected);
     }

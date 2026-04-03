@@ -446,6 +446,10 @@ mod tests {
 
     #[test]
     fn test_query_path_sensitive_policy_includes_policy_source() {
+        let _lock = match crate::test_env::ENV_LOCK.lock() {
+            Ok(lock) => lock,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         let ssh_path = PathBuf::from(format!(
             "{}/.ssh",
             crate::config::validated_home().expect("HOME should be valid in test")
