@@ -115,6 +115,27 @@ pub(super) fn cleanup_network_enforcement_staging(staged_dir: &Path) {
     let _ = std::fs::remove_dir_all(staged_dir);
 }
 
+pub(crate) fn cleanup_stale_network_enforcement_artifacts() {
+    let base_dir = std::env::temp_dir().join("nono-net-block");
+    let Ok(entries) = std::fs::read_dir(&base_dir) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        if let Ok(metadata) = entry.metadata() {
+            if metadata.is_dir() {
+                if let Some(suffix) = entry.file_name().to_str() {
+                    let inbound_rule = format!("nono-win-block-in-{suffix}");
+                    let outbound_rule = format!("nono-win-block-out-{suffix}");
+                    let _ = delete_firewall_rule(&inbound_rule);
+                    let _ = delete_firewall_rule(&outbound_rule);
+                    let _ = std::fs::remove_dir_all(entry.path());
+                }
+            }
+        }
+    }
+}
+
 pub(super) fn current_wfp_probe_config() -> Result<WfpProbeConfig> {
     let current_exe = std::env::current_exe().map_err(|e| {
         NonoError::SandboxInit(format!(

@@ -390,6 +390,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn test_validate_cap_file_path_accepts_windows_runtime_temp_dir() {
+        let _guard = crate::test_env::lock_env();
         let dir = tempdir().expect("Failed to create temp dir");
         let cap_file = dir.path().join(".nono-123.json");
         std::fs::write(&cap_file, "{}").expect("write cap file");

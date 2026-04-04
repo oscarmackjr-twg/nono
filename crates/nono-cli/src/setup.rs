@@ -36,6 +36,11 @@ impl SetupRunner {
     }
 
     pub fn run(&self) -> Result<()> {
+        #[cfg(target_os = "windows")]
+        if !self.check_only {
+            crate::exec_strategy::cleanup_stale_network_enforcement_artifacts();
+        }
+
         // Installation verification
         self.check_installation()?;
 

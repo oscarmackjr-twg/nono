@@ -31,7 +31,7 @@ use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
 use windows_sys::Win32::Security::{
     CreateWellKnownSid, DuplicateTokenEx, SecurityImpersonation, SetTokenInformation,
     TokenIntegrityLevel, TokenPrimary, WinLowLabelSid, SECURITY_IMPERSONATION_LEVEL,
-    SECURITY_MAX_SID_SIZE, SID_AND_ATTRIBUTES, TOKEN_ADJUST_DEFAULT, TOKEN_ASSIGN_PRIMARY,
+    SECURITY_MAX_SID_SIZE, TOKEN_ADJUST_DEFAULT, TOKEN_ASSIGN_PRIMARY,
     TOKEN_DUPLICATE, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
 };
 use windows_sys::Win32::System::JobObjects::{
@@ -313,6 +313,7 @@ struct OwnedHandle(HANDLE);
 
 mod launch;
 mod network;
+pub(crate) use network::cleanup_stale_network_enforcement_artifacts;
 mod supervisor;
 
 use launch::*;

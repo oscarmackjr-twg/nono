@@ -153,10 +153,16 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
         output::print_profile_hint(recommended_program_name, profile, flags.silent);
     }
     let cap_file = write_capability_state_file(&caps, &flags.override_deny_paths, flags.silent);
-    let cap_file_path = cap_file
-        .as_ref()
-        .cloned()
-        .unwrap_or_else(|| std::path::PathBuf::from("/dev/null"));
+    let cap_file_path = cap_file.as_ref().cloned().unwrap_or_else(|| {
+        #[cfg(target_os = "windows")]
+        {
+            std::path::PathBuf::from("NUL")
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            std::path::PathBuf::from("/dev/null")
+        }
+    });
 
     for secret in &loaded_secrets {
         if exec_strategy::is_dangerous_env_var(&secret.env_var) {

@@ -86,16 +86,7 @@ fn finalize_prepared_sandbox(
     output::print_abi_info(silent);
 
     if !Sandbox::is_supported() {
-        #[cfg(target_os = "windows")]
-        {
-            info!("{}", Sandbox::support_info().details);
-            return Ok(prepared);
-        }
-
-        #[cfg(not(target_os = "windows"))]
-        {
-            return Err(NonoError::SandboxInit(Sandbox::support_info().details));
-        }
+        return Err(NonoError::SandboxInit(Sandbox::support_info().details));
     }
 
     info!("{}", Sandbox::support_info().details);

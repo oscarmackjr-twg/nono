@@ -450,6 +450,14 @@ mod tests {
             Ok(lock) => lock,
             Err(poisoned) => poisoned.into_inner(),
         };
+        let orig_home = std::env::var("HOME").ok();
+        #[cfg(target_os = "windows")]
+        let orig_userprofile = std::env::var("USERPROFILE").ok();
+
+        std::env::set_var("HOME", "/tmp/fakehome");
+        #[cfg(target_os = "windows")]
+        std::env::set_var("USERPROFILE", r"C:\fakehome");
+
         let ssh_path = PathBuf::from(format!(
             "{}/.ssh",
             crate::config::validated_home().expect("HOME should be valid in test")
@@ -457,6 +465,19 @@ mod tests {
         let caps = CapabilitySet::new();
 
         let result = query_path(&ssh_path, AccessMode::Read, &caps, &[]).expect("Query failed");
+
+        if let Some(home) = orig_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(up) = orig_userprofile {
+            std::env::set_var("USERPROFILE", up);
+        } else {
+            std::env::remove_var("USERPROFILE");
+        }
+
         match result {
             QueryResult::Denied {
                 reason,

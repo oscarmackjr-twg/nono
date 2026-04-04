@@ -320,9 +320,23 @@ pub(super) fn build_child_env(config: &ExecConfig<'_>) -> Vec<(String, String)> 
 }
 
 fn append_windows_runtime_env(env_pairs: &mut Vec<(String, String)>, config: &ExecConfig<'_>) {
+    let system_root = std::env::var("SystemRoot")
+        .or_else(|_| std::env::var("windir"))
+        .unwrap_or_else(|_| r"C:\Windows".to_string());
+
+    let system_drive = std::path::Path::new(&system_root)
+        .components()
+        .next()
+        .and_then(|c| c.as_os_str().to_str())
+        .unwrap_or("C:")
+        .to_string();
+
     env_pairs.push((
         "PATH".to_string(),
-        r"C:\Windows\System32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0\".to_string(),
+        format!(
+            r"{}\System32;{};{}\System32\Wbem;{}\System32\WindowsPowerShell\v1.0\",
+            system_root, system_root, system_root, system_root
+        ),
     ));
     env_pairs.push((
         "PATHEXT".to_string(),
@@ -330,11 +344,11 @@ fn append_windows_runtime_env(env_pairs: &mut Vec<(String, String)>, config: &Ex
     ));
     env_pairs.push((
         "COMSPEC".to_string(),
-        r"C:\Windows\System32\cmd.exe".to_string(),
+        format!(r"{}\System32\cmd.exe", system_root),
     ));
-    env_pairs.push(("SystemRoot".to_string(), r"C:\Windows".to_string()));
-    env_pairs.push(("windir".to_string(), r"C:\Windows".to_string()));
-    env_pairs.push(("SystemDrive".to_string(), "C:".to_string()));
+    env_pairs.push(("SystemRoot".to_string(), system_root.clone()));
+    env_pairs.push(("windir".to_string(), system_root));
+    env_pairs.push(("SystemDrive".to_string(), system_drive));
     env_pairs.push((
         "NoDefaultCurrentDirectoryInExePath".to_string(),
         "1".to_string(),
@@ -499,8 +513,25 @@ fn append_windows_runtime_env(env_pairs: &mut Vec<(String, String)>, config: &Ex
         ("TF_DATA_DIR", runtime_root.join("terraform").join("data")),
     ];
 
-    for (_, path) in &runtime_dirs {
-        let dir = if path.extension().is_some() {
+    for (key, path) in &runtime_dirs {
+        let is_file = matches!(
+            *key,
+            "PIP_CONFIG_FILE"
+                | "NPM_CONFIG_USERCONFIG"
+                | "RIPGREP_CONFIG_PATH"
+                | "AWS_SHARED_CREDENTIALS_FILE"
+                | "AWS_CONFIG_FILE"
+                | "KUBECONFIG"
+                | "GIT_CONFIG_GLOBAL"
+                | "TF_CLI_CONFIG_FILE"
+                | "HISTFILE"
+                | "LESSHISTFILE"
+                | "NODE_REPL_HISTORY"
+                | "PYTHONHISTFILE"
+                | "SQLITE_HISTORY"
+        );
+
+        let dir = if is_file {
             path.parent().unwrap_or(path)
         } else {
             path.as_path()
@@ -707,21 +738,22 @@ pub(super) fn create_low_integrity_primary_token() -> Result<OwnedHandle> {
         )));
     }
 
-    let mut label = TOKEN_MANDATORY_LABEL {
-        Label: SID_AND_ATTRIBUTES {
-            Sid: sid_buffer.as_mut_ptr() as *mut _,
-            Attributes: SE_GROUP_INTEGRITY as u32,
-        },
-    };
     let label_size = size_of::<TOKEN_MANDATORY_LABEL>() + sid_size as usize;
+    let mut label_buffer = vec![0u8; label_size];
+
+    let label_ptr = label_buffer.as_mut_ptr() as *mut TOKEN_MANDATORY_LABEL;
+    unsafe {
+        (*label_ptr).Label.Sid = sid_buffer.as_mut_ptr() as *mut _;
+        (*label_ptr).Label.Attributes = SE_GROUP_INTEGRITY as u32;
+    }
+
     let adjusted = unsafe {
-        // SAFETY: The token handle is valid and the TOKEN_MANDATORY_LABEL
-        // points to a valid low-integrity SID buffer for the duration
-        // of the call.
+        // SAFETY: The token handle is valid. label_buffer is contiguous and correctly sized
+        // for a TOKEN_MANDATORY_LABEL header followed by its SID payload.
         SetTokenInformation(
             primary_token.raw(),
             TokenIntegrityLevel,
-            &mut label as *mut _ as *mut _,
+            label_buffer.as_mut_ptr() as *mut _,
             label_size as u32,
         )
     };

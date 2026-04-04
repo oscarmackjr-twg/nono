@@ -1767,12 +1767,8 @@ mod tests {
         "/run/user/1000"
     }
 
-    fn env_lock() -> MutexGuard<'static, ()> {
-        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        match ENV_LOCK.get_or_init(|| Mutex::new(())).lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        }
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::test_env::lock_env()
     }
 
     #[test]
@@ -1792,9 +1788,13 @@ mod tests {
         let _guard = env_lock();
         // Save original HOME to restore after test (avoid polluting other parallel tests)
         let original_home = env::var("HOME").ok();
+        #[cfg(target_os = "windows")]
+        let original_userprofile = env::var("USERPROFILE").ok();
 
         let workdir = PathBuf::from("/projects/myapp");
         env::set_var("HOME", test_home());
+        #[cfg(target_os = "windows")]
+        env::set_var("USERPROFILE", test_home());
 
         let expanded = expand_vars("$WORKDIR/src", &workdir).expect("valid env");
         assert_eq!(expanded, PathBuf::from("/projects/myapp/src"));
@@ -1805,6 +1805,14 @@ mod tests {
         // Restore original HOME
         if let Some(home) = original_home {
             env::set_var("HOME", home);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            if let Some(up) = original_userprofile {
+                env::set_var("USERPROFILE", up);
+            } else {
+                env::remove_var("USERPROFILE");
+            }
         }
     }
 
