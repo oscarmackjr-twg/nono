@@ -43,7 +43,7 @@ With nono, you don't have to. nono wraps your agent in a kernel-isolated sandbox
 
 ---
 
-**Platform support:** macOS, Linux, and [WSL2](https://nono.sh/docs/cli/internals/wsl2) are supported today. Windows native builds now support a real restricted-execution command surface for setup, dry-run, direct execution, blocked-network, and selected supervised flows. Live `nono shell` and `nono wrap` remain intentionally unavailable on Windows; use their `--dry-run` forms to inspect policy. See the [Installation Guide](https://docs.nono.sh/cli/getting_started/installation) for the current Windows boundary.
+**Platform support:** macOS, Linux, [WSL2](https://nono.sh/docs/cli/internals/wsl2), and the Windows native CLI are supported today. Windows native builds support a real restricted-execution command surface for setup, dry-run, direct execution, blocked-network, and selected supervised flows. Live `nono shell` and `nono wrap` remain intentionally unavailable on Windows; use their `--dry-run` forms to inspect policy. See the [Installation Guide](https://docs.nono.sh/cli/getting_started/installation) for the current Windows boundary.
 
 **Homebrew (macOS/Linux)**
 ```bash
