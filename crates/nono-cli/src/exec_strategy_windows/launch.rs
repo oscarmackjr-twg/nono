@@ -1,3 +1,8 @@
+//! Windows process launch and token management.
+//!
+//! This module handles creating suspended processes, lowering their integrity
+//! levels via token manipulation, and assigning them to Job Objects for containment.
+
 use super::*;
 
 impl OwnedHandle {

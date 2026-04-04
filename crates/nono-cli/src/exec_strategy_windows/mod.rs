@@ -1,10 +1,10 @@
 #![allow(dead_code)]
 
-//! Windows execution strategy placeholder.
+//! Native Windows execution strategy.
 //!
-//! WIN-101 needs the CLI to compile on Windows without pulling in the Unix
-//! supervisor and fork/exec machinery. This file intentionally provides a
-//! smaller Windows surface that can be expanded in later stories.
+//! This module implements the capability-based sandbox for Windows using
+//! Job Objects for process containment and Low Integrity levels for
+//! restricted filesystem access. Networking is enforced via WFP or Firewall rules.
 
 #[path = "../exec_strategy/env_sanitization.rs"]
 mod env_sanitization;

@@ -1,3 +1,8 @@
+//! Windows network enforcement.
+//!
+//! This module provides network isolation on Windows by either using the
+//! Windows Filtering Platform (WFP) service or temporary Windows Firewall rules.
+
 use super::*;
 
 impl Drop for NetworkEnforcementGuard {
