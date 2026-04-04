@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.29.1] - 2026-04-04
+
+### Bug Fixes
+
+- *(macos)* Allow DNS resolution via mDNSResponder in proxy and blocked modes (#588)
+
+- *(profile)* Add missing $TMPDIR and state dir to opencode profile
+
+- Ipv6 normalization logic
+
+- *(proxy)* Disable NO_PROXY bypass on macOS (#580)
+
+- *(policy)* Grant ~/.cache/claude readwrite in claude-code profile
+
 ## [0.29.0] - 2026-04-03
 
 ### Bug Fixes
