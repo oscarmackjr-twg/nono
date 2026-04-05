@@ -578,6 +578,7 @@ fn install_manifest_artifact(
                     artifact.path
                 ))
             })?;
+            validate_safe_name(install_name, "install_as")?;
             let path = staging_root
                 .join("profiles")
                 .join(format!("{install_name}.json"));
@@ -627,22 +628,49 @@ fn install_manifest_artifact(
             ensure_executable(&path)?;
             path
         }
+        // NOTE: upstream ec49a7af also adds an ArtifactType::Plugin arm here.
+        // Fork's ArtifactType enum does not yet have Plugin (introduced by a
+        // later upstream commit not in Plan 22-03's cherry-pick chain). When
+        // that variant lands, restore upstream's Plugin arm verbatim:
+        //
+        //     ArtifactType::Plugin => {
+        //         if artifact.path.contains("..") { return Err(...) }
+        //         let path = staging_root.join(&artifact.path);
+        //         write_bytes(&path, bytes)?;
+        //         validate_path_within(staging_root, &path)?;
+        //         ...
+        //     }
     };
+
+    // Defense-in-depth (Rule 2): every artifact path must remain inside the
+    // staging root, regardless of which arm above produced it. Catches future
+    // bugs where a new arm joins an attacker-controlled path component without
+    // canonicalizing first. Path-component comparison via Path::starts_with on
+    // canonicalized PathBufs (not string starts_with — CLAUDE.md § Common
+    // Footguns #1).
+    validate_path_within(staging_root, &store_path)?;
 
     // If the manifest declares an install_dir, also place the file there.
     let external_path = if let Some(install_dir) = &artifact.install_dir {
         let expanded = expand_tilde(install_dir)?;
+        if !expanded.is_absolute() {
+            return Err(NonoError::PackageInstall(format!(
+                "install_dir must be an absolute path, got '{install_dir}'"
+            )));
+        }
         let dest_name = artifact
             .install_as
             .as_deref()
-            .map(|n| {
+            .map(|n| -> Result<String> {
+                validate_safe_name(n, "install_as")?;
                 // For profiles, install_as is already just the name
-                if artifact.artifact_type == ArtifactType::Profile {
+                Ok(if artifact.artifact_type == ArtifactType::Profile {
                     format!("{n}.json")
                 } else {
                     n.to_string()
-                }
+                })
             })
+            .transpose()?
             .unwrap_or_else(|| {
                 store_path
                     .file_name()
@@ -693,6 +721,7 @@ fn create_profile_symlinks(package_ref: &PackageRef, manifest: &PackageManifest)
                     artifact.path
                 ))
             })?;
+            validate_safe_name(install_name, "install_as")?;
             let link_path = package::profile_link_path(install_name)?;
             let target = package::package_install_dir(&package_ref.namespace, &package_ref.name)?
                 .join("profiles")
@@ -721,6 +750,12 @@ fn validate_groups(bytes: &[u8], prefix: &str) -> Result<()> {
     let embedded = crate::policy::load_policy(crate::config::embedded::embedded_policy_json())?;
 
     for name in groups.keys() {
+        // SAFETY: not a path comparison — `name` is a policy group name
+        // (e.g. "my-pack-network") and `prefix` is the package's required
+        // group-name prefix. CLAUDE.md § Common Footguns #1 forbids
+        // `&str::starts_with` on path inputs, but this is a logical
+        // namespace prefix check on group identifiers, not on filesystem
+        // paths.
         if !name.starts_with(prefix) {
             return Err(NonoError::PackageInstall(format!(
                 "group '{}' does not start with required prefix '{}'",
@@ -982,6 +1017,34 @@ fn file_name(path: &str) -> Result<&str> {
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| NonoError::PackageInstall(format!("invalid artifact path '{}'", path)))
+}
+
+fn validate_safe_name(name: &str, field: &str) -> Result<()> {
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name == "."
+        || name == ".."
+        || name.contains("..")
+    {
+        return Err(NonoError::PackageInstall(format!(
+            "{field} contains unsafe path component: '{name}'"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_path_within(base: &Path, full: &Path) -> Result<()> {
+    let canonical_base = base.canonicalize().map_err(NonoError::Io)?;
+    let canonical_full = full.canonicalize().map_err(NonoError::Io)?;
+    if !canonical_full.starts_with(&canonical_base) {
+        return Err(NonoError::PackageInstall(format!(
+            "path '{}' escapes the allowed directory '{}'",
+            full.display(),
+            base.display()
+        )));
+    }
+    Ok(())
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
