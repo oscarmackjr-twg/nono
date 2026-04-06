@@ -167,6 +167,7 @@ pub struct PullResponse {
     pub version: String,
     pub provenance: PullProvenance,
     pub artifacts: Vec<PullArtifact>,
+    pub bundle_url: String,
     pub scan_passed: bool,
 }
 
@@ -188,7 +189,6 @@ pub struct PullArtifact {
     pub sha256_digest: String,
     pub size_bytes: i64,
     pub download_url: String,
-    pub bundle_url: String,
 }
 
 pub fn parse_package_ref(input: &str) -> Result<PackageRef> {
