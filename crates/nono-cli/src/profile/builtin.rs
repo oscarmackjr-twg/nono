@@ -31,6 +31,10 @@ mod tests {
             .security
             .groups
             .contains(&"deny_credentials".to_string()));
+        assert!(profile
+            .filesystem
+            .allow
+            .contains(&"$HOME/.cache/claude".to_string()));
     }
 
     #[test]
@@ -298,6 +302,24 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_opencode_profile_includes_tmpdir_and_state_dir() {
+        let policy = crate::policy::load_embedded_policy().expect("load embedded policy");
+        let opencode = policy.profiles.get("opencode").expect("opencode profile");
+        assert!(
+            opencode.filesystem.allow.contains(&"$TMPDIR".to_string()),
+            "opencode profile should allow $TMPDIR for Bun TUI runtime extraction"
+        );
+        assert!(
+            opencode
+                .filesystem
+                .allow
+                .contains(&"$HOME/.local/state/opencode".to_string()),
+            "opencode profile should allow $HOME/.local/state/opencode"
+        );
+    }
+
     /// Regression test: verifies that all built-in profiles — regardless of
     /// their signal_mode setting — will produce Seatbelt rules that allow
     /// signaling child processes within the same sandbox.

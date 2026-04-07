@@ -27,65 +27,61 @@
 </div>
 
 > [!WARNING]
-> This is an early alpha release that has not undergone comprehensive security audits. While we have taken care to implement robust security measures, there may will be undiscovered issues when major changes are brought in. We do not recommend using this in production until we release a stable version of 1.0. Please do not point a coding agent at the repo and raise large LLM generated issues, we are likely already aware of it and work is in flight or planned. Instead approach in discord and have the courtesy to ask the community if they are aware first.
-
-> [!IMPORTANT]
-> Active development may cause disruptions — if something is broken, it's likely us, not you.
-> - **Supervisor:** Work is underway on a runtime lifecycle making the supervisor the default execution mode, introducing commands like `ps`, `attach`, `detach`, `inspect`, and `stop`. [#502](https://github.com/always-further/nono/discussions/502)
-> - **Packages & Skills:** A system for customized hooks, skills, and scripts for Coding Agents — with a community registry or any git repo as a source. [#459](https://github.com/always-further/nono/issues/459)
-> - **Policy:** Work continues to make everything fully composable and group-based. [#446](https://github.com/always-further/nono/issues/446)
+> Early alpha -- not yet audited for production use. Active development may cause breakage. Please don't point a coding agent at the repo and raise large LLM-generated security issues, we likely already know about them; instead ask in [Discord](https://discord.gg/pPcjYzGvbS) first.
 
 ---
 
-AI agents get filesystem access, run shell commands, and are wide open to prompt injections. The standard response is guardrails and policies. The problem is that policies can be bypassed — and guardrails can be talked out of.
-
-With nono, you don't have to. nono wraps your agent in a kernel-isolated sandbox in seconds — with API key protection, destructive action guardrails, and full snapshot/rollback built in. No hypervisor to configure. No container volume mounts, instead fine grained capability control to the file level. Zero latency overhead.
-
----
+nono wraps any AI agent or process in a kernel-isolated sandbox in seconds. No hypervisor. No infrastructure required. A single binary, zero added latency, and flexible enough to fit a solo developer's workflow or a fleet of agents running at scale in production.
 
 **Platform support:** macOS, Linux, [WSL2](https://nono.sh/docs/cli/internals/wsl2), and the Windows native CLI are supported today. Windows native builds support a real restricted-execution command surface for setup, dry-run, direct execution, blocked-network, and selected supervised flows. Live `nono shell` and `nono wrap` remain intentionally unavailable on Windows; use their `--dry-run` forms to inspect policy. See the [Installation Guide](https://docs.nono.sh/cli/getting_started/installation) for the current Windows boundary.
 
-**Homebrew (macOS/Linux)**
+**Install:**
 ```bash
 brew install nono
 ```
 
-**Other install options**
-
-Prebuilt binaries and package manager instructions are in the [Installation Guide](https://docs.nono.sh/cli/getting_started/installation).
+Other options in the [Installation Guide](https://docs.nono.sh/cli/getting_started/installation).
 
 ---
 
-## CLI
+## Latest News
 
-The CLI is the quickest way to get going! zero startup latency, no need to install hypervisors, runtimes, mount volumes...sandboxed and protected in a single command
+**Detach and reattach to sandboxed agents** -- Run agents in the background with `nono run --detach`, reconnect with `nono attach`. Includes `nono ps`, `nono stop`, and `nono inspect`. ([#526](https://github.com/always-further/nono/pull/526))
+
+**WSL2 support** -- Auto-detection with ~84% feature coverage out of the box. Run `nono setup --check-only` to see what's available. ([#522](https://github.com/always-further/nono/pull/522))
+
+**Portable capability manifests** -- Export fully-resolved sandbox configs with `nono policy show <profile> --format manifest` for CI/Kubernetes deployment. ([#534](https://github.com/always-further/nono/pull/534))
+
+**API endpoint filtering** -- Control which endpoints agents can reach with L7 filtering: `--allow-endpoint 'github:GET:/repos/*/issues/**'`. ([#513](https://github.com/always-further/nono/pull/513))
+
+**Custom CAs and file-based credentials for k8s** -- `tls_ca` for self-signed endpoints ([#548](https://github.com/always-further/nono/pull/548)), `file://` URIs for mounted secrets ([#552](https://github.com/always-further/nono/pull/552)).
+
+[All updates](https://github.com/always-further/nono/discussions/categories/announcements)
+
+---
+
+## Quick Start
 
 ```bash
-# Any CLI agent — just put your command after --
-nono run --profile claude-code -- claude
-nono run --profile codex -- codex
-nono run --profile opencode -- opencode
-nono run --profile openclaw -- openclaw
-nono run --profile swival -- swival
+# Any CLI agent -- just put your command after --
+$ nono run --profile claude-code -- claude
 
-nono run --allow-cwd -- python3 my_agent.py
-nono run --allow-cwd -- npx @anthropic/agent-framework
+# or with tmux style multiplexer and atomic snapshots
+$ nono run --detached --profile claude-code --rollback -- claude
+Started detached session 7a6a652f7273fe60.
+Attach with: nono attach 7a6a652f7273fe60
 
-# MCP servers, agents, anything!
+# Any given command
+nono run -- python3 my_agent.py
 nono run --read /data -- npx @modelcontextprotocol/server-filesystem /data
-nono run --profile pydantic-ai-agent --allow logs/ -- uv run my_agent.py
-nono run --profile custom-profile -- node agent.js
+nono run --profile codex -- codex
 ```
 
-Built-in profiles for [Claude Code](https://docs.nono.sh/cli/clients/claude-code), [Codex](https://docs.nono.sh/cli/clients/codex), [OpenCode](https://docs.nono.sh/cli/clients/opencode), [OpenClaw](https://docs.nono.sh/cli/clients/openclaw), and [Swival](https://docs.nono.sh/cli/clients/swival) — or define your own with custom permissions.
-
----
+Built-in profiles for [Claude Code](https://docs.nono.sh/cli/clients/claude-code), [Codex](https://docs.nono.sh/cli/clients/codex), [OpenCode](https://docs.nono.sh/cli/clients/opencode), [OpenClaw](https://docs.nono.sh/cli/clients/openclaw), and [Swival](https://docs.nono.sh/cli/clients/swival) -- or [define your own](https://docs.nono.sh/cli/features/profiles-groups).
 
 ## Library
 
-The core is a Rust library that can be embedded into any application via native bindings. The library is a policy-free sandbox primitive -- it applies only what clients explicitly request.
-
-#### <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/rust/rust-original.svg" width="18" height="18" alt="Rust"/> Rust — [crates.io](https://crates.io/crates/nono)
+The core is a Rust library that can be embedded into any application. Policy-free -- it applies only what clients explicitly request.
 
 ```rust
 use nono::{CapabilitySet, Sandbox};
@@ -94,7 +90,7 @@ let mut caps = CapabilitySet::new();
 caps.allow_read("/data/models")?;
 caps.allow_write("/tmp/workspace")?;
 
-Sandbox::apply(&caps)?;  // Irreversible — kernel-enforced from here on
+Sandbox::apply(&caps)?;  // Irreversible -- kernel-enforced from here on
 ```
 
 #### <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/python/python-original.svg" width="18" height="18" alt="Python"/> Python — [nono-py](https://github.com/always-further/nono-py)
@@ -339,11 +335,11 @@ Language-specific bindings are maintained separately:
 
 ## Contributing
 
-We encourage using AI tools to contribute to nono. However, you must understand and carefully review any AI-generated code before submitting. The security of nono is paramount -- always review and test your code thoroughly, especially around core sandboxing functionality. If you don't understand how a change works, please ask for help in the [Discord](https://discord.gg/pPcjYzGvbS) before submitting a PR.
+We encourage using AI tools to contribute. However, you must understand and carefully review any AI-generated code before submitting. Security is paramount. If you don't understand how a change works, ask in [Discord](https://discord.gg/pPcjYzGvbS) first.
 
 ## Security
 
-If you discover a security vulnerability, please **do not open a public issue**. Instead, follow the responsible disclosure process outlined in our [Security Policy](https://github.com/always-further/nono/security).
+If you discover a security vulnerability, please **do not open a public issue**. Follow the process in our [Security Policy](https://github.com/always-further/nono/security).
 
 ## License
 
