@@ -31,37 +31,49 @@ pub(super) enum WindowsSupervisedChild {
     },
 }
 
+const WAIT_OBJECT_0: u32 = 0;
+const WAIT_TIMEOUT_CODE: u32 = 0x0000_0102;
+
 impl WindowsSupervisedChild {
-    pub(super) fn poll_exit_code(&mut self) -> Result<Option<i32>> {
-        match self {
-            Self::Native { process, .. } => {
-                let wait_result = unsafe {
-                    // SAFETY: `process.0` is a valid process handle owned by this child wrapper.
-                    WaitForSingleObject(process.0, 0)
+    /// Wait up to `timeout_ms` milliseconds for the child to exit.
+    ///
+    /// Passes `timeout_ms` directly to `WaitForSingleObject` so the kernel
+    /// blocks efficiently rather than the caller busy-polling with `sleep`.
+    /// Returns `Some(exit_code)` if the process exited within the timeout,
+    /// or `None` if the timeout elapsed with the process still running.
+    fn wait_for_exit(&self, timeout_ms: u32) -> Result<Option<i32>> {
+        let process_handle = match self {
+            Self::Native { process, .. } => process.0,
+        };
+        let wait_result = unsafe {
+            // SAFETY: `process_handle` is a valid process handle owned by this
+            // child wrapper and remains valid for the duration of this call.
+            WaitForSingleObject(process_handle, timeout_ms)
+        };
+        match wait_result {
+            WAIT_OBJECT_0 => {
+                let mut exit_code = 0u32;
+                let ok = unsafe {
+                    // SAFETY: Handle remains valid and `exit_code` is writable.
+                    GetExitCodeProcess(process_handle, &mut exit_code)
                 };
-                if wait_result == 0 {
-                    let mut exit_code = 0u32;
-                    let ok = unsafe {
-                        // SAFETY: `process.0` remains a valid process handle for the duration
-                        // of this query and `exit_code` points to writable memory.
-                        GetExitCodeProcess(process.0, &mut exit_code)
-                    };
-                    if ok == 0 {
-                        return Err(NonoError::SandboxInit(
-                            "Failed to query Windows supervised child exit code".to_string(),
-                        ));
-                    }
-                    Ok(Some(exit_code as i32))
-                } else if wait_result == 0x0000_0102 {
-                    Ok(None)
-                } else {
-                    Err(NonoError::SandboxInit(format!(
-                        "Windows supervisor failed while waiting for child process state: {}",
-                        std::io::Error::last_os_error()
-                    )))
+                if ok == 0 {
+                    return Err(NonoError::SandboxInit(
+                        "Failed to query Windows supervised child exit code".to_string(),
+                    ));
                 }
+                Ok(Some(exit_code as i32))
             }
+            WAIT_TIMEOUT_CODE => Ok(None),
+            _ => Err(NonoError::SandboxInit(format!(
+                "Windows supervisor failed while waiting for child process state: {}",
+                std::io::Error::last_os_error()
+            ))),
         }
+    }
+
+    pub(super) fn poll_exit_code(&mut self) -> Result<Option<i32>> {
+        self.wait_for_exit(0)
     }
 }
 
@@ -122,7 +134,12 @@ impl WindowsSupervisorRuntime {
         );
 
         loop {
-            if let Some(exit_code) = child.poll_exit_code()? {
+            // Use WaitForSingleObject with a timeout rather than a non-blocking
+            // poll + sleep. This avoids the busy-wait pattern and reduces exit
+            // detection latency to a single kernel wait.
+            if let Some(exit_code) =
+                child.wait_for_exit(WINDOWS_SUPERVISOR_POLL_INTERVAL.as_millis() as u32)?
+            {
                 self.state = WindowsSupervisorLifecycleState::ShuttingDown;
                 self.shutdown();
                 self.state = WindowsSupervisorLifecycleState::Completed;
@@ -135,8 +152,6 @@ impl WindowsSupervisorRuntime {
                 );
                 return Ok(exit_code);
             }
-
-            std::thread::sleep(WINDOWS_SUPERVISOR_POLL_INTERVAL);
         }
     }
 
