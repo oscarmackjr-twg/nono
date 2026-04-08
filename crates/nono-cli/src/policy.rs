@@ -211,6 +211,17 @@ pub(crate) fn expand_path(path_str: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(expanded))
 }
 
+/// Check whether a path resides inside the Nix store (`/nix/store`).
+///
+/// The Nix store is immutable by design — its contents are content-addressed
+/// and read-only. On NixOS with home-manager, shell config files such as
+/// `~/.zshrc` are often symlinks into `/nix/store/...`. Because these paths
+/// cannot be modified at runtime, deny rules targeting them for secret
+/// protection are unnecessary.
+fn is_nix_store_path(path: &Path) -> bool {
+    path.starts_with("/nix/store")
+}
+
 /// Convert a PathBuf to a UTF-8 string, returning an error for non-UTF-8 paths.
 ///
 /// Non-UTF-8 paths would produce incorrect Seatbelt rules via lossy conversion,
@@ -556,7 +567,21 @@ pub(crate) fn add_deny_access_rules(
     let canonical = path.canonicalize().ok();
     if let Some(ref canonical) = canonical {
         if *canonical != path {
-            deny_paths.push(canonical.clone());
+            // On NixOS with home-manager, shell config files (e.g. ~/.zshrc) are
+            // symlinks into /nix/store/..., which is immutable. Adding the canonical
+            // path to deny_paths would cause a Landlock deny-overlap error when
+            // /nix/store is allowed for read. Since Nix store paths are immutable
+            // and cannot contain runtime secrets, skip adding the canonical form
+            // to deny_paths on Linux — the original symlink path is still denied.
+            if cfg!(target_os = "linux") && is_nix_store_path(canonical) {
+                debug!(
+                    "Skipping deny canonical path '{}' (Nix store immutable symlink target of '{}')",
+                    canonical.display(),
+                    path.display(),
+                );
+            } else {
+                deny_paths.push(canonical.clone());
+            }
         }
     }
 
@@ -2507,6 +2532,68 @@ mod tests {
             deny_paths.is_empty(),
             "both symlink and target deny paths should be removed, remaining: {:?}",
             deny_paths
+        );
+    }
+
+    #[test]
+    fn test_is_nix_store_path() {
+        assert!(is_nix_store_path(Path::new(
+            "/nix/store/abc123-some-package/bin/zsh"
+        )));
+        assert!(is_nix_store_path(Path::new("/nix/store/hash123-.zshrc")));
+        assert!(is_nix_store_path(Path::new("/nix/store")));
+
+        assert!(!is_nix_store_path(Path::new("/nix/var/nix/profiles")));
+        assert!(!is_nix_store_path(Path::new("/home/user/.zshrc")));
+        assert!(!is_nix_store_path(Path::new("/nix")));
+        assert!(!is_nix_store_path(Path::new("/nix/stored")));
+    }
+
+    #[test]
+    fn test_deny_access_skips_nix_store_canonical_on_linux() {
+        // Create a temp dir to simulate a nix store symlink scenario.
+        // We can't create /nix/store in tests, so we test the helper
+        // function directly and verify the logic in add_deny_access_rules
+        // for non-nix paths still works correctly.
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let target = dir.path().join("real_file");
+        std::fs::write(&target, "content").expect("write target");
+        let link = dir.path().join("link_file");
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+
+        let mut caps = CapabilitySet::new();
+        let mut deny_paths = Vec::new();
+        let link_str = link.to_str().expect("valid utf8");
+        add_deny_access_rules(link_str, &mut caps, &mut deny_paths).expect("add deny rules");
+
+        // For non-nix-store symlinks, both paths should still be in deny_paths
+        let link_canonical = link.canonicalize().expect("canonicalize");
+        assert!(
+            deny_paths.contains(&link),
+            "deny_paths must contain the symlink path"
+        );
+        assert!(
+            deny_paths.contains(&link_canonical),
+            "non-nix-store canonical should still be added to deny_paths"
+        );
+    }
+
+    #[test]
+    fn test_nix_runtime_group_includes_nix_store() {
+        let json = crate::config::embedded::embedded_policy_json();
+        let policy = load_policy(json).expect("parse policy.json");
+        let group = policy
+            .groups
+            .get("nix_runtime")
+            .expect("nix_runtime group must exist");
+        let read_paths = &group
+            .allow
+            .as_ref()
+            .expect("nix_runtime must have allow block")
+            .read;
+        assert!(
+            read_paths.contains(&"/nix/store".to_string()),
+            "nix_runtime group must include /nix/store for NixOS compatibility"
         );
     }
 }
