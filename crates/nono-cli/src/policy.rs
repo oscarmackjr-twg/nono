@@ -674,26 +674,35 @@ pub(crate) fn add_deny_access_rules(
     Ok(())
 }
 
-/// Add a narrow macOS exception for explicit login.keychain-db file grants.
+/// Add a narrow macOS exception for explicit keychain DB file grants.
 ///
 /// This keeps broad keychain deny groups active while allowing only the exact
 /// file capability intended by a profile or CLI flag.
-pub fn apply_macos_login_keychain_exception(caps: &mut CapabilitySet) {
+pub fn apply_macos_keychain_db_exception(caps: &mut CapabilitySet) {
     if !cfg!(target_os = "macos") {
         return;
     }
 
-    let user_login_db = std::env::var("HOME")
-        .ok()
-        .map(|home| Path::new(&home).join("Library/Keychains/login.keychain-db"));
-    let system_login_db = Path::new("/Library/Keychains/login.keychain-db");
+    let user_keychain_dbs = std::env::var("HOME").ok().map(|home| {
+        [
+            Path::new(&home).join("Library/Keychains/login.keychain-db"),
+            Path::new(&home).join("Library/Keychains/metadata.keychain-db"),
+        ]
+    });
+    let system_keychain_dbs = [
+        Path::new("/Library/Keychains/login.keychain-db").to_path_buf(),
+        Path::new("/Library/Keychains/metadata.keychain-db").to_path_buf(),
+    ];
 
-    let is_login_db = |path: &Path| -> bool {
-        if path == system_login_db {
+    let is_keychain_db = |path: &Path| -> bool {
+        if system_keychain_dbs
+            .iter()
+            .any(|candidate| path == candidate)
+        {
             return true;
         }
-        if let Some(ref user_login_db) = user_login_db {
-            if path == user_login_db {
+        if let Some(ref user_keychain_dbs) = user_keychain_dbs {
+            if user_keychain_dbs.iter().any(|candidate| path == candidate) {
                 return true;
             }
         }
@@ -706,13 +715,13 @@ pub fn apply_macos_login_keychain_exception(caps: &mut CapabilitySet) {
         .filter(|cap| cap.is_file)
         .filter(|cap| matches!(cap.access, AccessMode::Read | AccessMode::ReadWrite))
         .map(|cap| cap.resolved.clone())
-        .filter(|path| is_login_db(path))
+        .filter(|path| is_keychain_db(path))
         .filter_map(|path| {
             let path_str = match path_to_utf8(&path) {
                 Ok(s) => s,
                 Err(e) => {
                     warn!(
-                        "Skipping login keychain exception for {}: {}",
+                        "Skipping keychain DB exception for {}: {}",
                         path.display(),
                         e
                     );
@@ -723,7 +732,7 @@ pub fn apply_macos_login_keychain_exception(caps: &mut CapabilitySet) {
                 Ok(v) => v,
                 Err(e) => {
                     warn!(
-                        "Skipping login keychain exception for {}: {}",
+                        "Skipping keychain DB exception for {}: {}",
                         path.display(),
                         e
                     );
@@ -736,7 +745,7 @@ pub fn apply_macos_login_keychain_exception(caps: &mut CapabilitySet) {
 
     for rule in allow_rules {
         if let Err(e) = caps.add_platform_rule(rule) {
-            warn!("Failed to add login keychain exception rule: {}", e);
+            warn!("Failed to add keychain DB exception rule: {}", e);
         }
     }
 }
@@ -2459,6 +2468,61 @@ mod tests {
         assert!(
             rules.contains("subpath"),
             "should use subpath for directory, got: {}",
+            rules
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_apply_macos_keychain_db_exception_adds_login_db_allow_rule() {
+        let mut caps = CapabilitySet::new();
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/test".to_string());
+        let login_db = PathBuf::from(home).join("Library/Keychains/login.keychain-db");
+        caps.add_fs(FsCapability {
+            original: login_db.clone(),
+            resolved: login_db.clone(),
+            access: AccessMode::ReadWrite,
+            is_file: true,
+            source: CapabilitySource::Profile,
+        });
+
+        apply_macos_keychain_db_exception(&mut caps);
+
+        let rules = caps.platform_rules().join("\n");
+        assert!(
+            rules.contains(&format!(
+                "(allow file-read-data (literal \"{}\"))",
+                escape_seatbelt_path(login_db.to_str().expect("utf8 path")).expect("escaped path")
+            )),
+            "expected login keychain DB exception rule, got: {}",
+            rules
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_apply_macos_keychain_db_exception_adds_metadata_db_allow_rule() {
+        let mut caps = CapabilitySet::new();
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/test".to_string());
+        let metadata_db = PathBuf::from(home).join("Library/Keychains/metadata.keychain-db");
+        caps.add_fs(FsCapability {
+            original: metadata_db.clone(),
+            resolved: metadata_db.clone(),
+            access: AccessMode::ReadWrite,
+            is_file: true,
+            source: CapabilitySource::Profile,
+        });
+
+        apply_macos_keychain_db_exception(&mut caps);
+
+        let rules = caps.platform_rules().join("\n");
+        assert!(
+            rules.contains(&format!(
+                "(allow file-read-data (literal \"{}\"))",
+                escape_seatbelt_path(metadata_db.to_str().expect("utf8 path"))
+                    .expect("escaped path")
+            )),
+            "expected metadata keychain DB exception rule, got: {}",
             rules
         );
     }

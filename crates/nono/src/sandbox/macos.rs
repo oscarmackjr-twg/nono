@@ -247,21 +247,30 @@ fn path_filters_for_cap(cap: &crate::capability::FsCapability) -> Result<Vec<Str
     Ok(filters)
 }
 
-/// Returns true if the capability set explicitly grants access to the login keychain DB.
+/// Returns true if the capability set explicitly grants access to a keychain DB.
 ///
 /// This is a narrow opt-in for tools that need OAuth/session refresh via macOS Keychain.
-fn has_explicit_login_keychain_db_access(caps: &CapabilitySet) -> bool {
-    let user_login_db = std::env::var("HOME")
-        .ok()
-        .map(|home| Path::new(&home).join("Library/Keychains/login.keychain-db"));
-    let system_login_db = Path::new("/Library/Keychains/login.keychain-db");
+fn has_explicit_keychain_db_access(caps: &CapabilitySet) -> bool {
+    let user_keychain_dbs = std::env::var("HOME").ok().map(|home| {
+        [
+            Path::new(&home).join("Library/Keychains/login.keychain-db"),
+            Path::new(&home).join("Library/Keychains/metadata.keychain-db"),
+        ]
+    });
+    let system_keychain_dbs = [
+        Path::new("/Library/Keychains/login.keychain-db").to_path_buf(),
+        Path::new("/Library/Keychains/metadata.keychain-db").to_path_buf(),
+    ];
 
-    let is_login_db = |path: &Path| -> bool {
-        if path == system_login_db {
+    let is_keychain_db = |path: &Path| -> bool {
+        if system_keychain_dbs
+            .iter()
+            .any(|candidate| path == candidate)
+        {
             return true;
         }
-        if let Some(ref user_login_db) = user_login_db {
-            if path == user_login_db {
+        if let Some(ref user_keychain_dbs) = user_keychain_dbs {
+            if user_keychain_dbs.iter().any(|candidate| path == candidate) {
                 return true;
             }
         }
@@ -270,7 +279,7 @@ fn has_explicit_login_keychain_db_access(caps: &CapabilitySet) -> bool {
 
     caps.fs_capabilities()
         .iter()
-        .any(|cap| is_login_db(&cap.original) || is_login_db(&cap.resolved))
+        .any(|cap| is_keychain_db(&cap.original) || is_keychain_db(&cap.resolved))
 }
 
 /// Escape a path for use in Seatbelt profile strings.
@@ -344,13 +353,13 @@ fn generate_profile(caps: &CapabilitySet) -> Result<String> {
     profile.push_str("(allow sysctl-read)\n");
 
     // Mach IPC: allow service resolution. Deny Keychain/security services by default.
-    // If login.keychain-db is explicitly granted, skip these denies so profiles that
+    // If a keychain DB is explicitly granted, skip these denies so profiles that
     // intentionally rely on macOS Keychain OAuth refresh can work.
     //
     // Without these denies, blanket mach-lookup can permit Keychain retrieval via
     // Mach IPC, bypassing file-level deny rules in profiles that do NOT opt in.
     profile.push_str("(allow mach-lookup)\n");
-    if !has_explicit_login_keychain_db_access(caps) {
+    if !has_explicit_keychain_db_access(caps) {
         profile.push_str("(deny mach-lookup (global-name \"com.apple.SecurityServer\"))\n");
         profile.push_str("(deny mach-lookup (global-name \"com.apple.securityd\"))\n");
     }
@@ -957,14 +966,14 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_profile_keeps_keychain_mach_deny_for_non_login_keychain_paths() {
+    fn test_generate_profile_skips_keychain_mach_deny_for_metadata_keychain_db() {
         let mut caps = CapabilitySet::new();
         let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/test".to_string());
-        let other_keychain_file =
+        let metadata_keychain_db =
             PathBuf::from(home).join("Library/Keychains/metadata.keychain-db");
         caps.add_fs(FsCapability {
-            original: other_keychain_file.clone(),
-            resolved: other_keychain_file,
+            original: metadata_keychain_db.clone(),
+            resolved: metadata_keychain_db,
             access: AccessMode::Read,
             is_file: true,
             source: CapabilitySource::Profile,
@@ -972,8 +981,8 @@ mod tests {
 
         let profile = generate_profile(&caps).unwrap();
 
-        assert!(profile.contains("(deny mach-lookup (global-name \"com.apple.SecurityServer\"))"));
-        assert!(profile.contains("(deny mach-lookup (global-name \"com.apple.securityd\"))"));
+        assert!(!profile.contains("(deny mach-lookup (global-name \"com.apple.SecurityServer\"))"));
+        assert!(!profile.contains("(deny mach-lookup (global-name \"com.apple.securityd\"))"));
     }
 
     #[test]

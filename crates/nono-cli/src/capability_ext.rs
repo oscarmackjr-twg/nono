@@ -513,8 +513,8 @@ fn finalize_caps(
     policy::validate_deny_overlaps(&resolved.deny_paths, caps)?;
 
     // Keep broad keychain deny groups active, but allow explicit
-    // login.keychain-db read grants (profile/CLI) on macOS.
-    policy::apply_macos_login_keychain_exception(caps);
+    // keychain DB read grants (profile/CLI) on macOS.
+    policy::apply_macos_keychain_db_exception(caps);
 
     // Deduplicate capabilities
     caps.deduplicate();
