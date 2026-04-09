@@ -34,6 +34,44 @@ fn try_new_file(path: &Path, access: AccessMode, label: &str) -> Result<Option<F
     }
 }
 
+/// Create a profile capability for an exact path that is usually expected to be a file.
+///
+/// Some clients use lock directories at paths that historically held lock files
+/// (for example `~/.claude.lock`). When that happens, we should grant access to
+/// that exact directory path rather than fail or widen to the whole home
+/// directory.
+fn try_new_profile_exact_path(
+    path: &Path,
+    access: AccessMode,
+    label: &str,
+    protected_roots: &ProtectedRoots,
+) -> Result<Option<FsCapability>> {
+    if std::fs::metadata(path)
+        .map(|metadata| metadata.is_dir())
+        .unwrap_or(false)
+    {
+        validate_requested_dir(path, "Profile", protected_roots)?;
+        debug!(
+            "Profile exact-file path exists as directory; granting exact directory access: {}",
+            path.display()
+        );
+        return try_new_dir(path, access, label);
+    }
+
+    validate_requested_file(path, "Profile", protected_roots)?;
+    match try_new_file(path, access, label) {
+        Err(NonoError::ExpectedFile(_)) => {
+            validate_requested_dir(path, "Profile", protected_roots)?;
+            debug!(
+                "Profile exact-file path resolved as directory; granting exact directory access: {}",
+                path.display()
+            );
+            try_new_dir(path, access, label)
+        }
+        result => result,
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn handle_missing_file_capability(
     path: &Path,
@@ -325,9 +363,10 @@ impl CapabilitySetExt for CapabilitySet {
         // Single files with read+write access
         for path_template in &fs.allow_file {
             let path = expand_vars(path_template, workdir)?;
-            validate_requested_file(&path, "Profile", &protected_roots)?;
             let label = format!("Profile file '{}' does not exist, skipping", path_template);
-            if let Some(mut cap) = try_new_file(&path, AccessMode::ReadWrite, &label)? {
+            if let Some(mut cap) =
+                try_new_profile_exact_path(&path, AccessMode::ReadWrite, &label, &protected_roots)?
+            {
                 cap.source = CapabilitySource::Profile;
                 caps.add_fs(cap);
             }
@@ -336,9 +375,10 @@ impl CapabilitySetExt for CapabilitySet {
         // Single files with read-only access
         for path_template in &fs.read_file {
             let path = expand_vars(path_template, workdir)?;
-            validate_requested_file(&path, "Profile", &protected_roots)?;
             let label = format!("Profile file '{}' does not exist, skipping", path_template);
-            if let Some(mut cap) = try_new_file(&path, AccessMode::Read, &label)? {
+            if let Some(mut cap) =
+                try_new_profile_exact_path(&path, AccessMode::Read, &label, &protected_roots)?
+            {
                 cap.source = CapabilitySource::Profile;
                 caps.add_fs(cap);
             }
@@ -347,9 +387,10 @@ impl CapabilitySetExt for CapabilitySet {
         // Single files with write-only access
         for path_template in &fs.write_file {
             let path = expand_vars(path_template, workdir)?;
-            validate_requested_file(&path, "Profile", &protected_roots)?;
             let label = format!("Profile file '{}' does not exist, skipping", path_template);
-            if let Some(mut cap) = try_new_file(&path, AccessMode::Write, &label)? {
+            if let Some(mut cap) =
+                try_new_profile_exact_path(&path, AccessMode::Write, &label, &protected_roots)?
+            {
                 cap.source = CapabilitySource::Profile;
                 caps.add_fs(cap);
             }
@@ -903,6 +944,43 @@ mod tests {
                     && cap.resolved == resolved_file
             }),
             "macOS CLI exact-file grants should preserve original path and resolve parent symlinks"
+        );
+    }
+
+    #[test]
+    fn test_from_profile_allow_file_falls_back_to_exact_directory_when_present() {
+        let dir = tempdir().expect("tmpdir");
+        let lock_dir = dir.path().join("claude.lock");
+        std::fs::create_dir_all(&lock_dir).expect("create lock dir");
+        let resolved_dir = lock_dir.canonicalize().expect("canonicalize lock dir");
+
+        let profile_path = dir.path().join("lock-dir-profile.json");
+        std::fs::write(
+            &profile_path,
+            format!(
+                r#"{{
+                "meta": {{ "name": "lock-dir-profile" }},
+                "filesystem": {{ "allow_file": ["{}"] }}
+            }}"#,
+                lock_dir.display()
+            ),
+        )
+        .expect("write profile");
+
+        let profile = crate::profile::load_profile_from_path(&profile_path).expect("load profile");
+        let workdir = tempdir().expect("workdir");
+        let args = sandbox_args();
+
+        let (caps, _) = from_profile_locked(&profile, workdir.path(), &args).expect("build caps");
+
+        assert!(
+            caps.fs_capabilities().iter().any(|cap| {
+                !cap.is_file
+                    && cap.access == AccessMode::ReadWrite
+                    && cap.original == lock_dir
+                    && cap.resolved == resolved_dir
+            }),
+            "profiles should allow an exact directory path when an allow_file entry resolves to a directory"
         );
     }
 
