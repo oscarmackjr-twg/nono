@@ -37,39 +37,66 @@ fn try_new_file(path: &Path, access: AccessMode, label: &str) -> Result<Option<F
 /// Create a profile capability for an exact path that is usually expected to be a file.
 ///
 /// Some clients use lock directories at paths that historically held lock files
-/// (for example `~/.claude.lock`). When that happens, we should grant access to
-/// that exact directory path rather than fail or widen to the whole home
-/// directory.
+/// (for example `~/.claude.lock`). On macOS we can preserve exact-path semantics
+/// for that directory by emitting a literal path rule instead of widening to a
+/// recursive directory grant. On other platforms, fail closed.
 fn try_new_profile_exact_path(
     path: &Path,
     access: AccessMode,
     label: &str,
     protected_roots: &ProtectedRoots,
 ) -> Result<Option<FsCapability>> {
-    if std::fs::metadata(path)
-        .map(|metadata| metadata.is_dir())
-        .unwrap_or(false)
-    {
-        validate_requested_dir(path, "Profile", protected_roots)?;
-        debug!(
-            "Profile exact-file path exists as directory; granting exact directory access: {}",
-            path.display()
-        );
-        return try_new_dir(path, access, label);
-    }
-
     validate_requested_file(path, "Profile", protected_roots)?;
     match try_new_file(path, access, label) {
         Err(NonoError::ExpectedFile(_)) => {
-            validate_requested_dir(path, "Profile", protected_roots)?;
-            debug!(
-                "Profile exact-file path resolved as directory; granting exact directory access: {}",
-                path.display()
-            );
-            try_new_dir(path, access, label)
+            handle_exact_directory_path(path, access, protected_roots)
         }
         result => result,
     }
+}
+
+#[cfg(target_os = "macos")]
+fn handle_exact_directory_path(
+    path: &Path,
+    access: AccessMode,
+    protected_roots: &ProtectedRoots,
+) -> Result<Option<FsCapability>> {
+    validate_requested_dir(path, "Profile", protected_roots)?;
+    let resolved = path.canonicalize().map_err(|source| {
+        if source.kind() == std::io::ErrorKind::NotFound {
+            NonoError::PathNotFound(path.to_path_buf())
+        } else {
+            NonoError::PathCanonicalization {
+                path: path.to_path_buf(),
+                source,
+            }
+        }
+    })?;
+
+    debug!(
+        "Profile exact-file path resolved as directory; granting exact macOS literal path access: {}",
+        path.display()
+    );
+
+    Ok(Some(FsCapability {
+        original: path.to_path_buf(),
+        resolved,
+        access,
+        // On macOS, `is_file = true` makes Seatbelt emit a literal path rule
+        // rather than a recursive subpath rule. The target may still be a
+        // directory; the important property is exact-path matching.
+        is_file: true,
+        source: CapabilitySource::Profile,
+    }))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn handle_exact_directory_path(
+    path: &Path,
+    _access: AccessMode,
+    _protected_roots: &ProtectedRoots,
+) -> Result<Option<FsCapability>> {
+    Err(NonoError::ExpectedFile(path.to_path_buf()))
 }
 
 #[cfg(target_os = "macos")]
@@ -947,12 +974,14 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn test_from_profile_allow_file_falls_back_to_exact_directory_when_present() {
         let dir = tempdir().expect("tmpdir");
         let lock_dir = dir.path().join("claude.lock");
         std::fs::create_dir_all(&lock_dir).expect("create lock dir");
         let resolved_dir = lock_dir.canonicalize().expect("canonicalize lock dir");
+        let child = lock_dir.join("nested.txt");
 
         let profile_path = dir.path().join("lock-dir-profile.json");
         std::fs::write(
@@ -975,12 +1004,47 @@ mod tests {
 
         assert!(
             caps.fs_capabilities().iter().any(|cap| {
-                !cap.is_file
+                cap.is_file
                     && cap.access == AccessMode::ReadWrite
                     && cap.original == lock_dir
                     && cap.resolved == resolved_dir
             }),
-            "profiles should allow an exact directory path when an allow_file entry resolves to a directory"
+            "macOS profiles should preserve exact-path semantics when an allow_file entry resolves to a directory"
+        );
+        assert!(
+            !caps.path_covered(&child),
+            "exact-path fallback must not recursively cover descendants"
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn test_from_profile_allow_file_rejects_directory_when_exact_dir_unsupported() {
+        let dir = tempdir().expect("tmpdir");
+        let lock_dir = dir.path().join("claude.lock");
+        std::fs::create_dir_all(&lock_dir).expect("create lock dir");
+
+        let profile_path = dir.path().join("lock-dir-profile.json");
+        std::fs::write(
+            &profile_path,
+            format!(
+                r#"{{
+                "meta": {{ "name": "lock-dir-profile" }},
+                "filesystem": {{ "allow_file": ["{}"] }}
+            }}"#,
+                lock_dir.display()
+            ),
+        )
+        .expect("write profile");
+
+        let profile = crate::profile::load_profile_from_path(&profile_path).expect("load profile");
+        let workdir = tempdir().expect("workdir");
+        let args = sandbox_args();
+
+        let err = from_profile_locked(&profile, workdir.path(), &args).expect_err("should fail");
+        assert!(
+            matches!(err, NonoError::ExpectedFile(ref p) if p == &lock_dir),
+            "expected exact-file entries resolving to directories to fail closed, got: {err}"
         );
     }
 
