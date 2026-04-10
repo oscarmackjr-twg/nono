@@ -21,10 +21,19 @@
 
 use crate::cli::LearnArgs;
 use crate::learn::LearnResult;
+use ferrisetw::parser::Parser;
+use ferrisetw::provider::Provider;
+use ferrisetw::schema_locator::SchemaLocator;
+use ferrisetw::trace::{TraceTrait, UserTrace};
+use ferrisetw::EventRecord;
 use nono::{NonoError, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use tracing::{debug, warn};
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+use tracing::{debug, error, warn};
 use windows_sys::Win32::Storage::FileSystem::QueryDosDeviceW;
 
 /// Error message for non-administrator invocations (D-02).
@@ -236,6 +245,24 @@ pub(crate) fn classify_and_record_file_access(state: &mut LearnState, pid: u32, 
 }
 
 // ---------------------------------------------------------------------------
+// ETW provider GUIDs and session constants
+// ---------------------------------------------------------------------------
+
+/// Microsoft-Windows-Kernel-File provider GUID (verified in CONTEXT.md + research).
+const GUID_KERNEL_FILE: &str = "EDD08927-9CC4-4E65-B970-C2560FB5C289";
+
+/// Microsoft-Windows-Kernel-Process provider GUID (verified in CONTEXT.md + research).
+const GUID_KERNEL_PROCESS: &str = "22FB2CD6-0E7B-422B-A0C7-2FAD1FD0E716";
+
+// Network provider GUID (Microsoft-Windows-Kernel-Network) is deferred to plan 10-03.
+
+/// ETW Kernel-File Create event ID (from research Pattern 2 + Microsoft ETW docs).
+const EVENT_ID_FILE_CREATE: u16 = 12;
+
+/// Drain timeout after child exits (Pitfall 2 mitigation; Claude's Discretion: 200–500ms).
+const DRAIN_TIMEOUT_MS: u64 = 300;
+
+// ---------------------------------------------------------------------------
 // run_learn entry point
 // ---------------------------------------------------------------------------
 
@@ -245,16 +272,190 @@ pub(crate) fn classify_and_record_file_access(state: &mut LearnState, pid: u32, 
 /// before any ETW API call so that unprivileged invocations produce a clear
 /// actionable error immediately (SC3).
 ///
-/// The ETW consumer loop is implemented in plan 10-02.
-pub fn run_learn(_args: &LearnArgs) -> Result<LearnResult> {
-    // D-02: admin check MUST happen before any ETW API call
+/// ## ETW flow
+///
+/// 1. Build volume map (NT device → Win32 drive letter)
+/// 2. Spawn target command unsandboxed; inherit stdio
+/// 3. Seed `Arc<Mutex<LearnState>>` with child PID
+/// 4. Start ferrisetw `UserTrace` session named `nono-learn-{os_pid}` (not
+///    child PID — prevents collision across concurrent learn sessions per T-10-12)
+/// 5. Enable Kernel-Process provider to track child/grandchild PIDs (D-03)
+/// 6. Enable Kernel-File provider to capture Create events → `readwrite_paths`
+/// 7. Run `process_from_handle` on a background thread (blocking)
+/// 8. Wait for child exit, drain 300ms, stop trace, join thread
+/// 9. Return populated `LearnResult`
+pub fn run_learn(args: &LearnArgs) -> Result<LearnResult> {
+    // D-02: admin check MUST be first, before any ETW API call (SC3, T-10-05)
     if !is_admin() {
         return Err(NonoError::LearnError(NON_ADMIN_ERROR.to_string()));
     }
-    // Plan 10-02 will replace this with the ETW consumer loop
-    Err(NonoError::LearnError(
-        "nono learn Windows ETW backend not yet implemented (plan 10-02)".to_string(),
-    ))
+
+    let command = &args.command;
+    if command.is_empty() {
+        return Err(NonoError::LearnError(
+            "nono learn requires a command to trace".to_string(),
+        ));
+    }
+    let (program, program_args) = command
+        .split_first()
+        .ok_or_else(|| NonoError::LearnError("empty command vector after split".to_string()))?;
+
+    // Build volume map BEFORE spawning the child so path conversion is ready
+    // when the first ETW event arrives.
+    let volume_map = build_volume_map();
+
+    // Spawn the child unsandboxed. Inherit stdio so the user sees normal output.
+    // T-10-11: stdio inheritance is intentional — learner is the trusted user.
+    let mut child = Command::new(program)
+        .args(program_args)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|e| NonoError::LearnError(format!("failed to spawn child: {e}")))?;
+    let child_pid = child.id();
+
+    // Shared state between ETW callback threads and main thread (T-10-10).
+    let state = Arc::new(Mutex::new(LearnState::new(child_pid, volume_map)));
+
+    // -----------------------------------------------------------------------
+    // File provider: event_id 12 (Create) → classify_and_record_file_access
+    // -----------------------------------------------------------------------
+    let state_file = state.clone();
+    let file_provider = Provider::by_guid(GUID_KERNEL_FILE)
+        .add_callback(move |record: &EventRecord, locator: &SchemaLocator| {
+            if record.event_id() != EVENT_ID_FILE_CREATE {
+                return;
+            }
+            let Ok(schema) = locator.event_schema(record) else {
+                return;
+            };
+            let parser = Parser::create(record, &schema);
+            // T-10-09: parser errors are silently skipped via let Ok pattern
+            let Ok(file_name): std::result::Result<String, _> = parser.try_parse("FileName") else {
+                return;
+            };
+            let pid = record.process_id();
+            // T-10-10: mutex poison is logged at ERROR and skipped — never panics
+            let Ok(mut guard) = state_file.lock() else {
+                error!("learn_windows: file callback: LearnState mutex poisoned");
+                return;
+            };
+            classify_and_record_file_access(&mut guard, pid, &file_name);
+        })
+        .build();
+
+    // -----------------------------------------------------------------------
+    // Process provider: CreateProcess → on_process_create, ExitProcess → on_process_exit
+    // Event IDs from Microsoft-Windows-Kernel-Process manifest (event_id 1 = Start,
+    // event_id 2 = Stop; 15/16 are alternate forms in some Windows versions).
+    // Field name "ProcessID" confirmed in ferrisetw user_trace.rs example.
+    // -----------------------------------------------------------------------
+    let state_proc = state.clone();
+    let process_provider = Provider::by_guid(GUID_KERNEL_PROCESS)
+        .add_callback(move |record: &EventRecord, locator: &SchemaLocator| {
+            let Ok(schema) = locator.event_schema(record) else {
+                return;
+            };
+            let parser = Parser::create(record, &schema);
+            let event_id = record.event_id();
+            let Ok(mut guard) = state_proc.lock() else {
+                error!("learn_windows: process callback: LearnState mutex poisoned");
+                return;
+            };
+            match event_id {
+                // ProcessStart (1) or alternate start form (15) — D-03
+                1 | 15 => {
+                    let parent: std::result::Result<u32, _> = parser.try_parse("ParentProcessID");
+                    let child: std::result::Result<u32, _> = parser.try_parse("ProcessID");
+                    if let (Ok(p), Ok(c)) = (parent, child) {
+                        guard.on_process_create(p, c);
+                    }
+                }
+                // ProcessStop (2) or alternate stop form (16) — D-03
+                2 | 16 => {
+                    let pid: std::result::Result<u32, _> = parser.try_parse("ProcessID");
+                    if let Ok(p) = pid {
+                        guard.on_process_exit(p);
+                    }
+                }
+                _ => {}
+            }
+        })
+        .build();
+
+    // -----------------------------------------------------------------------
+    // Start trace session (T-10-12: session name uses learner PID not child PID)
+    // -----------------------------------------------------------------------
+    let session_name = format!("nono-learn-{}", std::process::id());
+    debug!(
+        session = session_name.as_str(),
+        "learn_windows: starting ETW session"
+    );
+
+    let trace_result = UserTrace::new()
+        .named(session_name.clone())
+        .enable(file_provider)
+        .enable(process_provider)
+        .start();
+
+    let (trace, trace_handle) = match trace_result {
+        Ok(started) => started,
+        Err(e) => {
+            // T-10-15: kill child before returning error to avoid orphan
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(NonoError::LearnError(format!(
+                "ETW trace setup failed for session '{session_name}': {e:?}"
+            )));
+        }
+    };
+
+    // Run the blocking process loop on a background thread.
+    let trace_thread = thread::spawn(move || {
+        let _ = UserTrace::process_from_handle(trace_handle);
+    });
+
+    // Wait for the child to exit (main thread blocks here).
+    let exit_status = child
+        .wait()
+        .map_err(|e| NonoError::LearnError(format!("failed to wait on child: {e}")))?;
+    debug!(
+        code = ?exit_status.code(),
+        "learn_windows: child exited, draining ETW events"
+    );
+
+    // Drain in-flight ETW events before stopping (Pitfall 2 mitigation).
+    thread::sleep(Duration::from_millis(DRAIN_TIMEOUT_MS));
+
+    // Stop the trace — consumes `trace`. Dropping would also work.
+    if let Err(e) = trace.stop() {
+        warn!("learn_windows: trace stop returned error: {e:?}");
+    }
+
+    // Join the background thread. If it panicked, log and continue.
+    if let Err(e) = trace_thread.join() {
+        warn!("learn_windows: ETW thread join failed: {e:?}");
+    }
+
+    // Extract result from shared state using mem::take on each field.
+    let mut guard = state.lock().map_err(|e| {
+        NonoError::LearnError(format!("LearnState mutex poisoned at end of run: {e}"))
+    })?;
+    let result = LearnResult {
+        read_paths: std::mem::take(&mut guard.result.read_paths),
+        read_files: std::mem::take(&mut guard.result.read_files),
+        write_paths: std::mem::take(&mut guard.result.write_paths),
+        write_files: std::mem::take(&mut guard.result.write_files),
+        readwrite_paths: std::mem::take(&mut guard.result.readwrite_paths),
+        readwrite_files: std::mem::take(&mut guard.result.readwrite_files),
+        system_covered: std::mem::take(&mut guard.result.system_covered),
+        profile_covered: std::mem::take(&mut guard.result.profile_covered),
+        outbound_connections: std::mem::take(&mut guard.result.outbound_connections),
+        listening_ports: std::mem::take(&mut guard.result.listening_ports),
+    };
+    drop(guard);
+    Ok(result)
 }
 
 /// Thin seam for test injection — production calls through to exec_strategy.
@@ -441,11 +642,7 @@ mod tests {
     #[test]
     fn test_classify_unconvertible_path_is_noop() {
         let mut state = state_with_map(1234);
-        classify_and_record_file_access(
-            &mut state,
-            1234,
-            "\\Device\\NamedPipe\\chrome.1234",
-        );
+        classify_and_record_file_access(&mut state, 1234, "\\Device\\NamedPipe\\chrome.1234");
         assert!(state.result.readwrite_paths.is_empty());
     }
 
@@ -494,11 +691,7 @@ mod tests {
     fn test_classify_descendant_pid_records_path() {
         let mut state = state_with_map(1234);
         state.on_process_create(1234, 5678); // child becomes tracked
-        classify_and_record_file_access(
-            &mut state,
-            5678,
-            "\\Device\\HarddiskVolume3\\child.log",
-        );
+        classify_and_record_file_access(&mut state, 5678, "\\Device\\HarddiskVolume3\\child.log");
         assert_eq!(state.result.readwrite_paths.len(), 1);
     }
 }
