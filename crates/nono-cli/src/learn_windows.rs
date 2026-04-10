@@ -43,7 +43,10 @@ use windows_sys::Win32::Storage::FileSystem::QueryDosDeviceW;
 /// - "nono learn requires administrator privileges"
 /// - "Run from an elevated prompt"
 /// - "Run as administrator"
-const NON_ADMIN_ERROR: &str = "nono learn requires administrator privileges. \
+///
+/// `pub(crate)` so `learn_runtime` can return the exact same string for the
+/// early admin gate (UAT Gap 1) without any risk of message drift.
+pub(crate) const NON_ADMIN_ERROR: &str = "nono learn requires administrator privileges. \
     Run from an elevated prompt (right-click \u{2192} Run as administrator).";
 
 // ---------------------------------------------------------------------------
@@ -72,21 +75,13 @@ pub(crate) struct LearnState {
 }
 
 impl LearnState {
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-    pub fn new(root_pid: u32, volume_map: HashMap<String, String>) -> Self {
-        let mut s = Self::new_empty(volume_map);
-        s.tracked_pids.insert(root_pid);
-        s
-    }
-
     /// Create a `LearnState` with an empty tracked-PID set.
     ///
-    /// Used by `run_learn` (WR-03 fix) to construct state before the child PID is
-    /// known so the ETW trace can be started before spawning the child. The caller
-    /// must insert the child PID via `tracked_pids.insert(child_pid)` immediately
-    /// after `Command::spawn()` returns, before any substantial child activity begins.
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-    pub fn new_empty(volume_map: HashMap<String, String>) -> Self {
+    /// Callers must insert the root PID via `state.tracked_pids.insert(pid)`
+    /// immediately after `Command::spawn()` returns, before any substantial child
+    /// activity begins. This two-step pattern (WR-03 fix) lets the ETW trace start
+    /// before the child PID is known so that early DLL-load accesses are captured.
+    pub fn new(volume_map: HashMap<String, String>) -> Self {
         Self {
             tracked_pids: HashSet::new(),
             result: LearnResult::new(),
@@ -395,7 +390,7 @@ pub fn run_learn(args: &LearnArgs) -> Result<LearnResult> {
 
     // Shared state between ETW callback threads and main thread (T-10-10).
     // Initialized with an empty tracked_pids set; child PID is inserted after spawn.
-    let state = Arc::new(Mutex::new(LearnState::new_empty(volume_map)));
+    let state = Arc::new(Mutex::new(LearnState::new(volume_map)));
 
     // -----------------------------------------------------------------------
     // File provider: event_id 12 (Create) → classify_and_record_file_access
@@ -681,14 +676,22 @@ pub fn run_learn(args: &LearnArgs) -> Result<LearnResult> {
         outbound_connections: std::mem::take(&mut guard.outbound_counts)
             .into_iter()
             .map(|((addr, port), count)| NetworkConnectionSummary {
-                endpoint: NetworkEndpoint { addr, port, hostname: None },
+                endpoint: NetworkEndpoint {
+                    addr,
+                    port,
+                    hostname: None,
+                },
                 count,
             })
             .collect(),
         listening_ports: std::mem::take(&mut guard.listening_counts)
             .into_iter()
             .map(|((addr, port), count)| NetworkConnectionSummary {
-                endpoint: NetworkEndpoint { addr, port, hostname: None },
+                endpoint: NetworkEndpoint {
+                    addr,
+                    port,
+                    hostname: None,
+                },
                 count,
             })
             .collect(),
@@ -698,13 +701,17 @@ pub fn run_learn(args: &LearnArgs) -> Result<LearnResult> {
 }
 
 /// Thin seam for test injection — production calls through to exec_strategy.
+///
+/// `pub(crate)` so `learn_runtime` can perform the admin pre-check (UAT Gap 1)
+/// before showing the interactive warning prompt, while keeping the admin policy
+/// centralized in this module.
 #[cfg(not(test))]
-fn is_admin() -> bool {
+pub(crate) fn is_admin() -> bool {
     crate::exec_strategy::is_admin_process()
 }
 
 #[cfg(test)]
-fn is_admin() -> bool {
+pub(crate) fn is_admin() -> bool {
     tests::TEST_IS_ADMIN.with(|c| c.get())
 }
 
@@ -796,28 +803,32 @@ mod tests {
 
     #[test]
     fn test_process_tree_root_seeded() {
-        let state = LearnState::new(1234, HashMap::new());
+        let mut state = LearnState::new(HashMap::new());
+        state.tracked_pids.insert(1234);
         assert!(state.is_tracked(1234));
         assert!(!state.is_tracked(5678));
     }
 
     #[test]
     fn test_process_tree_add_child_of_tracked_parent() {
-        let mut state = LearnState::new(1234, HashMap::new());
+        let mut state = LearnState::new(HashMap::new());
+        state.tracked_pids.insert(1234);
         state.on_process_create(1234, 5678);
         assert!(state.is_tracked(5678));
     }
 
     #[test]
     fn test_process_tree_skip_child_of_untracked_parent() {
-        let mut state = LearnState::new(1234, HashMap::new());
+        let mut state = LearnState::new(HashMap::new());
+        state.tracked_pids.insert(1234);
         state.on_process_create(9999, 5678);
         assert!(!state.is_tracked(5678));
     }
 
     #[test]
     fn test_process_tree_grandchild_inherits() {
-        let mut state = LearnState::new(1234, HashMap::new());
+        let mut state = LearnState::new(HashMap::new());
+        state.tracked_pids.insert(1234);
         state.on_process_create(1234, 5678);
         state.on_process_create(5678, 9999);
         assert!(state.is_tracked(9999));
@@ -825,7 +836,8 @@ mod tests {
 
     #[test]
     fn test_process_tree_exit_removes() {
-        let mut state = LearnState::new(1234, HashMap::new());
+        let mut state = LearnState::new(HashMap::new());
+        state.tracked_pids.insert(1234);
         state.on_process_create(1234, 5678);
         state.on_process_exit(5678);
         assert!(!state.is_tracked(5678));
@@ -834,7 +846,8 @@ mod tests {
 
     #[test]
     fn test_process_tree_reserved_pids_rejected() {
-        let mut state = LearnState::new(1234, HashMap::new());
+        let mut state = LearnState::new(HashMap::new());
+        state.tracked_pids.insert(1234);
         state.on_process_create(1234, 0);
         state.on_process_create(1234, 4);
         assert!(!state.is_tracked(0));
@@ -843,7 +856,8 @@ mod tests {
 
     #[test]
     fn test_process_tree_double_add_idempotent() {
-        let mut state = LearnState::new(1234, HashMap::new());
+        let mut state = LearnState::new(HashMap::new());
+        state.tracked_pids.insert(1234);
         state.on_process_create(1234, 5678);
         state.on_process_create(1234, 5678);
         assert!(state.is_tracked(5678));
@@ -852,7 +866,8 @@ mod tests {
 
     #[test]
     fn test_process_tree_exit_untracked_is_noop() {
-        let mut state = LearnState::new(1234, HashMap::new());
+        let mut state = LearnState::new(HashMap::new());
+        state.tracked_pids.insert(1234);
         state.on_process_exit(9999); // should not panic or error
         assert!(state.is_tracked(1234));
     }
@@ -864,7 +879,9 @@ mod tests {
     fn state_with_map(root_pid: u32) -> LearnState {
         let mut map = HashMap::new();
         map.insert("\\Device\\HarddiskVolume3".to_string(), "C:\\".to_string());
-        LearnState::new(root_pid, map)
+        let mut s = LearnState::new(map);
+        s.tracked_pids.insert(root_pid);
+        s
     }
 
     #[test]

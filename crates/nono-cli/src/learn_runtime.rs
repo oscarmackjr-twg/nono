@@ -4,6 +4,19 @@ use colored::Colorize;
 use nono::{NonoError, Result};
 
 pub(crate) fn run_learn(args: LearnArgs, silent: bool) -> Result<()> {
+    // D-02 / UAT Gap 1: on Windows, reject non-admin invocations immediately,
+    // BEFORE the interactive warning prompt. This matches the phase 10 admin gate
+    // contract — users should never see "Continue? [y/N]" if they cannot run learn
+    // in the first place.
+    #[cfg(target_os = "windows")]
+    {
+        if !crate::learn_windows::is_admin() {
+            return Err(NonoError::LearnError(
+                crate::learn_windows::NON_ADMIN_ERROR.to_string(),
+            ));
+        }
+    }
+
     if !silent {
         eprintln!(
             "{}",
