@@ -13,7 +13,7 @@ This roadmap outlines the path to functional parity between the Windows implemen
 - [x] **Phase 7: Quick Wins** - Unblock everyday UX by enabling nono wrap and session log commands on Windows. (completed 2026-04-08)
 - [x] **Phase 8: ConPTY Shell** - Enable interactive nono shell on Windows via ConPTY. (completed 2026-04-10)
 - [x] **Phase 9: WFP Port-Level + Proxy Filtering** - Enable port-granular network policy and proxy credential injection. (completed 2026-04-10)
-- [ ] **Phase 10: ETW-Based Learn Command** - Implement nono learn on Windows via Event Tracing for Windows.
+- [x] **Phase 10: ETW-Based Learn Command** - Implement nono learn on Windows via Event Tracing for Windows. (completed 2026-04-10)
 - [ ] **Phase 11: Runtime Capability Expansion** - (Stretch) Enable sandboxed child to request additional capabilities at runtime.
 
 ## Phase Details
@@ -127,9 +127,9 @@ Plans:
   4. The ETW library choice (`ferrisetw` vs direct `windows-sys` bindings) is documented with rationale before any ETW code is written.
 **Plans**: 3 plans
 Plans:
-- [ ] 10-01-PLAN.md — Foundation: add ferrisetw + ETW feature, create learn_windows module scaffold, wire dispatch and tests
-- [ ] 10-02-PLAN.md — ETW consumer: process tree tracking, file event capture (D-04 Option B), full run_learn orchestration
-- [ ] 10-03-PLAN.md — Network events: Kernel-Network provider, TcpIp handlers, Windows integration test, phase close-out
+- [x] 10-01-PLAN.md — Foundation: add ferrisetw + ETW feature, create learn_windows module scaffold, wire dispatch and tests
+- [x] 10-02-PLAN.md — ETW consumer: process tree tracking, file event capture (D-04 Option B), full run_learn orchestration
+- [x] 10-03-PLAN.md — Network events: Kernel-Network provider, TcpIp handlers, Windows integration test, phase close-out
 
 ### Phase 11: Runtime Capability Expansion
 **Goal**: A sandboxed child process can request additional capabilities from the supervisor at runtime via the named-pipe IPC channel, with user approval and session token authentication.
@@ -155,7 +155,7 @@ Plans:
 | 5. Windows Detach Readiness Fix | 1/1 | Complete   | 2026-04-05 |
 | 6. WFP Enforcement Activation | 2/2 | Complete   | 2026-04-06 |
 | 7. Quick Wins | 2/2 | Complete   | 2026-04-08 |
-| 8. ConPTY Shell | 0/2 | Not started | - |
+| 8. ConPTY Shell | 1/1 | Complete | 2026-04-10 |
 | 9. WFP Port-Level + Proxy Filtering | 4/4 | Complete | 2026-04-10 |
-| 10. ETW-Based Learn Command | 0/3 | Not started | - |
+| 10. ETW-Based Learn Command | 3/3 | Complete   | 2026-04-10 |
 | 11. Runtime Capability Expansion | 0/2 | Not started | - |
