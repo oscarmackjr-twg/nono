@@ -1426,11 +1426,15 @@ mod tests {
     }
 
     #[test]
-    fn apply_rejects_unsupported_proxy_with_ports() {
+    fn apply_accepts_port_level_wfp_caps() {
+        // Phase 09 removed the PortConnectAllowlist / PortBindAllowlist /
+        // LocalhostPortAllowlist unsupported markers from compile_network_policy().
+        // apply() now returns Ok(()) for port-populated capability sets on Windows
+        // because the unsupported vec stays empty and the guard at line ~50 passes.
         let mut caps = CapabilitySet::new();
         caps.add_tcp_bind_port(8080);
-        let err = apply(&caps).expect_err("port bind allowlist must be rejected");
-        assert!(matches!(err, NonoError::UnsupportedPlatform(_)));
+        caps.add_tcp_connect_port(8443);
+        apply(&caps).expect("port-level WFP caps must be accepted on Windows");
     }
 
     #[test]
