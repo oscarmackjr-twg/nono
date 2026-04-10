@@ -252,11 +252,45 @@ pub(crate) fn nt_to_win32(nt_path: &str, volume_map: &HashMap<String, String>) -
 ///
 /// Reference: .planning/phases/10-etw-based-learn-command/10-RESEARCH.md
 /// section "D-04 Field Name Discrepancy (CRITICAL — Planner Must Resolve)".
+/// Strip NTFS Alternate Data Stream suffixes from an NT path.
+///
+/// NTFS supports named streams via the syntax `path\to\file.ext:streamname`.
+/// The most common case nono sees is `:Zone.Identifier`, which Windows attaches
+/// to every downloaded file as a Mark-of-the-Web marker. These streams are
+/// filesystem metadata, not distinct files — granting access to them is
+/// semantically wrong and pollutes learn output (UAT Gap 4).
+///
+/// Rule: only the FINAL path segment (after the last backslash) is considered.
+/// If that segment contains a `:`, truncate at the first colon. This preserves
+/// drive-letter prefixes like `C:\...` (which live in the first segment) and
+/// `\Device\NamedPipe\chrome.1234`-style names that have no colon in the final
+/// segment.
+///
+/// Returns a borrowed slice of the input — no allocation on the hot path.
+fn strip_ads_suffix(nt_path: &str) -> &str {
+    // Find the final segment after the last backslash.
+    let last_sep = nt_path.rfind('\\');
+    let (prefix_end, segment_start) = match last_sep {
+        Some(idx) => (idx + 1, idx + 1),
+        None => (0, 0),
+    };
+    let segment = &nt_path[segment_start..];
+    match segment.find(':') {
+        Some(colon_idx) => &nt_path[..prefix_end + colon_idx],
+        None => nt_path,
+    }
+}
+
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn classify_and_record_file_access(state: &mut LearnState, pid: u32, nt_path: &str) {
     if !state.is_tracked(pid) {
         return;
     }
+    // UAT Gap 4: strip NTFS ADS suffixes (e.g. `:Zone.Identifier`) before
+    // classification. These are filesystem metadata streams, not files, and
+    // would otherwise pollute learn output with a `:Zone.Identifier` entry
+    // for every downloaded DLL.
+    let nt_path = strip_ads_suffix(nt_path);
     let Some(win32_path) = nt_to_win32(nt_path, &state.volume_map) else {
         debug!(nt_path, "learn_windows: skipping non-drive NT path");
         return;
@@ -1035,5 +1069,72 @@ mod tests {
         // WR-02: same port should deduplicate to one entry with count 2
         assert_eq!(state.listening_counts.len(), 1);
         assert_eq!(state.listening_counts[&(local_ip, 8080)], 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // ADS suffix stripping tests (UAT Gap 4)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn strip_ads_suffix_removes_zone_identifier() {
+        let input = "\\Device\\HarddiskVolume3\\Windows\\System32\\kernel32.dll:Zone.Identifier";
+        assert_eq!(
+            strip_ads_suffix(input),
+            "\\Device\\HarddiskVolume3\\Windows\\System32\\kernel32.dll"
+        );
+    }
+
+    #[test]
+    fn strip_ads_suffix_passthrough_no_stream() {
+        let input = "\\Device\\HarddiskVolume3\\Windows\\System32\\kernel32.dll";
+        assert_eq!(strip_ads_suffix(input), input);
+    }
+
+    #[test]
+    fn strip_ads_suffix_removes_arbitrary_stream_name() {
+        let input = "\\Device\\HarddiskVolume3\\foo.txt:customstream";
+        assert_eq!(
+            strip_ads_suffix(input),
+            "\\Device\\HarddiskVolume3\\foo.txt"
+        );
+    }
+
+    #[test]
+    fn strip_ads_suffix_preserves_named_pipe_without_colon() {
+        let input = "\\Device\\NamedPipe\\chrome.1234";
+        assert_eq!(strip_ads_suffix(input), input);
+    }
+
+    #[test]
+    fn strip_ads_suffix_only_considers_final_segment() {
+        // A path with no colon in the final segment must be returned unchanged.
+        let input = "\\Device\\HarddiskVolume3\\dir\\file.dll";
+        assert_eq!(strip_ads_suffix(input), input);
+    }
+
+    #[test]
+    fn classify_and_record_file_access_filters_zone_identifier() {
+        let mut state = state_with_map(1234);
+        classify_and_record_file_access(
+            &mut state,
+            1234,
+            "\\Device\\HarddiskVolume3\\Windows\\System32\\kernel32.dll:Zone.Identifier",
+        );
+        // The clean path must be present.
+        assert!(state
+            .result
+            .readwrite_paths
+            .iter()
+            .any(|p| p.ends_with("kernel32.dll")));
+        // No :Zone.Identifier entries anywhere.
+        assert!(
+            !state
+                .result
+                .readwrite_paths
+                .iter()
+                .any(|p| p.to_string_lossy().contains(":Zone.Identifier")),
+            "ADS suffix leaked into readwrite_paths: {:?}",
+            state.result.readwrite_paths
+        );
     }
 }
