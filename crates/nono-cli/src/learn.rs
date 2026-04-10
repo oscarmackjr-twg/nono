@@ -7,7 +7,9 @@
 use crate::cli::LearnArgs;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use nono::AccessMode;
-use nono::{NonoError, Result};
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+use nono::NonoError;
+use nono::Result;
 use std::collections::BTreeSet;
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -57,8 +59,8 @@ pub struct LearnResult {
 }
 
 impl LearnResult {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    fn new() -> Self {
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    pub(crate) fn new() -> Self {
         Self {
             read_paths: BTreeSet::new(),
             read_files: BTreeSet::new(),
@@ -383,11 +385,17 @@ fn check_strace() -> Result<()> {
     }
 }
 
+/// Run learn mode (Windows — ETW backend)
+#[cfg(target_os = "windows")]
+pub fn run_learn(args: &LearnArgs) -> Result<LearnResult> {
+    crate::learn_windows::run_learn(args)
+}
+
 /// Run learn mode (unsupported platform stub)
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub fn run_learn(_args: &LearnArgs) -> Result<LearnResult> {
     Err(NonoError::LearnError(
-        "nono learn is only available on Linux (strace) and macOS (fs_usage)".to_string(),
+        "nono learn is not supported on this platform".to_string(),
     ))
 }
 

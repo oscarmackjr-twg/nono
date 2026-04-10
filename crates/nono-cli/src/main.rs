@@ -21,6 +21,8 @@ mod instruction_deny;
 mod launch_runtime;
 mod learn;
 mod learn_runtime;
+#[cfg(target_os = "windows")]
+mod learn_windows;
 mod network_policy;
 #[cfg(not(target_os = "windows"))]
 mod open_url_runtime;
