@@ -200,6 +200,42 @@ pub(crate) fn nt_to_win32(nt_path: &str, volume_map: &HashMap<String, String>) -
 }
 
 // ---------------------------------------------------------------------------
+// File event classification
+// ---------------------------------------------------------------------------
+
+/// Record a file access from an ETW Kernel-File Create event.
+///
+/// D-04 RESOLUTION (Option B — v1 conservative default):
+/// The modern `Microsoft-Windows-Kernel-File` provider does NOT expose the
+/// `DesiredAccess` field that CONTEXT.md D-04 originally referenced — that
+/// field exists only in the legacy MOF-based NT Kernel Logger provider.
+/// The modern provider exposes `CreateOptions`, which encodes caching and
+/// synchronization semantics rather than read/write intent.
+///
+/// Rather than guess read-vs-write intent from `CreateOptions` disposition
+/// bits (which would misclassify `FILE_OPEN` for writable handles), this v1
+/// conservatively classifies every Create event as `readwrite`. Users can
+/// trim the resulting profile down to `read`-only entries post-hoc.
+///
+/// Future work: plan 10-03 or a follow-up phase can revisit this with
+/// empirical testing on Windows to refine classification from CreateOptions
+/// or by supplementing with FileIo/Read and FileIo/Write events.
+///
+/// Reference: .planning/phases/10-etw-based-learn-command/10-RESEARCH.md
+/// section "D-04 Field Name Discrepancy (CRITICAL — Planner Must Resolve)".
+#[allow(dead_code)] // called by Task 3 ETW file-event callback
+pub(crate) fn classify_and_record_file_access(state: &mut LearnState, pid: u32, nt_path: &str) {
+    if !state.is_tracked(pid) {
+        return;
+    }
+    let Some(win32_path) = nt_to_win32(nt_path, &state.volume_map) else {
+        debug!(nt_path, "learn_windows: skipping non-drive NT path");
+        return;
+    };
+    state.result.readwrite_paths.insert(win32_path);
+}
+
+// ---------------------------------------------------------------------------
 // run_learn entry point
 // ---------------------------------------------------------------------------
 
@@ -379,5 +415,90 @@ mod tests {
         let mut state = LearnState::new(1234, HashMap::new());
         state.on_process_exit(9999); // should not panic or error
         assert!(state.is_tracked(1234));
+    }
+
+    // -----------------------------------------------------------------------
+    // File event classification tests (plan 10-02 Task 2)
+    // -----------------------------------------------------------------------
+
+    fn state_with_map(root_pid: u32) -> LearnState {
+        let mut map = HashMap::new();
+        map.insert("\\Device\\HarddiskVolume3".to_string(), "C:\\".to_string());
+        LearnState::new(root_pid, map)
+    }
+
+    #[test]
+    fn test_classify_untracked_pid_is_noop() {
+        let mut state = state_with_map(1234);
+        classify_and_record_file_access(
+            &mut state,
+            9999, // not tracked
+            "\\Device\\HarddiskVolume3\\Users\\x.txt",
+        );
+        assert!(state.result.readwrite_paths.is_empty());
+    }
+
+    #[test]
+    fn test_classify_unconvertible_path_is_noop() {
+        let mut state = state_with_map(1234);
+        classify_and_record_file_access(
+            &mut state,
+            1234,
+            "\\Device\\NamedPipe\\chrome.1234",
+        );
+        assert!(state.result.readwrite_paths.is_empty());
+    }
+
+    #[test]
+    fn test_classify_tracked_pid_records_path() {
+        let mut state = state_with_map(1234);
+        classify_and_record_file_access(
+            &mut state,
+            1234,
+            "\\Device\\HarddiskVolume3\\Users\\alice\\data.json",
+        );
+        assert_eq!(state.result.readwrite_paths.len(), 1);
+        assert!(state
+            .result
+            .readwrite_paths
+            .contains(&PathBuf::from("C:\\Users\\alice\\data.json")));
+    }
+
+    #[test]
+    fn test_classify_deduplicates_repeated_paths() {
+        let mut state = state_with_map(1234);
+        let p = "\\Device\\HarddiskVolume3\\Users\\alice\\data.json";
+        classify_and_record_file_access(&mut state, 1234, p);
+        classify_and_record_file_access(&mut state, 1234, p);
+        classify_and_record_file_access(&mut state, 1234, p);
+        assert_eq!(state.result.readwrite_paths.len(), 1);
+    }
+
+    #[test]
+    fn test_classify_multiple_distinct_paths() {
+        let mut state = state_with_map(1234);
+        classify_and_record_file_access(
+            &mut state,
+            1234,
+            "\\Device\\HarddiskVolume3\\Users\\alice\\a.txt",
+        );
+        classify_and_record_file_access(
+            &mut state,
+            1234,
+            "\\Device\\HarddiskVolume3\\Users\\alice\\b.txt",
+        );
+        assert_eq!(state.result.readwrite_paths.len(), 2);
+    }
+
+    #[test]
+    fn test_classify_descendant_pid_records_path() {
+        let mut state = state_with_map(1234);
+        state.on_process_create(1234, 5678); // child becomes tracked
+        classify_and_record_file_access(
+            &mut state,
+            5678,
+            "\\Device\\HarddiskVolume3\\child.log",
+        );
+        assert_eq!(state.result.readwrite_paths.len(), 1);
     }
 }
