@@ -74,10 +74,21 @@ pub(crate) struct LearnState {
 impl LearnState {
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub fn new(root_pid: u32, volume_map: HashMap<String, String>) -> Self {
-        let mut tracked_pids = HashSet::new();
-        tracked_pids.insert(root_pid);
+        let mut s = Self::new_empty(volume_map);
+        s.tracked_pids.insert(root_pid);
+        s
+    }
+
+    /// Create a `LearnState` with an empty tracked-PID set.
+    ///
+    /// Used by `run_learn` (WR-03 fix) to construct state before the child PID is
+    /// known so the ETW trace can be started before spawning the child. The caller
+    /// must insert the child PID via `tracked_pids.insert(child_pid)` immediately
+    /// after `Command::spawn()` returns, before any substantial child activity begins.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub fn new_empty(volume_map: HashMap<String, String>) -> Self {
         Self {
-            tracked_pids,
+            tracked_pids: HashSet::new(),
             result: LearnResult::new(),
             volume_map,
             outbound_counts: HashMap::new(),
@@ -348,17 +359,17 @@ const DRAIN_TIMEOUT_MS: u64 = 300;
 /// before any ETW API call so that unprivileged invocations produce a clear
 /// actionable error immediately (SC3).
 ///
-/// ## ETW flow
+/// ## ETW flow (WR-03: trace starts before child to capture early accesses)
 ///
 /// 1. Build volume map (NT device → Win32 drive letter)
-/// 2. Spawn target command unsandboxed; inherit stdio
-/// 3. Seed `Arc<Mutex<LearnState>>` with child PID
+/// 2. Initialize `Arc<Mutex<LearnState>>` with empty tracked-PID set
+/// 3. Set up Kernel-File, Kernel-Process, and Kernel-Network providers
 /// 4. Start ferrisetw `UserTrace` session named `nono-learn-{os_pid}` (not
 ///    child PID — prevents collision across concurrent learn sessions per T-10-12)
-/// 5. Enable Kernel-Process provider to track child/grandchild PIDs (D-03)
-/// 6. Enable Kernel-File provider to capture Create events → `readwrite_paths`
-/// 7. Run `process_from_handle` on a background thread (blocking)
-/// 8. Wait for child exit, drain 300ms, stop trace, join thread
+/// 5. Run `process_from_handle` on a background thread (blocking)
+/// 6. Spawn target command unsandboxed; insert child PID into `LearnState`
+/// 7. Wait for child exit, drain 300ms, stop trace, join thread
+/// 8. Convert HashMap accumulators to `Vec<NetworkConnectionSummary>`
 /// 9. Return populated `LearnResult`
 pub fn run_learn(args: &LearnArgs) -> Result<LearnResult> {
     // D-02: admin check MUST be first, before any ETW API call (SC3, T-10-05)
@@ -376,23 +387,15 @@ pub fn run_learn(args: &LearnArgs) -> Result<LearnResult> {
         .split_first()
         .ok_or_else(|| NonoError::LearnError("empty command vector after split".to_string()))?;
 
-    // Build volume map BEFORE spawning the child so path conversion is ready
-    // when the first ETW event arrives.
+    // WR-03: Build volume map and set up ETW providers BEFORE spawning the child
+    // so that early file accesses during process initialization (DLL loads, config reads)
+    // are captured. The child PID is unknown at this point; it is inserted into
+    // LearnState immediately after spawn before any substantial child activity begins.
     let volume_map = build_volume_map();
 
-    // Spawn the child unsandboxed. Inherit stdio so the user sees normal output.
-    // T-10-11: stdio inheritance is intentional — learner is the trusted user.
-    let mut child = Command::new(program)
-        .args(program_args)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .map_err(|e| NonoError::LearnError(format!("failed to spawn child: {e}")))?;
-    let child_pid = child.id();
-
     // Shared state between ETW callback threads and main thread (T-10-10).
-    let state = Arc::new(Mutex::new(LearnState::new(child_pid, volume_map)));
+    // Initialized with an empty tracked_pids set; child PID is inserted after spawn.
+    let state = Arc::new(Mutex::new(LearnState::new_empty(volume_map)));
 
     // -----------------------------------------------------------------------
     // File provider: event_id 12 (Create) → classify_and_record_file_access
@@ -581,6 +584,8 @@ pub fn run_learn(args: &LearnArgs) -> Result<LearnResult> {
         "learn_windows: starting ETW session"
     );
 
+    // WR-03: Start the trace BEFORE spawning the child so that early file accesses
+    // during process initialization (loader, DLL mapping, config reads) are captured.
     let trace_result = UserTrace::new()
         .named(session_name.clone())
         .enable(file_provider)
@@ -591,9 +596,7 @@ pub fn run_learn(args: &LearnArgs) -> Result<LearnResult> {
     let (trace, trace_handle) = match trace_result {
         Ok(started) => started,
         Err(e) => {
-            // T-10-15: kill child before returning error to avoid orphan
-            let _ = child.kill();
-            let _ = child.wait();
+            // No child has been spawned yet — no orphan to clean up.
             return Err(NonoError::LearnError(format!(
                 "ETW trace setup failed for session '{session_name}': {e:?}"
             )));
@@ -604,6 +607,40 @@ pub fn run_learn(args: &LearnArgs) -> Result<LearnResult> {
     let trace_thread = thread::spawn(move || {
         let _ = UserTrace::process_from_handle(trace_handle);
     });
+
+    // WR-03: Spawn the child AFTER the trace is running so no early accesses are missed.
+    // T-10-11: stdio inheritance is intentional — learner is the trusted user.
+    let spawn_result = Command::new(program)
+        .args(program_args)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn();
+    let mut child = match spawn_result {
+        Ok(c) => c,
+        Err(e) => {
+            // T-10-15: trace is running but child failed to spawn; stop trace cleanly
+            // before returning so no background thread is left dangling.
+            let _ = trace.stop();
+            let _ = trace_thread.join();
+            return Err(NonoError::LearnError(format!("failed to spawn child: {e}")));
+        }
+    };
+    let child_pid = child.id();
+
+    // Insert the child PID into LearnState immediately — before any substantial
+    // child activity begins. ETW events arriving now will be correctly attributed.
+    {
+        let Ok(mut guard) = state.lock() else {
+            // Mutex is poisoned before any callbacks ran — kill child and bail.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(NonoError::LearnError(
+                "LearnState mutex poisoned before child PID insertion".to_string(),
+            ));
+        };
+        guard.tracked_pids.insert(child_pid);
+    }
 
     // Wait for the child to exit (main thread blocks here).
     let exit_status = child
