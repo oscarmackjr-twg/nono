@@ -9,327 +9,16 @@ use std::path::PathBuf;
 
 const STYLES: Styles = Styles::plain().header(Style::new().bold());
 
-#[cfg(target_os = "windows")]
-const CLI_ABOUT: &str = "A capability-based shell for running untrusted AI agents and processes with OS-enforced isolation.\nUnsupported flows fail closed instead of implying full sandbox parity.";
-
-#[cfg(not(target_os = "windows"))]
-const CLI_ABOUT: &str = "A capability-based shell for running untrusted AI agents and processes\nwith OS-enforced filesystem and network isolation.";
-
-#[cfg(target_os = "windows")]
-const SHELL_AFTER_HELP: &str = "\x1b[1mEXAMPLES\x1b[0m
-  nono shell                                   # Launch interactive shell (PowerShell or cmd.exe)
-  nono shell --shell cmd.exe                   # Explicitly use cmd.exe
-  nono shell --allow . --block-net             # Shell with write access but no network
-
-\x1b[1mWINDOWS BEHAVIOR\x1b[0m
-  On Windows, `nono shell` launches PowerShell (or cmd.exe if PowerShell is absent)
-  inside a Job Object + WFP sandbox via ConPTY (requires Windows 10 build 17763+).
-  The supervisor process stays alive as Job Object owner; it does not exec-replace
-  the CLI, unlike on Unix.
-  Terminal resize events are forwarded via ResizePseudoConsole.
-  Ctrl-C is forwarded to the child shell without terminating the supervisor.
-  There is no silent fallback to a non-PTY path on unsupported builds.";
-
-#[cfg(not(target_os = "windows"))]
-const SHELL_AFTER_HELP: &str = "\x1b[1mEXAMPLES\x1b[0m
-  nono shell --allow .                         # Shell with read/write to current dir
-  nono shell --profile claude-code             # Use a named profile
-  nono shell --allow . --shell /bin/zsh        # Override shell binary
-";
-
-#[cfg(target_os = "windows")]
-const WRAP_AFTER_HELP: &str = "\x1b[1mEXAMPLES\x1b[0m
-  nono wrap --allow . -- cmd /c echo hello    # Sandbox and exec into command
-  nono wrap --dry-run -- cmd /c echo hello    # Inspect wrap policy without launching
-
-\x1b[1mWINDOWS BEHAVIOR\x1b[0m
-  On Windows, `nono wrap` uses Job Object + WFP enforcement.
-  The supervisor process stays alive as the Job Object owner and does NOT
-  exec-replace the CLI process, unlike on Unix where nono disappears after exec.
-  Proxy filtering is not supported with wrap.";
-
-#[cfg(target_os = "windows")]
-const RUN_AFTER_HELP: &str = "\x1b[1mEXAMPLES\x1b[0m
-  nono run --allow . claude                    # Read/write current dir, run claude
-  nono run --profile claude-code claude        # Use a built-in profile
-  nono run --profile claude-code --allow-domain api.openai.com claude
-                                               # Restrict outbound access to listed domains
-  nono run --read ./src --write ./output cargo build
-                                               # Separate read/write permissions
-  nono run --allow . --block-net cargo build   # Block network access
-  nono run --allow . --env-credential openai_api_key,anthropic_api_key -- claude
-                                               # Load secrets from system keystore
-
-\x1b[1mWINDOWS\x1b[0m
-  Windows `run` covers the current supported command surface with backend-owned
-  launch validation and low-integrity write boundaries.
-  Blocked-network and other enforcement-dependent flows require current Windows
-  backend readiness and unsupported restrictions fail closed with backend diagnostics.";
-
-#[cfg(not(target_os = "windows"))]
-const RUN_AFTER_HELP: &str = "\x1b[1mEXAMPLES\x1b[0m
-  nono run --allow . claude                    # Read/write current dir, run claude
-  nono run --profile claude-code claude        # Use a built-in profile
-  nono run --profile claude-code --allow-domain api.openai.com claude
-                                               # Restrict outbound access to listed domains
-  nono run --read ./src --write ./output cargo build
-                                               # Separate read/write permissions
-  nono run --allow . --block-net cargo build   # Block network access
-  nono run --allow . --env-credential openai_api_key,anthropic_api_key -- claude
-                                               # Load secrets from system keystore
-";
-
-#[cfg(target_os = "windows")]
-const ROOT_HELP_TEMPLATE: &str = "\
-{about-with-newline}
-\x1b[1mUSAGE\x1b[0m
-  nono <command> [flags]
-
-\x1b[1mGETTING STARTED\x1b[0m
-  setup      Set up nono on this system
-
-\x1b[1mCORE USAGE\x1b[0m
-  run        Run a command inside the sandbox
-  shell      Launch interactive shell (ConPTY, build 17763+); use --dry-run to inspect policy
-  wrap       Sandbox and exec into command (supervisor stays alive as Job Object owner)
-
-\x1b[1mEXPLORATION & DEBUGGING\x1b[0m
-  learn      Trace a command to discover required filesystem paths
-  why        Check why a path or network operation would be allowed or denied
-
-\x1b[1mSESSION MANAGEMENT\x1b[0m
-  ps         List running agent sessions
-  stop       Stop a running agent session
-  detach     Detach from an active session
-  attach     Re-attach to a running session
-  logs       View runtime session event logs
-  inspect    Show detailed runtime session state
-  prune      Clean up old runtime session files
-  rollback   Manage rollback sessions (browse, restore, cleanup)
-  audit      View audit trail of sandboxed commands
-  trust      Manage file trust and attestation
-
-\x1b[1mPOLICY & PROFILES\x1b[0m
-  policy     Inspect policy groups, profiles, and security rules
-  profile    Create and manage nono profiles
-
-\x1b[1mOPTIONS\x1b[0m
-{options}
-
-\x1b[1mLEARN MORE\x1b[0m
-  Use `nono <command> --help` for more information about a command.
-  Read the docs at https://nono.sh/docs
-";
-
-#[cfg(target_os = "windows")]
-const PS_AFTER_HELP: &str = "\x1b[1mEXAMPLES\x1b[0m
-  nono ps                                      # Unsupported on Windows; prints an explicit limitation
-
-\x1b[1mWINDOWS\x1b[0m
-  `nono ps` is intentionally unavailable on Windows.
-  Runtime session discovery still depends on detached-session infrastructure
-  that is not available on Windows.
-  Use `nono run` for supported execution instead of relying on session inspection.";
-
-#[cfg(not(target_os = "windows"))]
-const PS_AFTER_HELP: &str = "EXAMPLES:
-    # Show running sessions
-    nono ps
-
-    # Show all sessions (including exited)
-    nono ps --all
-
-    # JSON output
-    nono ps --json
-";
-
-#[cfg(target_os = "windows")]
-const STOP_AFTER_HELP: &str = "\x1b[1mEXAMPLES\x1b[0m
-  nono stop <session>                          # Unsupported on Windows; prints an explicit limitation
-
-\x1b[1mWINDOWS\x1b[0m
-  `nono stop` is intentionally unavailable on Windows.
-  Supervisor-owned session lifecycle control still depends on detached-session
-  plumbing that is not available on Windows.";
-
-#[cfg(not(target_os = "windows"))]
-const STOP_AFTER_HELP: &str = "EXAMPLES:
-    # Stop a session by ID (prefix match)
-    nono stop a3f7c2
-
-    # Force stop (SIGKILL)
-    nono stop --force a3f7c2
-";
-
-#[cfg(target_os = "windows")]
-const DETACH_AFTER_HELP: &str = "\x1b[1mEXAMPLES\x1b[0m
-  nono detach <session>                        # Unsupported on Windows; prints an explicit limitation
-
-\x1b[1mWINDOWS\x1b[0m
-  `nono detach` is intentionally unavailable on Windows.
-  PTY-backed detachable runtime sessions are not available on Windows, so help examples for in-band detach do not apply.";
-
-#[cfg(not(target_os = "windows"))]
-const DETACH_AFTER_HELP: &str = "EXAMPLES:
-    # Detach by session ID
-    nono detach a3f7c2
-
-    # Detach by name
-    nono detach calm-gate
-
-IN-BAND DETACH:
-    By default, press Ctrl-] then d to detach without opening a second terminal.
-    This can be changed in ~/.config/nono/config.toml:
-      [ui]
-      detach_sequence = \"ctrl-] d\"
-";
-
-#[cfg(target_os = "windows")]
-const ATTACH_AFTER_HELP: &str = "\x1b[1mEXAMPLES\x1b[0m
-  nono attach <session>                        # Unsupported on Windows; prints an explicit limitation
-
-\x1b[1mWINDOWS\x1b[0m
-  `nono attach` is intentionally unavailable on Windows.
-  Detached-session reattachment still depends on PTY/socket session transport
-  that is not available on Windows.";
-
-#[cfg(not(target_os = "windows"))]
-const ATTACH_AFTER_HELP: &str = "EXAMPLES:
-    # Attach by session ID
-    nono attach a3f7c2
-
-    # Attach by name
-    nono attach calm-gate
-
-IN-BAND DETACH:
-    By default, press Ctrl-] then d to detach from the session.
-    This can be changed in ~/.config/nono/config.toml:
-      [ui]
-      detach_sequence = \"ctrl-] d\"
-";
-
-#[cfg(target_os = "windows")]
-const LOGS_AFTER_HELP: &str = "\x1b[1mEXAMPLES\x1b[0m
-  nono logs a3f7c2                             # View event log for session
-  nono logs --tail 20 a3f7c2                   # Show last 20 events
-  nono logs --json a3f7c2                      # JSON output
-  nono logs -f a3f7c2                          # Follow events in real-time
-";
-
-#[cfg(not(target_os = "windows"))]
-const LOGS_AFTER_HELP: &str = "EXAMPLES:
-    # View recent events
-    nono logs a3f7c2
-
-    # Follow events in real-time
-    nono logs -f a3f7c2
-
-    # Show last 20 events
-    nono logs --tail 20 a3f7c2
-
-    # JSON output
-    nono logs --json a3f7c2
-";
-
-#[cfg(target_os = "windows")]
-const LOGS_USAGE: &str = "\
-{about}
-
-\x1b[1mUSAGE\x1b[0m
-  nono logs [flags] <session>
-
-{all-args}
-{after-help}";
-
-#[cfg(not(target_os = "windows"))]
-const LOGS_USAGE: &str = "\
-{about}
-
-\x1b[1mUSAGE\x1b[0m
-  nono logs [flags] <session>
-
-{all-args}
-{after-help}";
-
-#[cfg(target_os = "windows")]
-const INSPECT_AFTER_HELP: &str = "\x1b[1mEXAMPLES\x1b[0m
-  nono inspect a3f7c2                          # Show session details
-  nono inspect --json a3f7c2                   # JSON output
-";
-
-#[cfg(not(target_os = "windows"))]
-const INSPECT_AFTER_HELP: &str = "EXAMPLES:
-    # Inspect a session
-    nono inspect a3f7c2
-
-    # Include event log
-    nono inspect --events a3f7c2
-
-    # JSON output
-    nono inspect --json a3f7c2
-";
-
-#[cfg(target_os = "windows")]
-const INSPECT_USAGE: &str = "\
-{about}
-
-\x1b[1mUSAGE\x1b[0m
-  nono inspect [flags] <session>
-
-{all-args}
-{after-help}";
-
-#[cfg(not(target_os = "windows"))]
-const INSPECT_USAGE: &str = "\
-{about}
-
-\x1b[1mUSAGE\x1b[0m
-  nono inspect [flags] <session>
-
-{all-args}
-{after-help}";
-
-#[cfg(target_os = "windows")]
-const PRUNE_AFTER_HELP: &str = "\x1b[1mEXAMPLES\x1b[0m
-  nono prune --dry-run                         # Preview what would be cleaned
-  nono prune --older-than 7                    # Remove sessions older than 7 days
-  nono prune --keep 10                         # Keep only 10 most recent sessions
-";
-
-#[cfg(not(target_os = "windows"))]
-const PRUNE_AFTER_HELP: &str = "EXAMPLES:
-    # Preview what would be cleaned
-    nono prune --dry-run
-
-    # Remove sessions older than 7 days
-    nono prune --older-than 7
-
-    # Keep only 10 most recent sessions
-    nono prune --keep 10
-";
-
-#[cfg(target_os = "windows")]
-const PRUNE_USAGE: &str = "\
-{about}
-
-\x1b[1mUSAGE\x1b[0m
-  nono prune [flags]
-
-{all-args}
-{after-help}";
-
-#[cfg(not(target_os = "windows"))]
-const PRUNE_USAGE: &str = "\
-{about}
-
-\x1b[1mUSAGE\x1b[0m
-  nono prune [flags]
-
-{all-args}
-{after-help}";
-
-#[cfg(not(target_os = "windows"))]
-const ROOT_HELP_TEMPLATE: &str = "\
+/// nono - The opposite of YOLO
+///
+/// A capability-based shell for running untrusted AI agents and processes
+/// with OS-enforced filesystem and network isolation.
+#[derive(Parser, Debug)]
+#[command(name = "nono")]
+#[command(author, version, about, long_about = None)]
+#[command(styles = STYLES, next_help_heading = "OPTIONS")]
+#[command(subcommand_help_heading = "")]
+#[command(help_template = "\
 {about-with-newline}
 \x1b[1mUSAGE\x1b[0m
   nono <command> [flags]
@@ -347,13 +36,6 @@ const ROOT_HELP_TEMPLATE: &str = "\
   why        Check why a path or network operation would be allowed or denied
 
 \x1b[1mSESSION MANAGEMENT\x1b[0m
-  ps         List running or detached sandbox sessions
-  stop       Stop a running sandbox session
-  detach     Detach from an interactive runtime session
-  attach     Attach to a detached runtime session
-  logs       View runtime session event logs
-  inspect    Show detailed runtime session state
-  prune      Clean up old runtime session files
   rollback   Manage rollback sessions (browse, restore, cleanup)
   audit      View audit trail of sandboxed commands
   trust      Manage file trust and attestation
@@ -368,29 +50,13 @@ const ROOT_HELP_TEMPLATE: &str = "\
 \x1b[1mLEARN MORE\x1b[0m
   Use `nono <command> --help` for more information about a command.
   Read the docs at https://nono.sh/docs
-";
-
-#[cfg(not(target_os = "windows"))]
-const WRAP_AFTER_HELP: &str = "\x1b[1mEXAMPLES\x1b[0m
-  nono wrap --allow . -- cargo build           # Sandbox and exec into cargo build
-  nono wrap --profile developer -- cargo test  # Use a named profile
-";
-
-/// nono - The opposite of YOLO
-///
-/// A capability-based shell for running untrusted AI agents and processes.
-#[derive(Parser, Debug)]
-#[command(name = "nono")]
-#[command(author, version, about = CLI_ABOUT, long_about = None)]
-#[command(styles = STYLES, next_help_heading = "OPTIONS")]
-#[command(subcommand_help_heading = "")]
-#[command(help_template = ROOT_HELP_TEMPLATE)]
+")]
 pub struct Cli {
     /// Silent mode - suppress all nono output (banner, summary, status)
     #[arg(long, short = 's', global = true, help_heading = "OPTIONS")]
     pub silent: bool,
 
-    /// Color theme for output (mocha, latte, frappe, macchiato, tokyo-night, dark-factory, minimal)
+    /// Color theme for output (mocha, latte, frappe, macchiato, tokyo-night, minimal)
     #[arg(
         long,
         global = true,
@@ -409,10 +75,6 @@ pub struct Cli {
         help_heading = "OPTIONS"
     )]
     pub log_file: Option<PathBuf>,
-
-    /// Internal: used for the double-launch supervisor pattern on Windows.
-    #[arg(long, hide = true, global = true)]
-    pub internal_supervisor: bool,
 
     #[command(subcommand)]
     pub command: Commands,
@@ -433,12 +95,6 @@ pub enum Commands {
     #[command(after_help = "\x1b[1mEXAMPLES\x1b[0m
   nono setup --profiles                        # Full setup with profile generation
   nono setup --check-only                      # Verify installation and sandbox support
-  nono setup --register-wfp-service            # Register the nono-wfp-service
-  nono setup --install-wfp-service             # Register the Windows WFP placeholder service
-  nono setup --install-wfp-driver              # Register the Windows WFP placeholder driver
-  nono setup --start-wfp-service               # Attempt to start the registered WFP placeholder service
-  nono setup --start-wfp-driver                # Attempt to start the registered WFP placeholder driver
-  nono setup --install-wfp-service --install-wfp-driver --start-wfp-driver --start-wfp-service  # Register the placeholder components, then try to start them
   nono setup --profiles --shell-integration    # Setup with shell integration help
   nono setup -v --profiles                     # Verbose setup
 ")]
@@ -455,7 +111,17 @@ pub enum Commands {
 
 {all-args}
 {after-help}")]
-    #[command(after_help = RUN_AFTER_HELP)]
+    #[command(after_help = "\x1b[1mEXAMPLES\x1b[0m
+  nono run --allow . claude                    # Read/write current dir, run claude
+  nono run --profile claude-code claude        # Use a built-in profile
+  nono run --profile claude-code --allow-domain api.openai.com claude
+                                               # Restrict outbound access to listed domains
+  nono run --read ./src --write ./output cargo build
+                                               # Separate read/write permissions
+  nono run --allow . --block-net cargo build   # Block network access
+  nono run --allow . --env-credential openai_api_key,anthropic_api_key -- claude
+                                               # Load secrets from system keystore
+")]
     Run(Box<RunArgs>),
 
     /// Start an interactive shell inside the sandbox
@@ -467,7 +133,11 @@ pub enum Commands {
 
 {all-args}
 {after-help}")]
-    #[command(after_help = SHELL_AFTER_HELP)]
+    #[command(after_help = "\x1b[1mEXAMPLES\x1b[0m
+  nono shell --allow .                         # Shell with read/write to current dir
+  nono shell --profile claude-code             # Use a named profile
+  nono shell --allow . --shell /bin/zsh        # Override shell binary
+")]
     Shell(Box<ShellArgs>),
 
     /// Apply sandbox and exec into command (nono disappears).
@@ -481,7 +151,10 @@ pub enum Commands {
 
 {all-args}
 {after-help}")]
-    #[command(after_help = WRAP_AFTER_HELP)]
+    #[command(after_help = "\x1b[1mEXAMPLES\x1b[0m
+  nono wrap --allow . -- cargo build           # Sandbox and exec into cargo build
+  nono wrap --profile developer -- cargo test  # Use a named profile
+")]
     Wrap(Box<WrapArgs>),
 
     // ── Exploration & debugging ─────────────────────────────────────────
@@ -585,75 +258,6 @@ pub enum Commands {
   nono trust keygen                            # Generate a new signing key pair
 ")]
     Trust(TrustArgs),
-
-    /// List running sandboxed sessions
-    #[command(help_template = "\
-{about}
-
-\x1b[1mUSAGE\x1b[0m
-  nono ps [flags]
-
-{all-args}
-{after-help}")]
-    #[command(after_help = PS_AFTER_HELP)]
-    Ps(PsArgs),
-
-    /// Stop a running sandboxed session
-    #[command(help_template = "\
-{about}
-
-\x1b[1mUSAGE\x1b[0m
-  nono stop [flags] <session>
-
-{all-args}
-{after-help}")]
-    #[command(after_help = STOP_AFTER_HELP)]
-    Stop(StopArgs),
-
-    /// Detach from a running sandboxed session and return to the shell
-    #[command(
-        help_template = "\
-{about}
-
-\x1b[1mUSAGE\x1b[0m
-  nono detach <session>
-
-{all-args}
-{after-help}",
-        alias = "pause",
-        after_help = DETACH_AFTER_HELP
-    )]
-    Detach(DetachArgs),
-
-    /// Attach to a detached or running session from another terminal
-    #[command(
-        help_template = "\
-{about}
-
-\x1b[1mUSAGE\x1b[0m
-  nono attach <session>
-
-{all-args}
-{after-help}",
-        alias = "resume",
-        after_help = ATTACH_AFTER_HELP
-    )]
-    Attach(AttachArgs),
-
-    /// View event log for a session
-    #[command(help_template = LOGS_USAGE)]
-    #[command(after_help = LOGS_AFTER_HELP)]
-    Logs(LogsArgs),
-
-    /// Show detailed information about a session
-    #[command(help_template = INSPECT_USAGE)]
-    #[command(after_help = INSPECT_AFTER_HELP)]
-    Inspect(InspectArgs),
-
-    /// Clean up old session files
-    #[command(help_template = PRUNE_USAGE)]
-    #[command(after_help = PRUNE_AFTER_HELP)]
-    Prune(PruneArgs),
 
     // ── Policy & profiles ────────────────────────────────────────────────
     /// Inspect policy groups, profiles, and security rules
@@ -769,15 +373,6 @@ pub struct PolicyShowArgs {
     /// Show raw paths before expansion (e.g., $HOME instead of /Users/luke)
     #[arg(long)]
     pub raw: bool,
-    /// Output format: 'profile' (default) or 'manifest' (capability manifest JSON)
-    #[arg(long, value_enum, value_name = "FORMAT")]
-    pub format: Option<PolicyShowFormat>,
-}
-
-#[derive(clap::ValueEnum, Clone, Debug)]
-pub enum PolicyShowFormat {
-    Profile,
-    Manifest,
 }
 
 #[derive(Parser, Debug)]
@@ -1063,27 +658,8 @@ pub struct SandboxArgs {
     #[arg(long, help_heading = "OPTIONS")]
     pub allow_launch_services: bool,
 
-    /// Internal: force WFP readiness for test-built Windows binaries.
-    #[cfg(debug_assertions)]
-    #[arg(long, hide = true, help_heading = "OPTIONS")]
-    pub dangerous_force_wfp_ready: bool,
-
-    /// Capability manifest file (JSON). A fully-resolved sandbox specification —
-    /// mutually exclusive with all other sandbox configuration flags.
-    #[arg(
-        long,
-        short = 'c',
-        value_name = "FILE",
-        conflicts_with_all = &[
-            "allow", "read", "write", "allow_file", "read_file", "write_file",
-            "profile", "override_deny", "allow_cwd",
-            "block_net", "allow_net", "network_profile", "allow_proxy",
-            "allow_bind", "allow_port", "external_proxy", "proxy_port",
-            "proxy_credential", "allow_endpoint", "env_credential", "env_credential_map",
-            "allow_command", "block_command", "allow_launch_services",
-        ],
-        help_heading = "OPTIONS"
-    )]
+    /// Configuration file path
+    #[arg(long, short = 'c', value_name = "FILE", help_heading = "OPTIONS")]
     pub config: Option<PathBuf>,
 
     /// Enable verbose output
@@ -1225,21 +801,8 @@ pub struct WrapSandboxArgs {
     #[arg(long, help_heading = "OPTIONS")]
     pub allow_launch_services: bool,
 
-    /// Capability manifest file (JSON). A fully-resolved sandbox specification —
-    /// mutually exclusive with all other sandbox configuration flags.
-    #[arg(
-        long,
-        short = 'c',
-        value_name = "FILE",
-        conflicts_with_all = &[
-            "allow", "read", "write", "allow_file", "read_file", "write_file",
-            "profile", "override_deny", "allow_cwd",
-            "block_net", "allow_bind", "allow_port",
-            "env_credential", "env_credential_map",
-            "allow_command", "block_command", "allow_launch_services",
-        ],
-        help_heading = "OPTIONS"
-    )]
+    /// Configuration file path
+    #[arg(long, short = 'c', value_name = "FILE", help_heading = "OPTIONS")]
     pub config: Option<PathBuf>,
 
     /// Enable verbose output
@@ -1282,8 +845,6 @@ impl From<WrapSandboxArgs> for SandboxArgs {
             allow_launch_services: args.allow_launch_services,
             config: args.config,
             verbose: args.verbose,
-            #[cfg(debug_assertions)]
-            dangerous_force_wfp_ready: false,
             dry_run: args.dry_run,
         }
     }
@@ -1294,12 +855,6 @@ impl From<WrapSandboxArgs> for SandboxArgs {
 pub struct RunArgs {
     #[command(flatten)]
     pub sandbox: SandboxArgs,
-
-    /// Start the session without attaching the current terminal.
-    /// The supervisor keeps the sandboxed process running in the background;
-    /// use `nono attach <session>` later to inspect or interact with it.
-    #[arg(long, help_heading = "OPTIONS")]
-    pub detached: bool,
 
     // ── Rollback ──────────────────────────────────────────────────────
     /// Enable atomic rollback snapshots for the session
@@ -1332,7 +887,7 @@ pub struct RunArgs {
     pub skip_dir: Vec<String>,
 
     /// Override the rollback snapshot destination directory.
-    /// By default, snapshots are stored in the platform's nono rollback directory.
+    /// By default, snapshots are stored in ~/.nono/rollbacks/.
     /// The destination must be within a path already granted write access
     /// by --allow (or profile); nono will fail with a clear error if not.
     /// Useful for Docker volume mounts or shared storage paths.
@@ -1357,14 +912,7 @@ pub struct RunArgs {
     #[arg(long, help_heading = "OPTIONS")]
     pub trust_override: bool,
 
-    /// Name for this session (shown in `nono ps`)
-    #[arg(long, value_name = "NAME", help_heading = "OPTIONS")]
-    pub name: Option<String>,
-
-    /// Enable runtime capability elevation (seccomp-notify + approval prompts).
-    /// Overrides the profile's capability_elevation setting.
-    /// When enabled, the supervisor can grant access to paths not in the
-    /// initial capability set via interactive prompts.
+    /// Enable runtime capability elevation (interactive prompts)
     #[arg(long, env = "NONO_CAPABILITY_ELEVATION", help_heading = "OPTIONS")]
     pub capability_elevation: bool,
 
@@ -1386,10 +934,6 @@ pub struct ShellArgs {
     /// Shell to execute (defaults to $SHELL or /bin/sh)
     #[arg(long, value_name = "SHELL", help_heading = "OPTIONS")]
     pub shell: Option<PathBuf>,
-
-    /// Name for this session (shown in `nono ps`)
-    #[arg(long, value_name = "NAME", help_heading = "OPTIONS")]
-    pub name: Option<String>,
 
     /// Print help
     #[arg(long, short = 'h', action = clap::ArgAction::Help, help_heading = "OPTIONS")]
@@ -1421,26 +965,6 @@ pub struct SetupArgs {
     /// Only verify installation and sandbox support, don't create files
     #[arg(long, help_heading = "OPTIONS")]
     pub check_only: bool,
-
-    /// Register the Windows WFP service (Windows only)
-    #[arg(long, help_heading = "OPTIONS")]
-    pub register_wfp_service: bool,
-
-    /// Register the Windows WFP service placeholder (Windows only)
-    #[arg(long, help_heading = "OPTIONS")]
-    pub install_wfp_service: bool,
-
-    /// Register the Windows WFP placeholder driver service
-    #[arg(long, help_heading = "OPTIONS")]
-    pub install_wfp_driver: bool,
-
-    /// Attempt to start the registered Windows WFP service placeholder
-    #[arg(long, help_heading = "OPTIONS")]
-    pub start_wfp_service: bool,
-
-    /// Attempt to start the registered Windows WFP placeholder driver
-    #[arg(long, help_heading = "OPTIONS")]
-    pub start_wfp_driver: bool,
 
     /// Generate example user profiles in ~/.config/nono/profiles/
     #[arg(long, help_heading = "OPTIONS")]
@@ -1780,94 +1304,6 @@ pub struct AuditShowArgs {
     pub help: Option<bool>,
 }
 
-#[derive(Parser, Debug)]
-pub struct PsArgs {
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
-
-    /// Include exited sessions
-    #[arg(long)]
-    pub all: bool,
-}
-
-#[derive(Parser, Debug)]
-pub struct StopArgs {
-    /// Session ID (or prefix)
-    pub session: String,
-
-    /// Force stop (SIGKILL instead of SIGTERM)
-    #[arg(long)]
-    pub force: bool,
-
-    /// Grace period in seconds before SIGKILL (default: 10)
-    #[arg(long, default_value = "10")]
-    pub timeout: u64,
-}
-
-#[derive(Parser, Debug)]
-pub struct DetachArgs {
-    /// Session ID, prefix, or name
-    pub session: String,
-}
-
-#[derive(Parser, Debug)]
-pub struct AttachArgs {
-    /// Session ID, prefix, or name
-    pub session: String,
-}
-
-#[derive(Parser, Debug)]
-pub struct LogsArgs {
-    /// Session ID (or prefix)
-    pub session: String,
-
-    /// Follow events in real-time
-    #[arg(long, short = 'f')]
-    pub follow: bool,
-
-    /// Show last N events
-    #[arg(long, value_name = "N")]
-    pub tail: Option<usize>,
-
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
-}
-
-#[derive(Parser, Debug)]
-pub struct InspectArgs {
-    /// Session ID (or prefix)
-    pub session: String,
-
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
-
-    /// Include event log
-    #[arg(long)]
-    pub events: bool,
-
-    /// Include file changes
-    #[arg(long)]
-    pub changes: bool,
-}
-
-#[derive(Parser, Debug)]
-pub struct PruneArgs {
-    /// Show what would be removed without deleting
-    #[arg(long)]
-    pub dry_run: bool,
-
-    /// Remove sessions older than N days
-    #[arg(long, value_name = "DAYS")]
-    pub older_than: Option<u64>,
-
-    /// Keep only the N most recent sessions
-    #[arg(long, value_name = "N")]
-    pub keep: Option<usize>,
-}
-
 // ---------------------------------------------------------------------------
 // Trust command args
 // ---------------------------------------------------------------------------
@@ -1913,15 +1349,11 @@ pub struct TrustSignArgs {
     pub all: bool,
 
     /// Key ID to use from the system keystore (default: "default")
-    #[arg(long, value_name = "KEY_ID", conflicts_with_all = ["keyless", "keyref"])]
+    #[arg(long, value_name = "KEY_ID", conflicts_with = "keyless")]
     pub key: Option<String>,
 
-    /// Key reference URI (keystore://name or file:///path/to/key.pem)
-    #[arg(long, value_name = "URI", conflicts_with_all = ["key", "keyless"])]
-    pub keyref: Option<String>,
-
     /// Use Sigstore keyless signing (Fulcio + Rekor via ambient OIDC)
-    #[arg(long, conflicts_with = "keyref")]
+    #[arg(long)]
     pub keyless: bool,
 
     /// Produce a single .nono-trust.bundle containing all subjects instead of per-file bundles
@@ -1945,12 +1377,8 @@ pub struct TrustSignPolicyArgs {
     pub file: Option<PathBuf>,
 
     /// Key ID to use from the system keystore (default: "default")
-    #[arg(long, value_name = "KEY_ID", conflicts_with = "keyref")]
+    #[arg(long, value_name = "KEY_ID")]
     pub key: Option<String>,
-
-    /// Key reference URI (keystore://name or file:///path/to/key.pem)
-    #[arg(long, value_name = "URI", conflicts_with = "key")]
-    pub keyref: Option<String>,
 
     /// Sign the user-level trust policy at ~/.config/nono/trust-policy.json
     #[arg(long)]
@@ -1989,12 +1417,8 @@ pub struct TrustInitArgs {
     pub include: Vec<String>,
 
     /// Key ID to include as a publisher (default: "default")
-    #[arg(long, value_name = "KEY_ID", conflicts_with = "keyref")]
+    #[arg(long, value_name = "KEY_ID")]
     pub key: Option<String>,
-
-    /// Key reference URI (keystore://name or file:///path/to/key.pem)
-    #[arg(long, value_name = "URI", conflicts_with = "key")]
-    pub keyref: Option<String>,
 
     /// Create a user-level policy at ~/.config/nono/ instead of the current directory
     #[arg(long)]
@@ -2029,17 +1453,8 @@ pub struct TrustListArgs {
 #[command(disable_help_flag = true)]
 pub struct TrustKeygenArgs {
     /// Key identifier (stored in system keystore under this name)
-    #[arg(
-        long,
-        value_name = "NAME",
-        default_value = "default",
-        conflicts_with = "keyref"
-    )]
+    #[arg(long, value_name = "NAME", default_value = "default")]
     pub id: String,
-
-    /// Key reference URI (keystore://name or file:///path/to/key.pem)
-    #[arg(long, value_name = "URI", conflicts_with = "id")]
-    pub keyref: Option<String>,
 
     /// Overwrite existing key with the same ID
     #[arg(long)]
@@ -2054,17 +1469,8 @@ pub struct TrustKeygenArgs {
 #[command(disable_help_flag = true)]
 pub struct TrustExportKeyArgs {
     /// Key identifier to export (default: "default")
-    #[arg(
-        long,
-        value_name = "NAME",
-        default_value = "default",
-        conflicts_with = "keyref"
-    )]
+    #[arg(long, value_name = "NAME", default_value = "default")]
     pub id: String,
-
-    /// Key reference URI (keystore://name or file:///path/to/key.pem)
-    #[arg(long, value_name = "URI", conflicts_with = "id")]
-    pub keyref: Option<String>,
 
     /// Output as PEM instead of base64 DER
     #[arg(long)]
@@ -2203,46 +1609,6 @@ mod tests {
         assert!(!help.contains("--upstream-bypass"));
         assert!(!help.contains("--proxy-port"));
         assert!(!help.contains("--allow-net"));
-    }
-
-    #[test]
-    fn test_root_help_short_circuits_in_parser() {
-        let err = Cli::try_parse_from(["nono", "--help"])
-            .expect_err("--help should short-circuit with clap display help");
-        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
-    }
-
-    #[test]
-    fn test_root_version_short_circuits_in_parser() {
-        let err = Cli::try_parse_from(["nono", "--version"])
-            .expect_err("--version should short-circuit with clap display version");
-        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn test_root_help_mentions_windows_restricted_execution_surface() {
-        let mut cmd = Cli::command();
-        let mut buf = Vec::new();
-        cmd.write_long_help(&mut buf)
-            .expect("failed to write root help");
-        let help = String::from_utf8(buf).expect("help is not utf-8");
-
-        assert!(
-            help.contains("OS-enforced isolation"),
-            "root help should describe OS-enforced isolation"
-        );
-        assert!(
-            help.contains("ConPTY, build 17763+"),
-            "root help should mention Windows shell support requirements"
-        );
-    }
-
-    #[test]
-    fn test_invalid_subcommand_is_parse_error() {
-        let err = Cli::try_parse_from(["nono", "bad-subcommand"])
-            .expect_err("unknown subcommand should be rejected by clap");
-        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
     }
 
     #[test]
@@ -3052,8 +2418,8 @@ mod tests {
     /// All subcommand names that must appear in the root help template.
     /// If you add a new command to the `Commands` enum, add it here too.
     const ALL_SUBCOMMANDS: &[&str] = &[
-        "setup", "run", "shell", "wrap", "learn", "why", "ps", "stop", "detach", "attach", "logs",
-        "inspect", "prune", "rollback", "audit", "trust", "policy", "profile",
+        "setup", "run", "shell", "wrap", "learn", "why", "rollback", "audit", "trust", "policy",
+        "profile",
     ];
 
     #[test]

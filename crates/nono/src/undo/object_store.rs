@@ -8,8 +8,6 @@ use crate::error::{NonoError, Result};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{self, Read, Write};
-#[cfg(target_os = "windows")]
-use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use super::types::ContentHash;
@@ -145,10 +143,10 @@ impl ObjectStore {
             )));
         }
 
-        replace_file(&temp_path, target).map_err(|e| {
+        fs::rename(&temp_path, target).map_err(|e| {
             let _ = fs::remove_file(&temp_path);
             NonoError::ObjectStore(format!(
-                "Failed to replace {} with {}: {}",
+                "Failed to rename {} to {}: {}",
                 temp_path.display(),
                 target.display(),
                 e
@@ -228,10 +226,10 @@ impl ObjectStore {
             return Err(e);
         }
 
-        replace_file(&temp_path, &obj_path).map_err(|e| {
+        fs::rename(&temp_path, &obj_path).map_err(|e| {
             let _ = fs::remove_file(&temp_path);
             NonoError::ObjectStore(format!(
-                "Failed to replace temp object at {}: {}",
+                "Failed to rename temp object to {}: {}",
                 obj_path.display(),
                 e
             ))
@@ -301,53 +299,15 @@ impl ObjectStore {
             return Ok(());
         }
 
-        replace_file(&temp_path, &obj_path).map_err(|e| {
+        fs::rename(&temp_path, &obj_path).map_err(|e| {
             let _ = fs::remove_file(&temp_path);
             NonoError::ObjectStore(format!(
-                "Failed to replace temp object at {}: {}",
+                "Failed to rename temp object to {}: {}",
                 obj_path.display(),
                 e
             ))
         })
     }
-}
-
-#[cfg(target_os = "windows")]
-pub(super) fn replace_file(src: &Path, dst: &Path) -> io::Result<()> {
-    use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING};
-
-    let src_wide: Vec<u16> = src
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let dst_wide: Vec<u16> = dst
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-
-    let ok = unsafe {
-        // SAFETY: `src_wide` and `dst_wide` are valid, nul-terminated UTF-16
-        // paths. We request only replace-existing semantics for a same-machine
-        // move used by our temp-file atomic write flow.
-        MoveFileExW(
-            src_wide.as_ptr(),
-            dst_wide.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING,
-        )
-    };
-
-    if ok == 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-pub(super) fn replace_file(src: &Path, dst: &Path) -> io::Result<()> {
-    fs::rename(src, dst)
 }
 
 /// Generate a random u32 for temp file name unpredictability.
@@ -475,22 +435,6 @@ mod tests {
 
         let content = fs::read(&target).expect("read restored");
         assert_eq!(content, b"restore target");
-    }
-
-    #[test]
-    fn retrieve_to_replaces_existing_target_content() {
-        let (dir, store) = setup();
-        let hash = store.store_bytes(b"replacement content").expect("store");
-
-        let target = dir.path().join("restored.txt");
-        fs::write(&target, b"old content").expect("write existing target");
-
-        store
-            .retrieve_to(&hash, &target)
-            .expect("retrieve_to should replace existing target");
-
-        let content = fs::read(&target).expect("read restored");
-        assert_eq!(content, b"replacement content");
     }
 
     #[test]
