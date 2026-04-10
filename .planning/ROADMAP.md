@@ -125,9 +125,11 @@ Plans:
   2. File I/O events (read, write, create) and network events (TCP connect, accept) are both captured and included in output.
   3. Running `nono learn` without administrator privilege produces a clear, actionable error message and exits non-zero; it does not exit 0 with empty output.
   4. The ETW library choice (`ferrisetw` vs direct `windows-sys` bindings) is documented with rationale before any ETW code is written.
-**Plans**: 1 plan
+**Plans**: 3 plans
 Plans:
-- [ ] 07-01-PLAN.md — Fix nono wrap Direct strategy return path and verify session commands
+- [ ] 10-01-PLAN.md — Foundation: add ferrisetw + ETW feature, create learn_windows module scaffold, wire dispatch and tests
+- [ ] 10-02-PLAN.md — ETW consumer: process tree tracking, file event capture (D-04 Option B), full run_learn orchestration
+- [ ] 10-03-PLAN.md — Network events: Kernel-Network provider, TcpIp handlers, Windows integration test, phase close-out
 
 ### Phase 11: Runtime Capability Expansion
 **Goal**: A sandboxed child process can request additional capabilities from the supervisor at runtime via the named-pipe IPC channel, with user approval and session token authentication.
