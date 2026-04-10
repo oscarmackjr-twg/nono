@@ -28,6 +28,7 @@ Available themes:
 - `frappe`
 - `macchiato`
 - `tokyo-night`
+- `dark-factory`
 - `minimal`
 
 Resolution order:
@@ -42,6 +43,9 @@ nono --theme tokyo-night run --allow-cwd -- claude
 
 # Via environment variable
 NONO_THEME=latte nono run --allow-cwd -- codex
+
+# Industrial dark theme
+nono --theme dark-factory run --allow-cwd -- cargo test
 
 # Config file
 # ~/.config/nono/config.toml
@@ -69,6 +73,8 @@ Start an interactive shell inside the sandbox.
 nono shell [OPTIONS]
 ```
 
+On Windows, live `nono shell` execution is intentionally unavailable as a product-surface limitation. Use `nono shell --dry-run` to inspect the resolved policy or `nono run -- <command>` for supported execution.
+
 ### `nono wrap`
 
 Apply sandbox and exec into command. nono disappears from the process tree — no parent process remains. For scripts, piping, and embedding where no parent process is wanted.
@@ -76,6 +82,8 @@ Apply sandbox and exec into command. nono disappears from the process tree — n
 ```bash
 nono wrap [OPTIONS] -- <COMMAND> [ARGS...]
 ```
+
+On Windows, live `nono wrap` execution is intentionally unavailable as a product-surface limitation. Use `nono wrap --dry-run` to inspect the resolved wrap policy or `nono run -- <command>` for supported execution.
 
 <Note>
   `nono wrap` does not support proxy flags (`--network-profile`, `--allow-domain`, `--credential`, `--upstream-proxy`, `--upstream-bypass`). The network proxy requires a parent process. Use `nono run` instead.
@@ -351,7 +359,7 @@ nono run --allow-cwd --credential github \
   -- my-agent
 ```
 
-Endpoint rules can also be defined in profiles via `endpoint_rules` on custom credentials. See [Credential Injection](/cli/features/credential-injection#endpoint-filtering) for details.
+Endpoint rules can also be defined in profiles via `endpoint_rules` on custom credentials. See [Networking — Endpoint Filtering](/cli/features/networking#endpoint-filtering) for details.
 
 #### `--upstream-proxy`
 
@@ -646,6 +654,34 @@ nono run --profile claude-code --allow-launch-services -- claude
 
 ### Execution Mode Flags
 
+#### `--detached`
+
+Start the supervised session without attaching the current terminal. The command keeps running in the background and can be resumed later with `nono attach <session>`.
+
+```bash
+# Start in the background, then attach later
+nono run --detached --profile claude-code --allow-cwd -- claude
+
+# Detached launch with an explicit session name
+nono run --detached --name gold-core --allow-cwd -- my-agent
+```
+
+Detached launches print the generated session ID and the attach command once the session becomes ready.
+
+#### `--name`
+
+Assign a human-friendly name to the supervised session. The name is shown in `nono ps` and can be used to recognize the session in later `attach`, `stop`, `logs`, and `inspect` workflows.
+
+```bash
+# Name a foreground supervised session
+nono run --name gold-core --allow-cwd -- my-agent
+
+# Combine with detached startup
+nono run --detached --name nightly-indexer --allow ./workspace -- indexer
+```
+
+Session names must be unique among live sessions. If you omit `--name`, nono generates a unique name automatically.
+
 #### `--rollback`
 
 Enable [atomic rollback snapshots](/cli/features/atomic-rollbacks) for the session. Takes content-addressable snapshots of writable directories so you can restore to the pre-session state after the command exits. Automatically selects supervised execution.
@@ -673,7 +709,7 @@ nono run --no-rollback --allow . -- npm test
 
 #### `--no-audit`
 
-Disable the audit trail for this session. By default, every supervised execution records session metadata (command, timestamps, exit code, network events) to `~/.nono/rollbacks/`. Use this flag to suppress audit recording entirely.
+Disable the audit trail for this session. By default, every supervised execution records session metadata (command, timestamps, exit code, network events) to the platform rollback directory (`~/.nono/rollbacks/` on Unix-like systems, the nono state directory on Windows). Use this flag to suppress audit recording entirely.
 
 ```bash
 nono run --no-audit --allow-cwd -- my-command
@@ -922,6 +958,7 @@ nono trust init                            # Scan root directory only
 nono trust init -r                         # Scan recursively
 nono trust init -r --exclude-dirs tmp logs # Exclude extra directories
 nono trust init --key my-key --force       # Specific key, overwrite existing
+nono trust init --keyref file:///path/to/key.pem  # File-backed key
 ```
 
 | Option | Description |
@@ -929,6 +966,7 @@ nono trust init --key my-key --force       # Specific key, overwrite existing
 | `-r`, `--recursive` | Scan subdirectories recursively |
 | `--exclude-dirs <DIR...>` | Additional directories to exclude (on top of `.gitignore` and built-in list) |
 | `--key <KEY_ID>` | Key ID to include as publisher (default: "default") |
+| `--keyref <URI>` | Key reference URI (`keystore://name` or `file:///path`). Conflicts with `--key` |
 | `--force` | Overwrite existing `trust-policy.json` |
 
 <Note>
@@ -943,12 +981,14 @@ Sign files, producing bundles for verification.
 nono trust sign <FILES...>                 # Sign specific files
 nono trust sign --all                      # Sign all instruction files in CWD
 nono trust sign SKILLS.md --key my-key     # Use a specific key
+nono trust sign SKILLS.md --keyref file:///path/to/key.pem  # File-backed key
 ```
 
 | Option | Description |
 |--------|-------------|
 | `--all` | Sign all instruction files matching trust policy patterns |
 | `--key <KEY_ID>` | Key ID from system keystore (default: "default") |
+| `--keyref <URI>` | Key reference URI (`keystore://name` or `file:///path`). Conflicts with `--key` and `--keyless` |
 | `--keyless` | Use Sigstore keyless signing (CI environments only) |
 | `--policy <FILE>` | Trust policy file (default: auto-discover) |
 
@@ -965,12 +1005,14 @@ nono trust sign-policy                     # Sign trust-policy.json in CWD
 nono trust sign-policy --user              # Sign user-level trust policy (~/.config/nono/)
 nono trust sign-policy path/to/policy.json # Sign specific file
 nono trust sign-policy --key my-key        # Use a specific key
+nono trust sign-policy --keyref file:///path/to/key.pem  # File-backed key
 ```
 
 | Option | Description |
 |--------|-------------|
 | `--user` | Sign the user-level trust policy at `~/.config/nono/trust-policy.json`. The user-level policy anchors trust — without it, project-level policies are not authoritative |
 | `--key <KEY_ID>` | Key ID from system keystore (default: "default") |
+| `--keyref <URI>` | Key reference URI (`keystore://name` or `file:///path`). Conflicts with `--key` |
 
 ### `nono trust verify`
 
@@ -993,12 +1035,19 @@ nono trust list --json                     # JSON output
 
 ### `nono trust keygen`
 
-Generate an ECDSA P-256 signing key pair and store it in the system keystore.
+Generate an ECDSA P-256 signing key pair.
 
 ```bash
-nono trust keygen                          # Default key ID ("default")
-nono trust keygen --id my-signing-key      # Named key
+nono trust keygen                          # Default key ID ("default") in system keystore
+nono trust keygen --id my-signing-key      # Named key in system keystore
+nono trust keygen --keyref file:///path/to/key.pem  # File-backed key
 ```
+
+| Option | Description |
+|--------|-------------|
+| `--id <NAME>` | Key identifier in system keystore (default: "default") |
+| `--keyref <URI>` | Key reference URI (`keystore://name` or `file:///path`). Conflicts with `--id` |
+| `--force` | Overwrite existing key |
 
 ### `nono trust export-key`
 
@@ -1007,8 +1056,15 @@ Export the public key for use in trust policy `public_key` fields.
 ```bash
 nono trust export-key                      # Export default key (base64 DER)
 nono trust export-key --id my-key          # Export named key
+nono trust export-key --keyref file:///path/to/key.pem  # Export from file-backed key
 nono trust export-key --pem                # Output as PEM format
 ```
+
+| Option | Description |
+|--------|-------------|
+| `--id <NAME>` | Key identifier in system keystore (default: "default") |
+| `--keyref <URI>` | Key reference URI (`keystore://name` or `file:///path`). Conflicts with `--id` |
+| `--pem` | Output as PEM instead of base64 DER |
 
 ## `nono setup` Options
 

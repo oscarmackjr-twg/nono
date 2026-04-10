@@ -4,8 +4,12 @@
 //! Credentials are stored in `Zeroizing<String>` and injected into
 //! requests via headers, URL paths, query parameters, or Basic Auth.
 //! The sandboxed agent never sees the real credentials.
+//!
+//! Route-level configuration (upstream URL, L7 endpoint rules, custom TLS CA)
+//! is handled by [`crate::route::RouteStore`], which loads independently of
+//! credentials. This module handles only credential-specific concerns.
 
-use crate::config::{CompiledEndpointRules, InjectMode, RouteConfig};
+use crate::config::{InjectMode, RouteConfig};
 use crate::error::{ProxyError, Result};
 use base64::Engine;
 use std::collections::HashMap;
@@ -13,11 +17,13 @@ use tracing::debug;
 use zeroize::Zeroizing;
 
 /// A loaded credential ready for injection.
+///
+/// Contains only credential-specific fields (injection mode, header name/value,
+/// raw secret). Route-level configuration (upstream URL, L7 endpoint rules,
+/// custom TLS CA) is stored in [`crate::route::LoadedRoute`].
 pub struct LoadedCredential {
     /// Injection mode
     pub inject_mode: InjectMode,
-    /// Upstream URL (e.g., "https://api.openai.com")
-    pub upstream: String,
     /// Raw credential value from keystore (for modes that need it directly)
     pub raw_credential: Zeroizing<String>,
 
@@ -36,11 +42,6 @@ pub struct LoadedCredential {
     // --- Query param mode ---
     /// Query parameter name
     pub query_param_name: Option<String>,
-
-    // --- L7 endpoint filtering ---
-    /// Pre-compiled endpoint rules for method+path filtering.
-    /// Compiled once at load time to avoid per-request glob compilation.
-    pub endpoint_rules: CompiledEndpointRules,
 }
 
 /// Custom Debug impl that redacts secret values to prevent accidental leakage
@@ -49,14 +50,12 @@ impl std::fmt::Debug for LoadedCredential {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LoadedCredential")
             .field("inject_mode", &self.inject_mode)
-            .field("upstream", &self.upstream)
             .field("raw_credential", &"[REDACTED]")
             .field("header_name", &self.header_name)
             .field("header_value", &"[REDACTED]")
             .field("path_pattern", &self.path_pattern)
             .field("path_replacement", &self.path_replacement)
             .field("query_param_name", &self.query_param_name)
-            .field("endpoint_rules", &self.endpoint_rules)
             .finish()
     }
 }
@@ -82,10 +81,15 @@ impl CredentialStore {
         let mut credentials = HashMap::new();
 
         for route in routes {
+            // Normalize prefix: strip leading/trailing slashes so it matches
+            // the bare service name returned by parse_service_prefix() in
+            // the reverse proxy path (e.g., "/anthropic" -> "anthropic").
+            let normalized_prefix = route.prefix.trim_matches('/').to_string();
+
             if let Some(ref key) = route.credential_key {
                 debug!(
                     "Loading credential for route prefix: {} (mode: {:?})",
-                    route.prefix, route.inject_mode
+                    normalized_prefix, route.inject_mode
                 );
 
                 let secret = match nono::keystore::load_secret_by_ref(KEYRING_SERVICE, key) {
@@ -93,18 +97,28 @@ impl CredentialStore {
                     Err(nono::NonoError::SecretNotFound(msg)) => {
                         debug!(
                             "Credential '{}' not available, skipping route: {}",
-                            route.prefix, msg
+                            normalized_prefix, msg
                         );
                         continue;
                     }
                     Err(e) => return Err(ProxyError::Credential(e.to_string())),
                 };
 
-                // Format header value based on mode
+                // Format header value based on mode.
+                // When inject_header is not "Authorization" (e.g., "PRIVATE-TOKEN",
+                // "X-API-Key"), the credential is injected as-is unless the user
+                // explicitly set a custom format. The default "Bearer {}" only
+                // makes sense for the Authorization header.
+                let effective_format = if route.inject_header != "Authorization"
+                    && route.credential_format == "Bearer {}"
+                {
+                    "{}".to_string()
+                } else {
+                    route.credential_format.clone()
+                };
+
                 let header_value = match route.inject_mode {
-                    InjectMode::Header => {
-                        Zeroizing::new(route.credential_format.replace("{}", &secret))
-                    }
+                    InjectMode::Header => Zeroizing::new(effective_format.replace("{}", &secret)),
                     InjectMode::BasicAuth => {
                         // Base64 encode the credential for Basic auth
                         let encoded =
@@ -116,20 +130,15 @@ impl CredentialStore {
                 };
 
                 credentials.insert(
-                    route.prefix.clone(),
+                    normalized_prefix.clone(),
                     LoadedCredential {
                         inject_mode: route.inject_mode.clone(),
-                        upstream: route.upstream.clone(),
                         raw_credential: secret,
                         header_name: route.inject_header.clone(),
                         header_value,
                         path_pattern: route.path_pattern.clone(),
                         path_replacement: route.path_replacement.clone(),
                         query_param_name: route.query_param_name.clone(),
-                        endpoint_rules: CompiledEndpointRules::compile(&route.endpoint_rules)
-                            .map_err(|e| {
-                                ProxyError::Credential(format!("route '{}': {}", route.prefix, e))
-                            })?,
                     },
                 );
             }
@@ -185,7 +194,7 @@ mod tests {
         let store = CredentialStore::empty();
         assert!(store.is_empty());
         assert_eq!(store.len(), 0);
-        assert!(store.get("/openai").is_none());
+        assert!(store.get("openai").is_none());
     }
 
     #[test]
@@ -195,14 +204,12 @@ mod tests {
         // tracing output at debug level.
         let cred = LoadedCredential {
             inject_mode: InjectMode::Header,
-            upstream: "https://api.openai.com".to_string(),
             raw_credential: Zeroizing::new("sk-secret-12345".to_string()),
             header_name: "Authorization".to_string(),
             header_value: Zeroizing::new("Bearer sk-secret-12345".to_string()),
             path_pattern: None,
             path_replacement: None,
             query_param_name: None,
-            endpoint_rules: CompiledEndpointRules::compile(&[]).unwrap(),
         };
 
         let debug_output = format!("{:?}", cred);
@@ -223,7 +230,6 @@ mod tests {
             "Debug output must not contain the formatted secret"
         );
         // Non-secret fields should still be visible
-        assert!(debug_output.contains("api.openai.com"));
         assert!(debug_output.contains("Authorization"));
     }
 
@@ -241,6 +247,7 @@ mod tests {
             query_param_name: None,
             env_var: None,
             endpoint_rules: vec![],
+            tls_ca: None,
         }];
         let store = CredentialStore::load(&routes);
         assert!(store.is_ok());
