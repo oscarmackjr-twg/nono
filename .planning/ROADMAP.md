@@ -11,7 +11,7 @@ This roadmap outlines the path to functional parity between the Windows implemen
 - [x] **Phase 5: Windows Detach Readiness Fix** - Fix run --detach readiness probe on Windows.
 - [x] **Phase 6: WFP Enforcement Activation** - Replace stub with real SID-based WFP activation call.
 - [x] **Phase 7: Quick Wins** - Unblock everyday UX by enabling nono wrap and session log commands on Windows. (completed 2026-04-08)
-- [ ] **Phase 8: ConPTY Shell** - Enable interactive nono shell on Windows via ConPTY.
+- [x] **Phase 8: ConPTY Shell** - Enable interactive nono shell on Windows via ConPTY. (completed 2026-04-10)
 - [x] **Phase 9: WFP Port-Level + Proxy Filtering** - Enable port-granular network policy and proxy credential injection. (completed 2026-04-10)
 - [ ] **Phase 10: ETW-Based Learn Command** - Implement nono learn on Windows via Event Tracing for Windows.
 - [ ] **Phase 11: Runtime Capability Expansion** - (Stretch) Enable sandboxed child to request additional capabilities at runtime.
@@ -84,7 +84,7 @@ Plans:
 Plans:
 - [x] 07-01-PLAN.md — Fix nono wrap Direct strategy return path and verify session commands
 
-### Phase 8: ConPTY Shell
+### Phase 8: ConPTY Shell (COMPLETED)
 **Goal**: Users can launch an interactive shell session inside a Job Object + WFP sandbox on Windows via the ConPTY API.
 **Depends on**: Phase 7 (validates the entry-point guard removal pattern before adding ConPTY complexity)
 **Requirements**: SHELL-01
