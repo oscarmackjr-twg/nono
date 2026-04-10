@@ -131,12 +131,15 @@ pub(crate) fn build_volume_map() -> HashMap<String, String> {
         let drive = format!("{}:", char::from(letter));
         // Encode drive name as UTF-16 null-terminated
         let drive_wide: Vec<u16> = drive.encode_utf16().chain(std::iter::once(0)).collect();
-        let mut buf = vec![0u16; 260]; // MAX_PATH
-                                       // SAFETY: drive_wide is a valid null-terminated UTF-16 string for a drive specifier
-                                       // of the form "X:". buf is allocated with 260 u16 slots (MAX_PATH). QueryDosDeviceW
-                                       // writes at most `buf.len()` UTF-16 code units into buf and returns the count written
-                                       // (including the double-null terminator). A return value of 0 means the drive letter
-                                       // is not mapped; we skip it. No aliasing occurs — drive_wide and buf are distinct.
+        let mut buf = vec![0u16; 1024]; // 1024 u16 slots — well above practical NT device name length;
+                                        // MAX_PATH (260) is insufficient for volume junctions and long UNC paths
+                                        // (WR-01: QueryDosDeviceW returns 0 / ERROR_INSUFFICIENT_BUFFER when too small,
+                                        // which the code silently treats as "not mapped", silently dropping that drive).
+                                        // SAFETY: drive_wide is a valid null-terminated UTF-16 string for a drive specifier
+                                        // of the form "X:". buf is allocated with 1024 u16 slots. QueryDosDeviceW
+                                        // writes at most `buf.len()` UTF-16 code units into buf and returns the count written
+                                        // (including the double-null terminator). A return value of 0 means the drive letter
+                                        // is not mapped; we skip it. No aliasing occurs — drive_wide and buf are distinct.
         let written =
             unsafe { QueryDosDeviceW(drive_wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) };
         if written == 0 {
