@@ -61,6 +61,14 @@ pub(crate) struct LearnState {
     pub tracked_pids: HashSet<u32>,
     pub result: LearnResult,
     pub volume_map: HashMap<String, String>,
+    /// Deduplicating accumulator for outbound TCP connections (WR-02).
+    /// Key: (remote_ip, remote_port); value: event count.
+    /// Converted to Vec<NetworkConnectionSummary> at extraction time in run_learn.
+    pub outbound_counts: HashMap<(IpAddr, u16), usize>,
+    /// Deduplicating accumulator for listening TCP ports (WR-02).
+    /// Key: (local_ip, local_port); value: event count.
+    /// Converted to Vec<NetworkConnectionSummary> at extraction time in run_learn.
+    pub listening_counts: HashMap<(IpAddr, u16), usize>,
 }
 
 impl LearnState {
@@ -72,6 +80,8 @@ impl LearnState {
             tracked_pids,
             result: LearnResult::new(),
             volume_map,
+            outbound_counts: HashMap::new(),
+            listening_counts: HashMap::new(),
         }
     }
 
@@ -267,15 +277,11 @@ pub(crate) fn record_outbound_connection(
     if !state.is_tracked(pid) {
         return;
     }
-    let summary = NetworkConnectionSummary {
-        endpoint: NetworkEndpoint {
-            addr: remote_ip,
-            port: remote_port,
-            hostname: None,
-        },
-        count: 1,
-    };
-    state.result.outbound_connections.push(summary);
+    // WR-02: deduplicate by (ip, port) pair; convert to Vec at extraction time.
+    *state
+        .outbound_counts
+        .entry((remote_ip, remote_port))
+        .or_insert(0) += 1;
 }
 
 /// Record a listening TCP port observed via ETW TcpIp/Accept.
@@ -285,15 +291,12 @@ pub(crate) fn record_listening_port(state: &mut LearnState, pid: u32, local_port
     if !state.is_tracked(pid) {
         return;
     }
-    let summary = NetworkConnectionSummary {
-        endpoint: NetworkEndpoint {
-            addr: IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-            port: local_port,
-            hostname: None,
-        },
-        count: 1,
-    };
-    state.result.listening_ports.push(summary);
+    // WR-02: deduplicate by (ip, port) pair; convert to Vec at extraction time.
+    let local_ip = IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
+    *state
+        .listening_counts
+        .entry((local_ip, local_port))
+        .or_insert(0) += 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -637,8 +640,21 @@ pub fn run_learn(args: &LearnArgs) -> Result<LearnResult> {
         readwrite_files: std::mem::take(&mut guard.result.readwrite_files),
         system_covered: std::mem::take(&mut guard.result.system_covered),
         profile_covered: std::mem::take(&mut guard.result.profile_covered),
-        outbound_connections: std::mem::take(&mut guard.result.outbound_connections),
-        listening_ports: std::mem::take(&mut guard.result.listening_ports),
+        // WR-02: convert dedup HashMap accumulators to Vec<NetworkConnectionSummary>.
+        outbound_connections: std::mem::take(&mut guard.outbound_counts)
+            .into_iter()
+            .map(|((addr, port), count)| NetworkConnectionSummary {
+                endpoint: NetworkEndpoint { addr, port, hostname: None },
+                count,
+            })
+            .collect(),
+        listening_ports: std::mem::take(&mut guard.listening_counts)
+            .into_iter()
+            .map(|((addr, port), count)| NetworkConnectionSummary {
+                endpoint: NetworkEndpoint { addr, port, hostname: None },
+                count,
+            })
+            .collect(),
     };
     drop(guard);
     Ok(result)
@@ -894,53 +910,58 @@ mod tests {
             IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8)),
             443,
         );
-        assert!(state.result.outbound_connections.is_empty());
+        // WR-02: accumulator is now outbound_counts HashMap
+        assert!(state.outbound_counts.is_empty());
     }
 
     #[test]
     fn test_record_outbound_tracked_pid_appends() {
         let mut state = state_with_map(1234);
-        record_outbound_connection(
-            &mut state,
-            1234,
-            IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8)),
-            443,
-        );
-        assert_eq!(state.result.outbound_connections.len(), 1);
-        assert_eq!(state.result.outbound_connections[0].endpoint.port, 443);
+        let ip = IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8));
+        record_outbound_connection(&mut state, 1234, ip, 443);
+        // WR-02: one entry in dedup map with count 1
+        assert_eq!(state.outbound_counts.len(), 1);
+        assert_eq!(state.outbound_counts[&(ip, 443)], 1);
     }
 
     #[test]
     fn test_record_outbound_multiple_connections_accumulate() {
         let mut state = state_with_map(1234);
-        record_outbound_connection(
-            &mut state,
-            1234,
-            IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8)),
-            443,
-        );
-        record_outbound_connection(
-            &mut state,
-            1234,
-            IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1)),
-            80,
-        );
-        assert_eq!(state.result.outbound_connections.len(), 2);
+        let ip1 = IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8));
+        let ip2 = IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1));
+        record_outbound_connection(&mut state, 1234, ip1, 443);
+        record_outbound_connection(&mut state, 1234, ip2, 80);
+        assert_eq!(state.outbound_counts.len(), 2);
+    }
+
+    #[test]
+    fn test_record_outbound_deduplicates_same_endpoint() {
+        let mut state = state_with_map(1234);
+        let ip = IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8));
+        record_outbound_connection(&mut state, 1234, ip, 443);
+        record_outbound_connection(&mut state, 1234, ip, 443);
+        record_outbound_connection(&mut state, 1234, ip, 443);
+        // WR-02: same endpoint should deduplicate to one entry with count 3
+        assert_eq!(state.outbound_counts.len(), 1);
+        assert_eq!(state.outbound_counts[&(ip, 443)], 3);
     }
 
     #[test]
     fn test_record_listening_untracked_pid_is_noop() {
         let mut state = state_with_map(1234);
         record_listening_port(&mut state, 9999, 8080);
-        assert!(state.result.listening_ports.is_empty());
+        // WR-02: accumulator is now listening_counts HashMap
+        assert!(state.listening_counts.is_empty());
     }
 
     #[test]
     fn test_record_listening_tracked_pid_appends() {
         let mut state = state_with_map(1234);
         record_listening_port(&mut state, 1234, 8080);
-        assert_eq!(state.result.listening_ports.len(), 1);
-        assert_eq!(state.result.listening_ports[0].endpoint.port, 8080);
+        let local_ip = IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
+        // WR-02: one entry in dedup map with count 1
+        assert_eq!(state.listening_counts.len(), 1);
+        assert_eq!(state.listening_counts[&(local_ip, 8080)], 1);
     }
 
     #[test]
@@ -948,6 +969,17 @@ mod tests {
         let mut state = state_with_map(1234);
         record_listening_port(&mut state, 1234, 8080);
         record_listening_port(&mut state, 1234, 9090);
-        assert_eq!(state.result.listening_ports.len(), 2);
+        assert_eq!(state.listening_counts.len(), 2);
+    }
+
+    #[test]
+    fn test_record_listening_deduplicates_same_port() {
+        let mut state = state_with_map(1234);
+        record_listening_port(&mut state, 1234, 8080);
+        record_listening_port(&mut state, 1234, 8080);
+        let local_ip = IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
+        // WR-02: same port should deduplicate to one entry with count 2
+        assert_eq!(state.listening_counts.len(), 1);
+        assert_eq!(state.listening_counts[&(local_ip, 8080)], 2);
     }
 }
