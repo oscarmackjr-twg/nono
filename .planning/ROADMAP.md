@@ -109,9 +109,11 @@ Plans:
   3. Bind and connect port allowlists operate independently; allowing a bind port does not implicitly allow connect, and vice versa.
   4. `HTTPS_PROXY` and `NONO_PROXY_TOKEN` environment variables are injected into the sandboxed child via `ExecConfig.env_vars`.
   5. WFP per-port permit filters carry a higher weight than the block-all filter; a real TCP connection test (not merely filter presence) confirms allow-listed ports are reachable.
-**Plans**: 1 plan
+**Plans**: 3 plans
 Plans:
-- [x] 07-01-PLAN.md — Fix nono wrap Direct strategy return path and verify session commands
+- [ ] 09-01-PLAN.md — Remove unsupported markers from compile_network_policy, enable port-level WFP enforcement
+- [ ] 09-02-PLAN.md — Add ProxyOnly pre-flight guard in execution_runtime.rs
+- [ ] 09-03-PLAN.md — Integration test: real TCP connection through WFP allow-listed port
 
 ### Phase 10: ETW-Based Learn Command
 **Goal**: Users can run `nono learn <cmd>` on Windows to capture file and network access patterns, producing output compatible with Unix learn tooling.
