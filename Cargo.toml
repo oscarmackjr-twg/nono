@@ -9,7 +9,7 @@ members = [
 
 [workspace.package]
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.74"
 authors = ["Luke Hinds"]
 license = "Apache-2.0"
 repository = "https://github.com/always-further/nono"
@@ -31,7 +31,7 @@ tracing = "0.1"
 zeroize = { version = "1", features = ["alloc"] }
 
 # Hashing
-sha2 = "0.11"
+sha2 = "0.10"
 
 # Filesystem walking
 walkdir = "2"
