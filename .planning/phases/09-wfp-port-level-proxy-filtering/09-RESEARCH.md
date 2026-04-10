@@ -323,22 +323,13 @@ Not applicable — this phase involves code changes only. No stored data, live s
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **Dead Code from Removed Enum Variants**
-   - What we know: Removing the three unsupported push blocks will leave `WindowsUnsupportedNetworkIssueKind::PortConnectAllowlist`, `PortBindAllowlist`, `LocalhostPortAllowlist` variants potentially unused.
-   - What's unclear: Whether these enum variants are used elsewhere (e.g., in match arms, diagnostic formatters, or external code).
-   - Recommendation: Grep for uses at plan time. If unused, remove the enum variants to avoid `#[allow(dead_code)]` (which CLAUDE.md forbids). If used in diagnostic code, keep them with documentation.
+1. **Dead Code from Removed Enum Variants** — **RESOLVED:** Plan 09-01 keeps the `WindowsUnsupportedNetworkIssueKind::PortConnectAllowlist`, `PortBindAllowlist`, and `LocalhostPortAllowlist` variants in place. Plan 09-01 Task 1 explicitly documents: "Do NOT remove the enum variants... They are referenced in exhaustive match arms (`label()` and `description()`) and removing them would break those match blocks. The variants remain valid for documentation/diagnostic purposes even if nothing currently constructs them." No `#[allow(dead_code)]` is required because the variants are still referenced by the match arms. CLAUDE.md compliance preserved.
 
-2. **Integration Test Location and CI Privilege**
-   - What we know: The existing integration tests in `tests/integration/` are shell scripts. The CONTEXT.md calls for a Rust `#[cfg(target_os = "windows")]` test.
-   - What's unclear: Whether this lives as a Rust integration test in `tests/` at the workspace level, in `crates/nono-cli/tests/`, or as an additional shell test script.
-   - Recommendation: Place as a Rust integration test in `crates/nono-cli/tests/wfp_port_integration.rs` with `#[cfg(target_os = "windows")]` guard, and document privilege requirement in a `#[ignore]` attribute or CI configuration. Planner should confirm the CI matrix for Windows privileged tests.
+2. **Integration Test Location and CI Privilege** — **RESOLVED:** Plan 09-03 places the test at `crates/nono-cli/tests/wfp_port_integration.rs` with `#![cfg(target_os = "windows")]` guard. The admin-requiring real-connection test is marked `#[ignore]` so standard CI runs skip it, while elevated Windows runs can invoke it with `cargo test -- --ignored`. A second test in the same file verifies the policy compilation path without any privilege requirement and runs in all Windows CI.
 
-3. **`--proxy-only` as CLI Concept vs. `has_proxy_flags()`**
-   - What we know: There is no `--proxy-only` CLI flag. Proxy mode is activated when `has_proxy_flags()` returns true (from `--network-profile`, `--allow-domain`, `--proxy-credential`, or `--external-proxy`). The success criteria use `--proxy-only` as shorthand for "proxy mode is active."
-   - What's unclear: Whether SC2 implies a new `--proxy-only` flag should be added, or whether the existing proxy activation path is sufficient.
-   - Recommendation: No new flag needed. The guard should fire when `caps.network_mode()` resolves to `ProxyOnly` (due to profile or credential flags) but `proxy.active` is false. Document in plan that `--proxy-only` in success criteria refers to proxy mode generally.
+3. **`--proxy-only` as CLI Concept vs. `has_proxy_flags()`** — **RESOLVED:** No new CLI flag is introduced. Plan 09-02 implements the guard by checking `caps.network_mode() == ProxyOnly` (which is set by the profile path at `capability_ext.rs:535` when `profile.network.has_proxy_flags()` is true) AND `proxy.active == false` (computed in `proxy_runtime.rs:52-78`). "--proxy-only" in CONTEXT.md success criteria refers to ProxyOnly network mode generally, not a new flag.
 
 ---
 
