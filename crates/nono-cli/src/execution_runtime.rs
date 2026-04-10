@@ -286,13 +286,20 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
         exec_strategy::ExecStrategy::Direct => {
             #[cfg(target_os = "windows")]
             {
-                exec_strategy::execute_direct(&config, Some(flags.session.session_id.as_str()))?;
+                let exit_code = exec_strategy::execute_direct(
+                    &config,
+                    Some(flags.session.session_id.as_str()),
+                )?;
+                cleanup_capability_state_file(&cap_file_path);
+                drop(config);
+                drop(loaded_secrets);
+                std::process::exit(exit_code);
             }
             #[cfg(not(target_os = "windows"))]
             {
                 exec_strategy::execute_direct(&config)?;
+                unreachable!("execute_direct only returns on error");
             }
-            unreachable!("execute_direct only returns on error");
         }
         exec_strategy::ExecStrategy::Supervised => {
             let exit_code = execute_supervised_runtime(SupervisedRuntimeContext {
