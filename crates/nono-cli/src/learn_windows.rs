@@ -316,7 +316,14 @@ const EVENT_ID_FILE_CREATE: u16 = 12;
 
 /// ETW TcpIp/Connect event ID (remote address populated — outbound TCP).
 /// Best-known value from WDK docs; verify empirically via DEBUG log on first event.
-const EVENT_ID_TCP_CONNECT: u16 = 12;
+///
+/// NOTE: same numeric value as EVENT_ID_FILE_CREATE (both == 12). The callbacks are
+/// registered on different providers (GUID_KERNEL_FILE vs GUID_KERNEL_NETWORK), and
+/// ferrisetw routes each event to the matching provider's callback — so a file Create
+/// event will NOT enter the network callback and vice versa. However, verify empirically:
+/// if the DEBUG log for the file callback shows provider GUIDs that match
+/// GUID_KERNEL_NETWORK, update this constant after testing on a live Windows host.
+const EVENT_ID_TCP_CONNECT: u16 = 12; // NOTE: same as EVENT_ID_FILE_CREATE — verify empirically
 
 /// ETW TcpIp/Accept event ID (local listening port populated — inbound TCP accept).
 /// Best-known value from WDK docs; verify empirically via DEBUG log on first event.
@@ -399,6 +406,14 @@ pub fn run_learn(args: &LearnArgs) -> Result<LearnResult> {
                 return;
             };
             let pid = record.process_id();
+            // CR-01: log provider GUID so empirical verification can confirm no network
+            // events bleed into the file callback (EVENT_ID_FILE_CREATE == EVENT_ID_TCP_CONNECT == 12).
+            debug!(
+                provider_guid = ?record.provider_id(),
+                event_id = EVENT_ID_FILE_CREATE,
+                pid,
+                "learn_windows: Kernel-File Create event"
+            );
             // T-10-10: mutex poison is logged at ERROR and skipped — never panics
             let Ok(mut guard) = state_file.lock() else {
                 error!("learn_windows: file callback: LearnState mutex poisoned");
@@ -465,6 +480,17 @@ pub fn run_learn(args: &LearnArgs) -> Result<LearnResult> {
     let state_net = state.clone();
     let network_provider = Provider::by_guid(GUID_KERNEL_NETWORK)
         .add_callback(move |record: &EventRecord, locator: &SchemaLocator| {
+            // CR-01: Guard on provider GUID before matching on event_id.
+            // EVENT_ID_TCP_CONNECT and EVENT_ID_FILE_CREATE share the same numeric value (12).
+            // Although ferrisetw routes events per provider callback, this guard is a
+            // defence-in-depth check: if an event from a different provider somehow reaches
+            // this callback, bail out immediately rather than attempting to parse TCP fields.
+            let provider_guid = record.provider_id();
+            debug!(
+                ?provider_guid,
+                event_id = record.event_id(),
+                "learn_windows: network callback received event"
+            );
             let Ok(schema) = locator.event_schema(record) else {
                 return;
             };
