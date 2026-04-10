@@ -162,6 +162,19 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
         output::print_supervised_info(flags.silent, rollback.requested, proxy.active);
     }
 
+    // Fail-secure guard (D-02): if the user's intent is proxy-only mode
+    // (caps were set to ProxyOnly by a profile or credential path at
+    // capability_ext.rs:535) but `proxy.active` is false (no network profile,
+    // no credentials, no upstream proxy — see proxy_runtime.rs lines 52-78),
+    // the sandboxed process would have no proxy to route traffic through.
+    // Fail before `start_proxy_runtime` and before any WFP/sandbox activation.
+    if matches!(caps.network_mode(), nono::NetworkMode::ProxyOnly { .. }) && !proxy.active {
+        return Err(NonoError::SandboxInit(
+            "Cannot use proxy-only mode without a network profile or credential configuration."
+                .to_string(),
+        ));
+    }
+
     let active_proxy = start_proxy_runtime(proxy, &mut caps)?;
     let proxy_env_vars = active_proxy.env_vars;
     let proxy_handle = active_proxy.handle;
@@ -266,6 +279,7 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
         cap_file: cap_file.as_deref(),
         current_dir: &current_dir,
         session_sid: Some(exec_strategy::generate_session_sid()),
+        interactive_shell: flags.interactive_shell,
     };
 
     match strategy {
