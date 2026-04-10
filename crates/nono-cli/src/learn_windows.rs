@@ -20,7 +20,7 @@
 //!   Err silently. Callers must `let Ok(x) = ... else { return; }` and never unwrap.
 
 use crate::cli::LearnArgs;
-use crate::learn::LearnResult;
+use crate::learn::{LearnResult, NetworkConnectionSummary, NetworkEndpoint};
 use ferrisetw::parser::Parser;
 use ferrisetw::provider::Provider;
 use ferrisetw::schema_locator::SchemaLocator;
@@ -28,6 +28,7 @@ use ferrisetw::trace::{TraceTrait, UserTrace};
 use ferrisetw::EventRecord;
 use nono::{NonoError, Result};
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -245,6 +246,54 @@ pub(crate) fn classify_and_record_file_access(state: &mut LearnState, pid: u32, 
 }
 
 // ---------------------------------------------------------------------------
+// Network event recorders
+// ---------------------------------------------------------------------------
+
+/// Record an outbound TCP connection observed via ETW TcpIp/Connect.
+///
+/// No-op if the PID is not in the tracked process tree (T-10-18 mitigation).
+///
+/// The `remote_ip` and `remote_port` are passed in host byte order — callers
+/// are responsible for converting from ETW network byte order before calling.
+pub(crate) fn record_outbound_connection(
+    state: &mut LearnState,
+    pid: u32,
+    remote_ip: IpAddr,
+    remote_port: u16,
+) {
+    if !state.is_tracked(pid) {
+        return;
+    }
+    let summary = NetworkConnectionSummary {
+        endpoint: NetworkEndpoint {
+            addr: remote_ip,
+            port: remote_port,
+            hostname: None,
+        },
+        count: 1,
+    };
+    state.result.outbound_connections.push(summary);
+}
+
+/// Record a listening TCP port observed via ETW TcpIp/Accept.
+///
+/// No-op if the PID is not in the tracked process tree (T-10-18 mitigation).
+pub(crate) fn record_listening_port(state: &mut LearnState, pid: u32, local_port: u16) {
+    if !state.is_tracked(pid) {
+        return;
+    }
+    let summary = NetworkConnectionSummary {
+        endpoint: NetworkEndpoint {
+            addr: IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            port: local_port,
+            hostname: None,
+        },
+        count: 1,
+    };
+    state.result.listening_ports.push(summary);
+}
+
+// ---------------------------------------------------------------------------
 // ETW provider GUIDs and session constants
 // ---------------------------------------------------------------------------
 
@@ -254,10 +303,24 @@ const GUID_KERNEL_FILE: &str = "EDD08927-9CC4-4E65-B970-C2560FB5C289";
 /// Microsoft-Windows-Kernel-Process provider GUID (verified in CONTEXT.md + research).
 const GUID_KERNEL_PROCESS: &str = "22FB2CD6-0E7B-422B-A0C7-2FAD1FD0E716";
 
-// Network provider GUID (Microsoft-Windows-Kernel-Network) is deferred to plan 10-03.
+/// Microsoft-Windows-Kernel-Network provider GUID (plan 10-03 — SC2 network half).
+///
+/// Provides TcpIp events for TCP connect and accept on the same UserTrace session
+/// as Kernel-File and Kernel-Process.  Field names are LOW-confidence (research
+/// Assumption A4); empirical verification happens via the DEBUG port log on first
+/// events and during the phase-gate human verification run.
+const GUID_KERNEL_NETWORK: &str = "7DD42A49-5329-4832-8DFD-43D979153A88";
 
 /// ETW Kernel-File Create event ID (from research Pattern 2 + Microsoft ETW docs).
 const EVENT_ID_FILE_CREATE: u16 = 12;
+
+/// ETW TcpIp/Connect event ID (remote address populated — outbound TCP).
+/// Best-known value from WDK docs; verify empirically via DEBUG log on first event.
+const EVENT_ID_TCP_CONNECT: u16 = 12;
+
+/// ETW TcpIp/Accept event ID (local listening port populated — inbound TCP accept).
+/// Best-known value from WDK docs; verify empirically via DEBUG log on first event.
+const EVENT_ID_TCP_ACCEPT: u16 = 15;
 
 /// Drain timeout after child exits (Pitfall 2 mitigation; Claude's Discretion: 200–500ms).
 const DRAIN_TIMEOUT_MS: u64 = 300;
@@ -385,6 +448,99 @@ pub fn run_learn(args: &LearnArgs) -> Result<LearnResult> {
         .build();
 
     // -----------------------------------------------------------------------
+    // Network provider: TcpIp/Connect → record_outbound_connection
+    //                   TcpIp/Accept  → record_listening_port
+    //
+    // Field name candidates (research Assumption A4, LOW confidence):
+    //   remote IP:   "daddr" / "DestAddress"
+    //   remote port: "dport" / "DestPort"
+    //   local port:  "sport" / "SourcePort" / "LocalPort"
+    //   process id:  record.process_id() (direct, no parse needed)
+    //
+    // ETW delivers TCP ports in network byte order (big-endian). We apply
+    // u16::from_be() after parsing (T-10-20 mitigation). The raw and converted
+    // port are both logged at DEBUG so the human verifier can confirm byte order
+    // empirically during the phase-gate run.
+    // -----------------------------------------------------------------------
+    let state_net = state.clone();
+    let network_provider = Provider::by_guid(GUID_KERNEL_NETWORK)
+        .add_callback(move |record: &EventRecord, locator: &SchemaLocator| {
+            let Ok(schema) = locator.event_schema(record) else {
+                return;
+            };
+            let parser = Parser::create(record, &schema);
+            let pid = record.process_id();
+            let Ok(mut guard) = state_net.lock() else {
+                error!("learn_windows: network callback: mutex poisoned");
+                return;
+            };
+            if !guard.is_tracked(pid) {
+                return;
+            }
+            match record.event_id() {
+                EVENT_ID_TCP_CONNECT => {
+                    // Try candidate field names in order (A4 LOW confidence).
+                    // ETW IPv4 addresses are delivered as u32 in network byte order.
+                    let remote_ip: Option<IpAddr> = parser
+                        .try_parse::<u32>("daddr")
+                        .ok()
+                        .map(|v| IpAddr::V4(std::net::Ipv4Addr::from(v.swap_bytes())))
+                        .or_else(|| {
+                            parser
+                                .try_parse::<u32>("DestAddress")
+                                .ok()
+                                .map(|v| IpAddr::V4(std::net::Ipv4Addr::from(v.swap_bytes())))
+                        });
+                    let remote_port_raw: Option<u16> = parser
+                        .try_parse::<u16>("dport")
+                        .ok()
+                        .or_else(|| parser.try_parse::<u16>("DestPort").ok());
+                    match (remote_ip, remote_port_raw) {
+                        (Some(ip), Some(raw_port)) => {
+                            // T-10-20: ETW ports are big-endian; convert to host order.
+                            let port = u16::from_be(raw_port);
+                            debug!(
+                                pid,
+                                ip = ?ip,
+                                raw_port,
+                                converted_port = port,
+                                "learn_windows: TcpIp/Connect captured"
+                            );
+                            record_outbound_connection(&mut guard, pid, ip, port);
+                        }
+                        _ => {
+                            debug!(pid, "learn_windows: TcpIp/Connect field parse miss");
+                        }
+                    }
+                }
+                EVENT_ID_TCP_ACCEPT => {
+                    let local_port_raw: Option<u16> = parser
+                        .try_parse::<u16>("sport")
+                        .ok()
+                        .or_else(|| parser.try_parse::<u16>("SourcePort").ok())
+                        .or_else(|| parser.try_parse::<u16>("LocalPort").ok());
+                    if let Some(raw_port) = local_port_raw {
+                        // T-10-20: ETW ports are big-endian; convert to host order.
+                        let port = u16::from_be(raw_port);
+                        debug!(
+                            pid,
+                            raw_port,
+                            converted_port = port,
+                            "learn_windows: TcpIp/Accept captured"
+                        );
+                        record_listening_port(&mut guard, pid, port);
+                    } else {
+                        debug!(pid, "learn_windows: TcpIp/Accept field parse miss");
+                    }
+                }
+                _ => {
+                    // Other network event subtypes (disconnect, retransmit) ignored.
+                }
+            }
+        })
+        .build();
+
+    // -----------------------------------------------------------------------
     // Start trace session (T-10-12: session name uses learner PID not child PID)
     // -----------------------------------------------------------------------
     let session_name = format!("nono-learn-{}", std::process::id());
@@ -397,6 +553,7 @@ pub fn run_learn(args: &LearnArgs) -> Result<LearnResult> {
         .named(session_name.clone())
         .enable(file_provider)
         .enable(process_provider)
+        .enable(network_provider)
         .start();
 
     let (trace, trace_handle) = match trace_result {
@@ -693,5 +850,75 @@ mod tests {
         state.on_process_create(1234, 5678); // child becomes tracked
         classify_and_record_file_access(&mut state, 5678, "\\Device\\HarddiskVolume3\\child.log");
         assert_eq!(state.result.readwrite_paths.len(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Network recorder tests (plan 10-03 Task 1)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_record_outbound_untracked_pid_is_noop() {
+        let mut state = state_with_map(1234);
+        record_outbound_connection(
+            &mut state,
+            9999,
+            IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8)),
+            443,
+        );
+        assert!(state.result.outbound_connections.is_empty());
+    }
+
+    #[test]
+    fn test_record_outbound_tracked_pid_appends() {
+        let mut state = state_with_map(1234);
+        record_outbound_connection(
+            &mut state,
+            1234,
+            IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8)),
+            443,
+        );
+        assert_eq!(state.result.outbound_connections.len(), 1);
+        assert_eq!(state.result.outbound_connections[0].endpoint.port, 443);
+    }
+
+    #[test]
+    fn test_record_outbound_multiple_connections_accumulate() {
+        let mut state = state_with_map(1234);
+        record_outbound_connection(
+            &mut state,
+            1234,
+            IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8)),
+            443,
+        );
+        record_outbound_connection(
+            &mut state,
+            1234,
+            IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1)),
+            80,
+        );
+        assert_eq!(state.result.outbound_connections.len(), 2);
+    }
+
+    #[test]
+    fn test_record_listening_untracked_pid_is_noop() {
+        let mut state = state_with_map(1234);
+        record_listening_port(&mut state, 9999, 8080);
+        assert!(state.result.listening_ports.is_empty());
+    }
+
+    #[test]
+    fn test_record_listening_tracked_pid_appends() {
+        let mut state = state_with_map(1234);
+        record_listening_port(&mut state, 1234, 8080);
+        assert_eq!(state.result.listening_ports.len(), 1);
+        assert_eq!(state.result.listening_ports[0].endpoint.port, 8080);
+    }
+
+    #[test]
+    fn test_record_listening_multiple_ports_accumulate() {
+        let mut state = state_with_map(1234);
+        record_listening_port(&mut state, 1234, 8080);
+        record_listening_port(&mut state, 1234, 9090);
+        assert_eq!(state.result.listening_ports.len(), 2);
     }
 }
