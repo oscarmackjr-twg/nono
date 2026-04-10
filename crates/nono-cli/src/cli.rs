@@ -1564,6 +1564,23 @@ pub struct LearnArgs {
     pub help: Option<bool>,
 }
 
+impl LearnArgs {
+    /// Construct a minimal `LearnArgs` for unit tests on Windows.
+    #[cfg(all(test, target_os = "windows"))]
+    pub(crate) fn default_for_test() -> Self {
+        Self {
+            profile: None,
+            json: false,
+            timeout: None,
+            all: false,
+            no_rdns: false,
+            verbose: 0,
+            command: vec!["echo".to_string(), "test".to_string()],
+            help: None,
+        }
+    }
+}
+
 /// Operation type for why command
 #[derive(Clone, Debug, ValueEnum)]
 pub enum WhyOp {
