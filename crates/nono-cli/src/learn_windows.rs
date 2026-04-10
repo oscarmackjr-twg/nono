@@ -56,7 +56,7 @@ const NON_ADMIN_ERROR: &str = "nono learn requires administrator privileges. \
 /// `volume_map` is built once at startup via `build_volume_map()`.
 ///
 /// consumed by plan 10-02 ETW consumer
-#[allow(dead_code)] // consumed by plan 10-02 ETW consumer
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) struct LearnState {
     pub tracked_pids: HashSet<u32>,
     pub result: LearnResult,
@@ -64,7 +64,7 @@ pub(crate) struct LearnState {
 }
 
 impl LearnState {
-    #[allow(dead_code)] // consumed by plan 10-02 ETW consumer
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub fn new(root_pid: u32, volume_map: HashMap<String, String>) -> Self {
         let mut tracked_pids = HashSet::new();
         tracked_pids.insert(root_pid);
@@ -87,7 +87,7 @@ impl LearnState {
     ///
     /// Adds the child PID to the tracked set iff its parent is already tracked
     /// and the child is not a reserved system PID (T-10-08 mitigation).
-    #[allow(dead_code)] // used by Task 3 ETW callback
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub fn on_process_create(&mut self, parent_pid: u32, child_pid: u32) {
         if Self::SYSTEM_RESERVED_PIDS.contains(&child_pid) {
             return;
@@ -100,13 +100,13 @@ impl LearnState {
     /// Handle a Kernel-Process ExitProcess ETW event.
     ///
     /// Removes the PID from the tracked set. No-op if the PID was never tracked.
-    #[allow(dead_code)] // used by Task 3 ETW callback
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub fn on_process_exit(&mut self, pid: u32) {
         self.tracked_pids.remove(&pid);
     }
 
     /// Check whether an event's PID should be processed.
-    #[allow(dead_code)] // used by Task 3 ETW callback
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub fn is_tracked(&self, pid: u32) -> bool {
         self.tracked_pids.contains(&pid)
     }
@@ -124,7 +124,7 @@ impl LearnState {
 /// skipped.
 ///
 /// consumed by plan 10-02 ETW consumer
-#[allow(dead_code)] // consumed by plan 10-02 ETW consumer
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn build_volume_map() -> HashMap<String, String> {
     let mut map = HashMap::new();
     for letter in b'A'..=b'Z' {
@@ -176,7 +176,7 @@ pub(crate) fn build_volume_map() -> HashMap<String, String> {
 /// (T-10-01 in the plan threat register).  String-level `starts_with` is safe
 /// here because we control both sides of the comparison and always add the `\\`
 /// boundary character.
-#[allow(dead_code)] // consumed by plan 10-02 ETW consumer
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn nt_to_win32(nt_path: &str, volume_map: &HashMap<String, String>) -> Option<PathBuf> {
     // Skip well-known non-drive NT namespace prefixes that can never map
     // to a drive letter (named pipes, mailslots, UNC redirector, MUP, etc.)
@@ -233,7 +233,7 @@ pub(crate) fn nt_to_win32(nt_path: &str, volume_map: &HashMap<String, String>) -
 ///
 /// Reference: .planning/phases/10-etw-based-learn-command/10-RESEARCH.md
 /// section "D-04 Field Name Discrepancy (CRITICAL — Planner Must Resolve)".
-#[allow(dead_code)] // called by Task 3 ETW file-event callback
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn classify_and_record_file_access(state: &mut LearnState, pid: u32, nt_path: &str) {
     if !state.is_tracked(pid) {
         return;
