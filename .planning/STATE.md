@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 07-02-PLAN.md
-last_updated: "2026-04-10T11:26:48.730Z"
+stopped_at: Completed 09-04-PLAN.md (gap closure)
+last_updated: "2026-04-10T15:00:00.000Z"
 last_activity: 2026-04-10
 progress:
   total_phases: 11
-  completed_phases: 7
-  total_plans: 22
-  completed_plans: 19
-  percent: 86
+  completed_phases: 8
+  total_plans: 23
+  completed_plans: 26
+  percent: 73
 ---
 
 # Project State: nono - Windows Gap Closure
@@ -20,17 +20,17 @@ progress:
 
 **Core Value:** Every nono command that works on Linux/macOS should work on Windows with equivalent security guarantees, or be explicitly documented as intentionally unsupported with a clear rationale.
 
-**Current Focus:** Phase 07 — quick-wins
+**Current Focus:** Phase 09 — wfp-port-level-proxy-filtering (COMPLETE; awaiting human verification for SC5 WFP TCP test and proxy E2E)
 
 ## Current Position
 
-Phase: 07 (quick-wins) — EXECUTING
-Plan: 2 of 2
-Status: Ready to execute
-Last activity: 2026-04-10 -- Phase 9 planning complete
+Phase: 09 (wfp-port-level-proxy-filtering) — COMPLETE (human_needed: 2 items require Windows host with admin + WFP service)
+Plan: 4 of 4
+Status: Phase 09 complete. Next: Phase 08 (ConPTY Shell) or Phase 10 (ETW-Based Learn Command).
+Last activity: 2026-04-10 — Phase 09 gap closure (09-04-PLAN.md) verified; 555 tests pass, cargo check clean.
 
 ```
-Progress: [░░░░░░░░░░░░░░░░░░░░] 0% (0/5 phases, 0/12 plans)
+Progress: [████████████████████] 73% (8/11 phases complete)
 ```
 
 ## Accumulated Context
@@ -61,6 +61,8 @@ Progress: [░░░░░░░░░░░░░░░░░░░░] 0% (0/5
 - **Minimum build for ConPTY and ETW:** Windows 10 build 17763 (1809); enforced via `RtlGetVersion` at runtime; no silent fallback (2026-04-06).
 - **Anonymous Job Object for wrap:** Pass `None` to `execute_direct` for Direct strategy; empty session_id would produce malformed Job Object name `Local\nono-session-` (2026-04-08).
 - **nono wrap available on Windows:** Direct strategy with Job Object + WFP enforcement; documented with "no exec-replace, unlike Unix" qualifier per WRAP-01 (2026-04-08).
+- **Phase 09 unreachable!() scoped to Unix:** On Windows, execute_direct returns Ok(i32); unreachable!() moved inside cfg(not(windows)) block; Windows Direct branch captures exit code and calls std::process::exit(exit_code) (2026-04-10).
+- **Phase 09 stale test replaced:** apply_rejects_unsupported_proxy_with_ports removed; apply_accepts_port_level_wfp_caps asserts Ok(()) for port-level caps post-Phase-09 semantics (2026-04-10).
 
 ### Research Flags (open)
 
@@ -71,6 +73,8 @@ Progress: [░░░░░░░░░░░░░░░░░░░░] 0% (0/5
 ### Todos
 
 - [ ] Discuss Phase 4 filesystem strategy (VSS vs Merkle Trees)
+- [ ] Phase 09 human verification: proxy E2E (HTTPS_PROXY in child env) — requires Windows host + live proxy config
+- [ ] Phase 09 human verification: SC5 WFP TCP test (`cargo test -p nono-cli --test wfp_port_integration -- --ignored`) — requires Windows host + admin + nono-wfp-service running
 
 ### Blockers
 
@@ -89,5 +93,5 @@ Progress: [░░░░░░░░░░░░░░░░░░░░] 0% (0/5
 
 **Current Milestone:** v2.0 Windows Gap Closure
 **Last Activity:** 2026-04-10
-**Stopped At:** Completed 07-02-PLAN.md
-**Next Steps:** `/gsd:plan-phase 7` for Quick Wins (still pending). Phases 9, 10, and 11 can be planned independently.
+**Stopped At:** Completed 09-04-PLAN.md (gap closure) — Phase 09 verified
+**Next Steps:** Phase 08 (ConPTY Shell) or Phase 10 (ETW-Based Learn Command) — both are plannable now. Phase 09 human-verification items noted in Todos above.

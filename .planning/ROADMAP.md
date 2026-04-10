@@ -12,7 +12,7 @@ This roadmap outlines the path to functional parity between the Windows implemen
 - [x] **Phase 6: WFP Enforcement Activation** - Replace stub with real SID-based WFP activation call.
 - [x] **Phase 7: Quick Wins** - Unblock everyday UX by enabling nono wrap and session log commands on Windows. (completed 2026-04-08)
 - [ ] **Phase 8: ConPTY Shell** - Enable interactive nono shell on Windows via ConPTY.
-- [ ] **Phase 9: WFP Port-Level + Proxy Filtering** - Enable port-granular network policy and proxy credential injection.
+- [x] **Phase 9: WFP Port-Level + Proxy Filtering** - Enable port-granular network policy and proxy credential injection. (completed 2026-04-10)
 - [ ] **Phase 10: ETW-Based Learn Command** - Implement nono learn on Windows via Event Tracing for Windows.
 - [ ] **Phase 11: Runtime Capability Expansion** - (Stretch) Enable sandboxed child to request additional capabilities at runtime.
 
@@ -99,7 +99,7 @@ Plans:
 - [x] 07-01-PLAN.md — Fix nono wrap Direct strategy return path and verify session commands
 **UI hint**: yes
 
-### Phase 9: WFP Port-Level + Proxy Filtering
+### Phase 9: WFP Port-Level + Proxy Filtering (COMPLETED)
 **Goal**: Users can configure port-granular network policy and route sandboxed agent traffic through a local proxy with credential injection.
 **Depends on**: Nothing — independent of Phases 7 and 8.
 **Requirements**: PORT-01, PROXY-01
@@ -109,11 +109,12 @@ Plans:
   3. Bind and connect port allowlists operate independently; allowing a bind port does not implicitly allow connect, and vice versa.
   4. `HTTPS_PROXY` and `NONO_PROXY_TOKEN` environment variables are injected into the sandboxed child via `ExecConfig.env_vars`.
   5. WFP per-port permit filters carry a higher weight than the block-all filter; a real TCP connection test (not merely filter presence) confirms allow-listed ports are reachable.
-**Plans**: 3 plans
+**Plans**: 4 plans
 Plans:
-- [ ] 09-01-PLAN.md — Remove unsupported markers from compile_network_policy, enable port-level WFP enforcement
-- [ ] 09-02-PLAN.md — Add ProxyOnly pre-flight guard in execution_runtime.rs
-- [ ] 09-03-PLAN.md — Integration test: real TCP connection through WFP allow-listed port
+- [x] 09-01-PLAN.md — Remove unsupported markers from compile_network_policy, enable port-level WFP enforcement
+- [x] 09-02-PLAN.md — Add ProxyOnly pre-flight guard in execution_runtime.rs
+- [x] 09-03-PLAN.md — Integration test: real TCP connection through WFP allow-listed port
+- [x] 09-04-PLAN.md — Gap closure: replace stale test + fix Windows Direct exit-code panic
 
 ### Phase 10: ETW-Based Learn Command
 **Goal**: Users can run `nono learn <cmd>` on Windows to capture file and network access patterns, producing output compatible with Unix learn tooling.
@@ -153,6 +154,6 @@ Plans:
 | 6. WFP Enforcement Activation | 2/2 | Complete   | 2026-04-06 |
 | 7. Quick Wins | 2/2 | Complete   | 2026-04-08 |
 | 8. ConPTY Shell | 0/2 | Not started | - |
-| 9. WFP Port-Level + Proxy Filtering | 0/3 | Not started | - |
+| 9. WFP Port-Level + Proxy Filtering | 4/4 | Complete | 2026-04-10 |
 | 10. ETW-Based Learn Command | 0/3 | Not started | - |
 | 11. Runtime Capability Expansion | 0/2 | Not started | - |
