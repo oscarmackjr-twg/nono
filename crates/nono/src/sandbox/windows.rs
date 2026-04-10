@@ -27,8 +27,9 @@ use windows_sys::Win32::System::SystemServices::{
 const WINDOWS_PREVIEW_SUPPORTED: bool = true;
 const WINDOWS_SUPPORTED_DETAILS: &str =
     "Windows sandbox enforcement supports directory read and directory read-write grants, \
-     blocked network mode, and default signal/process/ipc modes. Single-file grants, \
-     write-only directory grants, port-level network filtering, runtime capability \
+     blocked network mode, port-level network filtering (connect, bind, and localhost ports), \
+     and default signal/process/ipc modes. Single-file grants, \
+     write-only directory grants, runtime capability \
      expansion, and platform-specific rules are not in the supported subset. \
      `nono shell` is supported on Windows 10 build 17763+ via ConPTY \
      (CreatePseudoConsole); the supervisor stays alive as Job Object owner. \
@@ -302,22 +303,7 @@ pub fn compile_network_policy(caps: &CapabilitySet) -> WindowsNetworkPolicy {
         },
     };
 
-    let mut unsupported = Vec::new();
-    if !caps.tcp_connect_ports().is_empty() {
-        unsupported.push(crate::sandbox::WindowsUnsupportedNetworkIssue {
-            kind: crate::sandbox::WindowsUnsupportedNetworkIssueKind::PortConnectAllowlist,
-        });
-    }
-    if !caps.tcp_bind_ports().is_empty() {
-        unsupported.push(crate::sandbox::WindowsUnsupportedNetworkIssue {
-            kind: crate::sandbox::WindowsUnsupportedNetworkIssueKind::PortBindAllowlist,
-        });
-    }
-    if !caps.localhost_ports().is_empty() {
-        unsupported.push(crate::sandbox::WindowsUnsupportedNetworkIssue {
-            kind: crate::sandbox::WindowsUnsupportedNetworkIssueKind::LocalhostPortAllowlist,
-        });
-    }
+    let unsupported = Vec::new();
     let mut tcp_connect_ports = caps.tcp_connect_ports().to_vec();
     tcp_connect_ports.sort_unstable();
     tcp_connect_ports.dedup();
@@ -1551,12 +1537,49 @@ mod tests {
 
         let policy = compile_network_policy(&caps);
         assert_eq!(policy.mode, WindowsNetworkPolicyMode::Blocked);
-        assert_eq!(policy.unsupported.len(), 3);
+        assert!(policy.unsupported.is_empty(), "port caps should now be fully supported");
+        assert!(policy.is_fully_supported());
         assert_eq!(policy.tcp_connect_ports, vec![443]);
         assert_eq!(policy.tcp_bind_ports, vec![8080]);
         assert_eq!(policy.localhost_ports, vec![3000]);
         assert_eq!(policy.preferred_backend, WindowsNetworkBackendKind::Wfp);
         assert_eq!(policy.active_backend, WindowsNetworkBackendKind::Wfp);
+    }
+
+    #[test]
+    fn compile_network_policy_with_connect_ports_only_is_fully_supported() {
+        let mut caps = CapabilitySet::new().set_network_mode(NetworkMode::Blocked);
+        caps.add_tcp_connect_port(443);
+        let policy = compile_network_policy(&caps);
+        assert!(policy.is_fully_supported());
+        assert_eq!(policy.tcp_connect_ports, vec![443]);
+        assert!(policy.tcp_bind_ports.is_empty());
+        assert!(policy.localhost_ports.is_empty());
+        assert!(policy.unsupported.is_empty());
+    }
+
+    #[test]
+    fn compile_network_policy_with_bind_ports_only_is_fully_supported() {
+        let mut caps = CapabilitySet::new().set_network_mode(NetworkMode::Blocked);
+        caps.add_tcp_bind_port(8080);
+        let policy = compile_network_policy(&caps);
+        assert!(policy.is_fully_supported());
+        assert!(policy.tcp_connect_ports.is_empty());
+        assert_eq!(policy.tcp_bind_ports, vec![8080]);
+        assert!(policy.localhost_ports.is_empty());
+        assert!(policy.unsupported.is_empty());
+    }
+
+    #[test]
+    fn compile_network_policy_with_localhost_ports_only_is_fully_supported() {
+        let mut caps = CapabilitySet::new().set_network_mode(NetworkMode::Blocked);
+        caps.add_localhost_port(3000);
+        let policy = compile_network_policy(&caps);
+        assert!(policy.is_fully_supported());
+        assert!(policy.tcp_connect_ports.is_empty());
+        assert!(policy.tcp_bind_ports.is_empty());
+        assert_eq!(policy.localhost_ports, vec![3000]);
+        assert!(policy.unsupported.is_empty());
     }
 
     #[test]
