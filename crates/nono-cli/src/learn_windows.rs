@@ -64,6 +64,42 @@ impl LearnState {
             volume_map,
         }
     }
+
+    /// Reserved Windows system PIDs that must never be tracked, even if ETW
+    /// reports them as descendants of a tracked process. System (PID 4) and
+    /// the idle process (PID 0) would pull the entire machine into the trace.
+    ///
+    /// T-10-08 mitigation: prevents privilege escalation via process tree expansion
+    /// to system-level processes.
+    const SYSTEM_RESERVED_PIDS: &'static [u32] = &[0, 4];
+
+    /// Handle a Kernel-Process CreateProcess ETW event.
+    ///
+    /// Adds the child PID to the tracked set iff its parent is already tracked
+    /// and the child is not a reserved system PID (T-10-08 mitigation).
+    #[allow(dead_code)] // used by Task 3 ETW callback
+    pub fn on_process_create(&mut self, parent_pid: u32, child_pid: u32) {
+        if Self::SYSTEM_RESERVED_PIDS.contains(&child_pid) {
+            return;
+        }
+        if self.tracked_pids.contains(&parent_pid) {
+            self.tracked_pids.insert(child_pid);
+        }
+    }
+
+    /// Handle a Kernel-Process ExitProcess ETW event.
+    ///
+    /// Removes the PID from the tracked set. No-op if the PID was never tracked.
+    #[allow(dead_code)] // used by Task 3 ETW callback
+    pub fn on_process_exit(&mut self, pid: u32) {
+        self.tracked_pids.remove(&pid);
+    }
+
+    /// Check whether an event's PID should be processed.
+    #[allow(dead_code)] // used by Task 3 ETW callback
+    pub fn is_tracked(&self, pid: u32) -> bool {
+        self.tracked_pids.contains(&pid)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -276,5 +312,72 @@ mod tests {
         let map = build_volume_map();
         // Not asserting contents — just that the call returned a HashMap safely.
         let _ = map.len();
+    }
+
+    // -----------------------------------------------------------------------
+    // Process tree tracking tests (plan 10-02 Task 1)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_process_tree_root_seeded() {
+        let state = LearnState::new(1234, HashMap::new());
+        assert!(state.is_tracked(1234));
+        assert!(!state.is_tracked(5678));
+    }
+
+    #[test]
+    fn test_process_tree_add_child_of_tracked_parent() {
+        let mut state = LearnState::new(1234, HashMap::new());
+        state.on_process_create(1234, 5678);
+        assert!(state.is_tracked(5678));
+    }
+
+    #[test]
+    fn test_process_tree_skip_child_of_untracked_parent() {
+        let mut state = LearnState::new(1234, HashMap::new());
+        state.on_process_create(9999, 5678);
+        assert!(!state.is_tracked(5678));
+    }
+
+    #[test]
+    fn test_process_tree_grandchild_inherits() {
+        let mut state = LearnState::new(1234, HashMap::new());
+        state.on_process_create(1234, 5678);
+        state.on_process_create(5678, 9999);
+        assert!(state.is_tracked(9999));
+    }
+
+    #[test]
+    fn test_process_tree_exit_removes() {
+        let mut state = LearnState::new(1234, HashMap::new());
+        state.on_process_create(1234, 5678);
+        state.on_process_exit(5678);
+        assert!(!state.is_tracked(5678));
+        assert!(state.is_tracked(1234)); // root unchanged
+    }
+
+    #[test]
+    fn test_process_tree_reserved_pids_rejected() {
+        let mut state = LearnState::new(1234, HashMap::new());
+        state.on_process_create(1234, 0);
+        state.on_process_create(1234, 4);
+        assert!(!state.is_tracked(0));
+        assert!(!state.is_tracked(4));
+    }
+
+    #[test]
+    fn test_process_tree_double_add_idempotent() {
+        let mut state = LearnState::new(1234, HashMap::new());
+        state.on_process_create(1234, 5678);
+        state.on_process_create(1234, 5678);
+        assert!(state.is_tracked(5678));
+        assert_eq!(state.tracked_pids.len(), 2); // root + child
+    }
+
+    #[test]
+    fn test_process_tree_exit_untracked_is_noop() {
+        let mut state = LearnState::new(1234, HashMap::new());
+        state.on_process_exit(9999); // should not panic or error
+        assert!(state.is_tracked(1234));
     }
 }
