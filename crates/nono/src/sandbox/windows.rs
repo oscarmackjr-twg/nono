@@ -1,7 +1,10 @@
-//! Windows sandbox implementation placeholder.
+//! Windows sandbox implementation.
 //!
-//! WIN-101 only needs Windows to be a first-class build target. The actual
-//! enforcement backend is added in later stories.
+//! Provides directory read / read-write capability grants, blocked network mode,
+//! and port-level WFP filtering (connect, bind, and localhost ports) for the
+//! Windows backend. Supervisor activation is handled by `nono-wfp-service` via
+//! named-pipe IPC; this module exposes the policy-compilation and support-info
+//! surface consumed by the facade in `sandbox/mod.rs`.
 
 use crate::capability::CapabilitySet;
 use crate::error::{NonoError, Result};
@@ -1541,7 +1544,10 @@ mod tests {
 
         let policy = compile_network_policy(&caps);
         assert_eq!(policy.mode, WindowsNetworkPolicyMode::Blocked);
-        assert!(policy.unsupported.is_empty(), "port caps should now be fully supported");
+        assert!(
+            policy.unsupported.is_empty(),
+            "port caps should now be fully supported"
+        );
         assert!(policy.is_fully_supported());
         assert_eq!(policy.tcp_connect_ports, vec![443]);
         assert_eq!(policy.tcp_bind_ports, vec![8080]);
