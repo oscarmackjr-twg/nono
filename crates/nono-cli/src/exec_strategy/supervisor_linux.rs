@@ -402,6 +402,7 @@ pub(super) fn handle_seccomp_notification(
         reason: Some("Sandbox intercepted file operation (seccomp-notify)".to_string()),
         child_pid: child.as_raw() as u32,
         session_id: config.session_id.to_string(),
+        session_token: String::new(),
     };
 
     let decision = match config.approval_backend.request_capability(&request) {

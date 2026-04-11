@@ -29,6 +29,13 @@ pub struct CapabilityRequest {
     pub child_pid: u32,
     /// Session identifier for correlating requests within a single run
     pub session_id: String,
+    /// 32-byte hex session token (NONO_SESSION_TOKEN).
+    ///
+    /// Never log this field; always redact before embedding in [`AuditEntry`].
+    /// On Windows this is validated in constant time by the supervisor
+    /// before any approval backend is consulted (see plan 11-01).
+    #[serde(default)]
+    pub session_token: String,
 }
 
 /// The supervisor's response to a [`CapabilityRequest`].

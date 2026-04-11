@@ -539,6 +539,7 @@ mod tests {
             reason: Some("test access".to_string()),
             child_pid: 12345,
             session_id: "sess-001".to_string(),
+            session_token: String::new(),
         };
 
         // Child sends request

@@ -139,7 +139,18 @@ mod tests {
             reason: Some("unit test".to_string()),
             child_pid: 1234,
             session_id: "sess-001".to_string(),
+            session_token: String::new(),
         }
+    }
+
+    #[test]
+    fn test_capability_request_json_round_trip_preserves_session_token() {
+        let mut request = make_request();
+        request.session_token = "abcdef0123456789".to_string();
+        let json = serde_json::to_string(&request).expect("serialize");
+        let decoded: CapabilityRequest = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.session_token, "abcdef0123456789");
+        assert_eq!(decoded.request_id, request.request_id);
     }
 
     #[test]

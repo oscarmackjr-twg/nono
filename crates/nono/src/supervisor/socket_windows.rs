@@ -15,9 +15,11 @@ use std::io::{Read, Write};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
 use windows_sys::Win32::Foundation::{
-    DuplicateHandle, DUPLICATE_SAME_ACCESS, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY,
+    DuplicateHandle, LocalFree, DUPLICATE_SAME_ACCESS, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY,
     ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
 };
+use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
 };
@@ -27,6 +29,15 @@ use windows_sys::Win32::System::Pipes::{
     PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+/// SDDL revision used by `ConvertStringSecurityDescriptorToSecurityDescriptorW`.
+const SDDL_REVISION_1: u32 = 1;
+
+/// SDDL string for the capability pipe. Grants full access to SYSTEM, Built-in
+/// Administrators, and the owner; adds a mandatory integrity SACL allowing
+/// Low Integrity processes to write (`NW`) to the pipe.
+const CAPABILITY_PIPE_SDDL: &str =
+    "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)S:(ML;;NW;;;LW)";
 
 /// Length prefix size: 4 bytes (u32 big-endian)
 const LENGTH_PREFIX_SIZE: usize = 4;
@@ -90,8 +101,28 @@ impl SupervisorSocket {
 
     /// Bind a named pipe for the provided rendezvous path and wait for a client.
     pub fn bind(path: &Path) -> Result<Self> {
+        Self::bind_impl(path, false)
+    }
+
+    /// Bind a named pipe that accepts connections from Low Integrity processes.
+    ///
+    /// This variant attaches SDDL `S:(ML;;NW;;;LW)` so that a sandboxed child
+    /// running with Low Mandatory Integrity (Windows Vista+ MIC) can write to
+    /// the pipe. All other access controls (DACL restricting to SYSTEM,
+    /// Built-in Administrators, and the owner) are preserved. On SDDL
+    /// conversion failure this function fails secure — it does NOT fall back
+    /// to a null security descriptor.
+    pub fn bind_low_integrity(path: &Path) -> Result<Self> {
+        Self::bind_impl(path, true)
+    }
+
+    fn bind_impl(path: &Path, low_integrity: bool) -> Result<Self> {
         let (pipe_name, cleanup_rendezvous_path) = prepare_bind_pipe_name(path)?;
-        let server_handle = create_named_pipe(&pipe_name, false)?;
+        let server_handle = if low_integrity {
+            create_low_integrity_named_pipe(&pipe_name)?
+        } else {
+            create_named_pipe(&pipe_name, false)?
+        };
         if let Err(err) = write_pipe_rendezvous(path, &pipe_name) {
             // SAFETY: `server_handle` is an owned handle created above and must
             // be reclaimed if rendezvous publication fails before conversion.
@@ -457,6 +488,85 @@ Ensure the supervisor created the control channel before launching the child.",
     })
 }
 
+/// Scope guard that frees a PSECURITY_DESCRIPTOR on drop via `LocalFree`.
+struct SecurityDescriptorGuard(PSECURITY_DESCRIPTOR);
+
+impl Drop for SecurityDescriptorGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                // SAFETY: `self.0` was obtained from
+                // `ConvertStringSecurityDescriptorToSecurityDescriptorW`,
+                // which documents `LocalFree` as the correct release routine.
+                LocalFree(self.0 as _);
+            }
+        }
+    }
+}
+
+fn build_low_integrity_security_attributes(
+) -> Result<(SECURITY_ATTRIBUTES, SecurityDescriptorGuard)> {
+    let sddl_u16: Vec<u16> = CAPABILITY_PIPE_SDDL
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut security_descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    let ok = unsafe {
+        // SAFETY: `sddl_u16` is a valid null-terminated UTF-16 string and
+        // `security_descriptor` points to writable storage. The returned
+        // descriptor must be freed via `LocalFree`, handled by the guard.
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl_u16.as_ptr(),
+            SDDL_REVISION_1,
+            &mut security_descriptor,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 || security_descriptor.is_null() {
+        return Err(NonoError::SandboxInit(format!(
+            "Failed to convert capability pipe SDDL to security descriptor: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    let guard = SecurityDescriptorGuard(security_descriptor);
+    let sa = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: security_descriptor as _,
+        bInheritHandle: 0,
+    };
+    Ok((sa, guard))
+}
+
+fn create_low_integrity_named_pipe(pipe_name: &str) -> Result<HANDLE> {
+    let (sa, _sd_guard) = build_low_integrity_security_attributes()?;
+    let wide_name = to_wide(pipe_name);
+
+    // SAFETY: `wide_name` is a valid null-terminated UTF-16 string. `sa` carries
+    // a security descriptor freed by `_sd_guard` on function return. The
+    // returned handle is owned by the caller.
+    let handle = unsafe {
+        CreateNamedPipeW(
+            wide_name.as_ptr(),
+            PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+            1,
+            MAX_MESSAGE_SIZE,
+            MAX_MESSAGE_SIZE,
+            PIPE_CONNECT_TIMEOUT_MS,
+            &sa,
+        )
+    };
+
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(NonoError::SandboxInit(format!(
+            "Failed to create low-integrity Windows supervisor pipe {pipe_name}: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    Ok(handle)
+}
+
 fn create_named_pipe(pipe_name: &str, first_instance: bool) -> Result<HANDLE> {
     let mut open_mode = PIPE_ACCESS_DUPLEX;
     if first_instance {
@@ -640,6 +750,7 @@ mod tests {
             reason: Some("test access".to_string()),
             child_pid: 12345,
             session_id: "sess-001".to_string(),
+            session_token: "test-token".to_string(),
         };
 
         child
@@ -773,6 +884,67 @@ mod tests {
 
         let err = read_pipe_rendezvous(&rendezvous).expect_err("missing pid should fail");
         assert!(err.to_string().contains("did not include a server PID"));
+    }
+
+    #[test]
+    fn test_bind_low_integrity_roundtrip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rendezvous = dir.path().join("lowint.pipe");
+        let rendezvous_server = rendezvous.clone();
+        let rendezvous_client = rendezvous.clone();
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+
+        let server_thread = std::thread::spawn(move || {
+            let mut server = SupervisorSocket::bind_low_integrity(&rendezvous_server)
+                .expect("bind low integrity");
+            let msg = server.recv_message().expect("recv message");
+            match msg {
+                SupervisorMessage::Request(req) => {
+                    assert_eq!(req.request_id, "lowint-req");
+                    assert_eq!(req.session_token, "tok");
+                }
+                other => panic!("unexpected message: {other:?}"),
+            }
+            server
+                .send_response(&SupervisorResponse::Decision {
+                    request_id: "lowint-req".to_string(),
+                    decision: ApprovalDecision::Granted,
+                    grant: None,
+                })
+                .expect("send response");
+            // Wait for the client to confirm it has read the response before
+            // dropping the pipe, which would otherwise tear down the client's
+            // read side prematurely.
+            let _ = done_rx.recv();
+            drop(server);
+        });
+
+        // Give the server a moment to publish the rendezvous file.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let mut client = SupervisorSocket::connect(&rendezvous_client).expect("connect");
+        let request = CapabilityRequest {
+            request_id: "lowint-req".to_string(),
+            path: r"C:\tmp\lowint.txt".into(),
+            access: AccessMode::Read,
+            reason: None,
+            child_pid: 12345,
+            session_id: "sess-lowint".to_string(),
+            session_token: "tok".to_string(),
+        };
+        client
+            .send_message(&SupervisorMessage::Request(request))
+            .expect("send request");
+        match client.recv_response().expect("recv response") {
+            SupervisorResponse::Decision { decision, .. } => {
+                assert!(decision.is_granted());
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+
+        done_tx.send(()).expect("signal server");
+        server_thread.join().expect("server thread");
     }
 
     #[test]
