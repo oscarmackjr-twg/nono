@@ -37,30 +37,30 @@ Gap closure milestone. Closes the 7 remaining feature gaps between Windows and U
 
 ### Wrap (WRAP)
 
-- [ ] **WRAP-01**: User can run `nono wrap <cmd>` on Windows using Direct strategy with Job Object + WFP enforcement; help text documents that the supervisor stays alive as Job Object owner (no exec-replace, unlike Unix).
+- [x] **WRAP-01**: User can run `nono wrap <cmd>` on Windows using Direct strategy with Job Object + WFP enforcement; help text documents that the supervisor stays alive as Job Object owner (no exec-replace, unlike Unix).
 
 ### Session Commands (SESS)
 
-- [ ] **SESS-01**: User can view logs for a Windows session using `nono logs <session>`.
-- [ ] **SESS-02**: User can inspect a Windows session record in JSON format using `nono inspect <session>`.
-- [ ] **SESS-03**: User can prune stale Windows session records using `nono prune`.
+- [x] **SESS-01**: User can view logs for a Windows session using `nono logs <session>`.
+- [x] **SESS-02**: User can inspect a Windows session record in JSON format using `nono inspect <session>`.
+- [x] **SESS-03**: User can prune stale Windows session records using `nono prune`.
 
 ### Interactive Shell (SHELL)
 
-- [ ] **SHELL-01**: User can run `nono shell` to launch an interactive PowerShell or cmd.exe session inside a Job Object + WFP sandbox via ConPTY on Windows 10 build 17763+; terminal resize and Ctrl-C forwarding work correctly; no silent fallback to non-PTY path on unsupported builds.
+- [x] **SHELL-01**: User can run `nono shell` to launch an interactive PowerShell or cmd.exe session inside a Job Object + WFP sandbox via ConPTY on Windows 10 build 17763+; terminal resize and Ctrl-C forwarding work correctly; no silent fallback to non-PTY path on unsupported builds.
 
 ### Network Policy (PORT, PROXY)
 
-- [ ] **PORT-01**: User can allow specific ports for outbound TCP connections on Windows using `--allow-port`; bind and connect allowlists operate independently; WFP permit filters have higher weight than the block-all filter.
-- [ ] **PROXY-01**: User can route sandboxed agent traffic through a local proxy via `--proxy-only` with `HTTPS_PROXY` credential injection; a WFP loopback permit filter ensures the proxy port is reachable; all other outbound traffic is blocked.
+- [x] **PORT-01**: User can allow specific ports for outbound TCP connections on Windows using `--allow-port`; bind and connect allowlists operate independently; WFP permit filters have higher weight than the block-all filter.
+- [x] **PROXY-01**: User can route sandboxed agent traffic through a local proxy via `--proxy-only` with `HTTPS_PROXY` credential injection; a WFP loopback permit filter ensures the proxy port is reachable; all other outbound traffic is blocked.
 
 ### Path Discovery (LEARN)
 
-- [ ] **LEARN-01**: User can run `nono learn <cmd>` on Windows to capture file and network access patterns via ETW; output format matches Unix learn format so existing profile tooling works unchanged; running without admin privilege produces a clear error rather than silent empty output.
+- [x] **LEARN-01**: User can run `nono learn <cmd>` on Windows to capture file and network access patterns via ETW; output format matches Unix learn format so existing profile tooling works unchanged; running without admin privilege produces a clear error rather than silent empty output.
 
 ### Runtime Expansion — Stretch (TRUST)
 
-- [ ] **TRUST-01** *(stretch)*: A sandboxed child process can request additional capabilities from the supervisor at runtime via named pipe; the supervisor prompts the user for approval before granting; requests without a valid session token are denied immediately with a constant-time comparison.
+- [x] **TRUST-01** *(stretch)*: A sandboxed child process can request additional capabilities from the supervisor at runtime via named pipe; the supervisor prompts the user for approval before granting; requests without a valid session token are denied immediately with a constant-time comparison.
 
 ## Future Requirements
 
@@ -87,15 +87,15 @@ Tracked but not in current roadmap.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| WRAP-01 | Phase 7 | Pending |
-| SESS-01 | Phase 7 | Pending |
-| SESS-02 | Phase 7 | Pending |
-| SESS-03 | Phase 7 | Pending |
-| SHELL-01 | Phase 8 | Pending |
-| PORT-01 | Phase 9 | Pending |
-| PROXY-01 | Phase 9 | Pending |
-| LEARN-01 | Phase 10 | Pending |
-| TRUST-01 | Phase 11 (stretch) | Pending |
+| WRAP-01 | Phase 7 | Satisfied |
+| SESS-01 | Phase 7 | Satisfied |
+| SESS-02 | Phase 7 | Satisfied |
+| SESS-03 | Phase 7 | Satisfied |
+| SHELL-01 | Phase 8 | Satisfied |
+| PORT-01 | Phase 9 | Satisfied |
+| PROXY-01 | Phase 9 | Satisfied |
+| LEARN-01 | Phase 10 | Satisfied |
+| TRUST-01 | Phase 11 (stretch) | Satisfied |
 
 **Coverage:**
 - v2.0 requirements: 9 total (8 firm + 1 stretch)
@@ -104,4 +104,4 @@ Tracked but not in current roadmap.
 
 ---
 *Requirements defined: 2026-04-06*
-*Last updated: 2026-04-06 — v2.0 traceability updated with phase numbers (Phases 7–11)*
+*Last updated: 2026-04-11 — Phase 12 bookkeeping: v2.0 checkboxes and traceability statuses reconciled post-milestone audit*
