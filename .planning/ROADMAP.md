@@ -159,6 +159,11 @@ Plans:
   4. `crates/nono/src/sandbox/windows.rs` no longer contains the stale `placeholder` module doc comment.
   5. The `#[ignore]`d WFP port integration test no longer hardcodes a loopback port that panics on collision; it either binds an ephemeral port or skips gracefully.
   6. `make ci` still passes after the code changes.
+**Plans**: 3 plans
+Plans:
+- [ ] 12-01-PLAN.md — Planning-trail fixes: flip v2.0 REQUIREMENTS.md checkboxes, reconcile ROADMAP Phase 11 row, create retro 04/10 VERIFICATION.md
+- [ ] 12-02-PLAN.md — Code fixes: remove stale placeholder module doc from sandbox/windows.rs; replace hardcoded ports in wfp_port_integration.rs with ephemeral bind
+- [ ] 12-03-PLAN.md — CI gate: run make ci and confirm no regression
 
 ### Phase 13: v1.0 Human Verification UAT
 **Goal**: Execute all deferred human-verification items from v1.0 on a real Windows host in one bundled UAT pass, so every `human_needed` VERIFICATION.md can be resolved before milestone archive.
@@ -187,6 +192,6 @@ Plans:
 | 8. ConPTY Shell | 1/1 | Complete | 2026-04-10 |
 | 9. WFP Port-Level + Proxy Filtering | 4/4 | Complete | 2026-04-10 |
 | 10. ETW-Based Learn Command | 3/3 | Complete   | 2026-04-10 |
-| 11. Runtime Capability Expansion | 0/2 | Planned | - |
-| 12. Milestone Bookkeeping Cleanup | 0/0 | Planned | - |
+| 11. Runtime Capability Expansion | 2/2 | Complete | 2026-04-11 |
+| 12. Milestone Bookkeeping Cleanup | 0/3 | Planned | - |
 | 13. v1.0 Human Verification UAT | 0/0 | Planned | - |
