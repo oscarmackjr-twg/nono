@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: Human Verification UAT
-status: executing
-stopped_at: Completed 12-01-PLAN.md
-last_updated: "2026-04-11T22:28:13.662Z"
+status: verifying
+stopped_at: Completed 12-03-PLAN.md verification — CI gate FAILS on pre-existing clippy errors (not Phase 12 regression); follow-up plan required before Phase 13
+last_updated: "2026-04-11T22:32:26.933Z"
 last_activity: 2026-04-11
 progress:
   total_phases: 13
-  completed_phases: 10
+  completed_phases: 11
   total_plans: 31
-  completed_plans: 30
-  percent: 97
+  completed_plans: 31
+  percent: 100
 ---
 
 # Project State: nono - Windows Gap Closure
@@ -20,17 +20,17 @@ progress:
 
 **Core Value:** Every nono command that works on Linux/macOS should work on Windows with equivalent security guarantees, or be explicitly documented as intentionally unsupported with a clear rationale.
 
-**Current Focus:** Phase 11 — runtime-capability-expansion
+**Current Focus:** Phase 12 — milestone-bookkeeping-cleanup (verification complete; follow-up plan required)
 
 ## Current Position
 
-Phase: 11 (runtime-capability-expansion) — EXECUTING
-Plan: 2 of 2
-Status: Ready to execute
+Phase: 12 (milestone-bookkeeping-cleanup) — VERIFICATION COMPLETE WITH BLOCKER
+Plan: 3 of 3 (executed)
+Status: Plan 12-03 verification finished — `make ci` FAILS on 48 pre-existing `disallowed_methods` clippy errors (introduced by revert `cf5a60a` on 2026-04-10, predates Phase 12). Phase 12's own edits are clippy- and fmt-clean. A follow-up plan is required to migrate flagged tests to `EnvVarGuard` before Phase 12 can claim success criterion 6 and before Phase 13 UAT archive can proceed.
 Last activity: 2026-04-11
 
 ```
-Progress: [████████████████████] 73% (8/11 phases complete)
+Progress: [██████████] 100% (31/31 plans complete on disk)
 ```
 
 ## Accumulated Context
@@ -63,6 +63,7 @@ Progress: [████████████████████] 73% (8/
 - **nono wrap available on Windows:** Direct strategy with Job Object + WFP enforcement; documented with "no exec-replace, unlike Unix" qualifier per WRAP-01 (2026-04-08).
 - **Phase 09 unreachable!() scoped to Unix:** On Windows, execute_direct returns Ok(i32); unreachable!() moved inside cfg(not(windows)) block; Windows Direct branch captures exit code and calls std::process::exit(exit_code) (2026-04-10).
 - **Phase 09 stale test replaced:** apply_rejects_unsupported_proxy_with_ports removed; apply_accepts_port_level_wfp_caps asserts Ok(()) for port-level caps post-Phase-09 semantics (2026-04-10).
+- **Phase 12-03 STOP on pre-existing CI failure:** `make ci` fallback surfaced 48 `disallowed_methods` clippy errors in `profile/mod.rs`, `config/mod.rs`, `sandbox_state.rs`. Root-caused to revert `cf5a60a` (2026-04-10), predates Phase 12. Phase 12's own files (`crates/nono/src/sandbox/windows.rs`, `crates/nono-cli/tests/wfp_port_integration.rs`) produce zero clippy diagnostics. Did NOT auto-fix per plan STOP directive (2026-04-11).
 
 ### Research Flags (open)
 
@@ -78,7 +79,7 @@ Progress: [████████████████████] 73% (8/
 
 ### Blockers
 
-- None currently identified.
+- **CI gate broken on `windows-squash` (pre-existing, NOT caused by Phase 12):** 48 `clippy::disallowed_methods` errors across `crates/nono-cli/src/profile/mod.rs` (30), `crates/nono-cli/src/config/mod.rs` (12), `crates/nono-cli/src/sandbox_state.rs` (6). Root cause: revert commit `cf5a60a` (2026-04-10) undid a batch of `EnvVarGuard` migrations while leaving the `disallowed_methods` lint active. Required action: quick plan to migrate the flagged tests to `crate::test_env::EnvVarGuard::set()` / `::remove()`, then re-run `cargo clippy --all-targets --all-features -- -D warnings -D clippy::unwrap_used`. Blocks Phase 12 success criterion 6 and Phase 13 UAT archive. Surfaced by Phase 12 Plan 03 verification (2026-04-11).
 
 ### Quick Tasks Completed
 
@@ -93,5 +94,5 @@ Progress: [████████████████████] 73% (8/
 
 **Current Milestone:** v2.0 Windows Gap Closure
 **Last Activity:** 2026-04-11
-**Stopped At:** Completed 12-01-PLAN.md
+**Stopped At:** Completed 12-03-PLAN.md verification — CI gate FAILS on pre-existing clippy errors (not Phase 12 regression); follow-up plan required before Phase 13
 **Next Steps:** Phase 08 (ConPTY Shell) or Phase 10 (ETW-Based Learn Command) — both are plannable now. Phase 09 human-verification items noted in Todos above.
