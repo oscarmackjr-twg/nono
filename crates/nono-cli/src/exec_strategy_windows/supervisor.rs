@@ -183,7 +183,6 @@ fn create_secure_pipe(name: &str) -> Result<HANDLE> {
     }
 }
 
-#[derive(Debug)]
 pub(super) struct WindowsSupervisorRuntime {
     session_id: String,
     requested_features: Vec<String>,
@@ -208,6 +207,12 @@ pub(super) struct WindowsSupervisorRuntime {
     /// Populated after the child process is spawned. The capability pipe
     /// server thread waits on this before brokering handles into the child.
     child_process_for_broker: Arc<Mutex<Option<SendableHandle>>>,
+    /// Approval backend used by the capability pipe server thread for every
+    /// live runtime capability request. Plumbed through `SupervisorConfig`
+    /// by `supervised_runtime` as an `Arc<TerminalApproval>` on Windows.
+    /// `WindowsSupervisorDenyAllApprovalBackend` remains defined in
+    /// `mod.rs` as a fallback for callers that do not wire a real backend.
+    approval_backend: Arc<dyn ApprovalBackend + Send + Sync>,
 }
 
 impl WindowsSupervisorRuntime {
@@ -242,6 +247,7 @@ impl WindowsSupervisorRuntime {
             cap_pipe_rendezvous_path: supervisor.cap_pipe_rendezvous_path.map(|p| p.to_path_buf()),
             audit_rx: None,
             child_process_for_broker: Arc::new(Mutex::new(None)),
+            approval_backend: supervisor.approval_backend.clone(),
         };
 
         runtime.start_control_pipe_server()?;
@@ -287,6 +293,7 @@ impl WindowsSupervisorRuntime {
         let terminate_requested = self.terminate_requested.clone();
         let child_process_for_broker = self.child_process_for_broker.clone();
         let session_id = self.session_id.clone();
+        let backend = self.approval_backend.clone();
 
         std::thread::spawn(move || {
             let mut sock = match nono::SupervisorSocket::bind_low_integrity(&rendezvous_path) {
@@ -327,10 +334,13 @@ impl WindowsSupervisorRuntime {
             // spawned child wrapper for the duration of this thread.
             let broker_target = unsafe { nono::BrokerTargetProcess::from_raw_handle(target.0) };
 
-            let backend = WindowsSupervisorDenyAllApprovalBackend;
-            // TODO(plan 11-02): swap to `TerminalApproval` once the Windows
-            // CONIN$ branch lands. Until then the deny-all backend satisfies
-            // SC #4 (fallback active when interactive approval isn't wired).
+            // Approval backend for the capability pipe thread. Plumbed
+            // through `SupervisorConfig.approval_backend` by
+            // `supervised_runtime` as an `Arc<TerminalApproval>` on
+            // Windows (plan 11-02). The `WindowsSupervisorDenyAllApprovalBackend`
+            // fallback is still defined in `exec_strategy_windows/mod.rs`
+            // for callers that construct a `SupervisorConfig` without a
+            // real interactive backend (SC #4).
 
             let mut seen_request_ids = HashSet::new();
             loop {
@@ -343,7 +353,7 @@ impl WindowsSupervisorRuntime {
                         if let Err(e) = handle_windows_supervisor_message(
                             &mut sock,
                             msg,
-                            &backend,
+                            backend.as_ref(),
                             broker_target,
                             &mut seen_request_ids,
                             &mut local_audit,
@@ -1257,5 +1267,79 @@ mod capability_handler_tests {
         // Drain both responses from the child side.
         let _ = child.recv_response().expect("drain 1");
         let _ = child.recv_response().expect("drain 2");
+    }
+
+    /// Plan 11-02 Task 2 regression: the full serialized `AuditEntry` must
+    /// not contain the session token, even on the valid-token path. This
+    /// mirrors `handle_redacts_token_in_audit_entry_json` but asserts on
+    /// the semantic contract the threat model calls out (T-11-12).
+    #[test]
+    fn handle_redacts_token_in_serialized_audit() {
+        let backend = CountingDenyBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        let sensitive = "secret-token-123";
+        let request = make_request(sensitive);
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(request),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            sensitive,
+        )
+        .expect("handle");
+
+        assert_eq!(audit_log.len(), 1);
+        // session_token field must be empty after redaction.
+        assert_eq!(audit_log[0].request.session_token, "");
+        // Full audit entry JSON must not contain the raw token.
+        let json = serde_json::to_string(&audit_log[0]).expect("serialize");
+        assert!(
+            !json.contains(sensitive),
+            "serialized audit entry must not contain the session token: {json}"
+        );
+
+        let _ = child.recv_response().expect("drain");
+    }
+
+    /// Plan 11-02 Task 2 regression: when the child sends a *wrong* token,
+    /// that wrong token must also not leak into the serialized audit
+    /// entry. The redaction path is exercised for the mismatch branch.
+    #[test]
+    fn handle_redacts_token_on_mismatch_audit() {
+        let backend = CountingDenyBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        let wrong_token = "wrong-token-xyz";
+        let request = make_request(wrong_token);
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(request),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            "right",
+        )
+        .expect("handle");
+
+        // Backend MUST NOT be consulted on a bad token.
+        assert_eq!(backend.calls(), 0);
+        assert_eq!(audit_log.len(), 1);
+        assert!(audit_log[0].decision.is_denied());
+        assert_eq!(audit_log[0].request.session_token, "");
+        let json = serde_json::to_string(&audit_log[0]).expect("serialize");
+        assert!(
+            !json.contains(wrong_token),
+            "mismatched token must also be redacted from audit JSON: {json}"
+        );
+
+        let _ = child.recv_response().expect("drain");
     }
 }

@@ -154,14 +154,18 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
     let (rollback_state, rollback_status) =
         initialize_rollback_state(rollback, caps, audit_state.as_ref(), silent)?;
 
-    let approval_backend = terminal_approval::TerminalApproval;
+    // Shared Arc so both the synchronous Unix path (takes &dyn) and the
+    // Windows capability pipe server thread (takes Arc<dyn +Send+Sync>)
+    // can use the same backend instance. Plan 11-02 wires this on Windows.
+    let approval_backend: std::sync::Arc<terminal_approval::TerminalApproval> =
+        std::sync::Arc::new(terminal_approval::TerminalApproval);
     let supervisor_session_id = build_supervisor_session_id(audit_state.as_ref());
     #[cfg(not(target_os = "windows"))]
     let protected_roots = protected_paths::ProtectedRoots::from_defaults()?;
     #[cfg(not(target_os = "windows"))]
     let supervisor_cfg = exec_strategy::SupervisorConfig {
         protected_roots: protected_roots.as_paths(),
-        approval_backend: &approval_backend,
+        approval_backend: approval_backend.as_ref(),
         session_id: &supervisor_session_id,
         attach_initial_client: !session.detached_start,
         detach_sequence: session.detach_sequence.as_deref(),
@@ -197,7 +201,13 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
             runtime_capability_expansion: capability_elevation,
             runtime_trust_interception: trust.interception_active,
         }),
-        approval_backend: &approval_backend,
+        // Plan 11-02: the Windows `SupervisorConfig.approval_backend` is an
+        // owned `Arc<dyn ApprovalBackend + Send + Sync>` that the capability
+        // pipe server thread clones into itself. `TerminalApproval` on
+        // Windows now opens `\\.\CONIN$` (plan 11-02 Task 1) and
+        // fail-secure denies when no console is attached.
+        approval_backend: approval_backend.clone()
+            as std::sync::Arc<dyn nono::ApprovalBackend + Send + Sync>,
         interactive_shell: session.interactive_pty && !session.detached_start,
         session_token: config.session_token.as_deref(),
         cap_pipe_rendezvous_path: config.cap_pipe_rendezvous_path.as_deref(),

@@ -109,7 +109,11 @@ pub struct SupervisorConfig<'a> {
     pub session_id: &'a str,
     pub requested_features: Vec<&'a str>,
     pub support: nono::WindowsSupervisorSupport,
-    pub approval_backend: &'a dyn ApprovalBackend,
+    /// Owned approval backend that is moved into the capability pipe server
+    /// thread and used for every runtime capability request from the
+    /// sandboxed child. Must be `Send + Sync` because the background
+    /// thread holds it for the lifetime of the supervised session.
+    pub approval_backend: std::sync::Arc<dyn ApprovalBackend + Send + Sync>,
     pub interactive_shell: bool,
     /// 32-byte hex session token that the child must echo back on every
     /// `RequestCapability` message. `None` disables the capability pipe
@@ -587,7 +591,7 @@ pub fn execute_supervised(
     let mut runtime = WindowsSupervisorRuntime::initialize(supervisor, pty_pair)?;
     tracing::debug!(
         "Windows supervised approval backend: {}",
-        supervisor.approval_backend.backend_name()
+        supervisor.approval_backend.as_ref().backend_name()
     );
     let unsupported = supervisor.support.unsupported_feature_labels();
     let unsupported_details = supervisor.support.unsupported_feature_descriptions();
