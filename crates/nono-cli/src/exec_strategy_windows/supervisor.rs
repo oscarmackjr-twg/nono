@@ -70,6 +70,12 @@ impl WindowsSupervisedChild {
         }
     }
 
+    /// Expose the child process handle so the capability pipe server thread
+    /// can broker granted file handles via `DuplicateHandle`.
+    pub(super) fn process_handle_raw(&self) -> HANDLE {
+        self.process_handle()
+    }
+
     fn wait_for_exit(&self, timeout: u32) -> Result<Option<i32>> {
         let wait_result = unsafe {
             // SAFETY: `process_handle()` returns a valid process handle owned by this child wrapper.
@@ -191,6 +197,17 @@ pub(super) struct WindowsSupervisorRuntime {
     pty: Option<crate::pty_proxy::PtyPair>,
     active_attachment: Arc<Mutex<Option<SendableHandle>>>,
     interactive_shell: bool,
+    /// Session token validated against every `CapabilityRequest` on the
+    /// capability pipe server thread. Never log.
+    session_token: Option<String>,
+    /// Rendezvous path written/cleaned up by the capability pipe server thread.
+    cap_pipe_rendezvous_path: Option<std::path::PathBuf>,
+    /// Receiver end drained by the main event loop to merge audit entries
+    /// produced by the capability pipe server thread.
+    audit_rx: Option<std::sync::mpsc::Receiver<Vec<AuditEntry>>>,
+    /// Populated after the child process is spawned. The capability pipe
+    /// server thread waits on this before brokering handles into the child.
+    child_process_for_broker: Arc<Mutex<Option<SendableHandle>>>,
 }
 
 impl WindowsSupervisorRuntime {
@@ -221,6 +238,10 @@ impl WindowsSupervisorRuntime {
             pty,
             active_attachment,
             interactive_shell: supervisor.interactive_shell,
+            session_token: supervisor.session_token.map(str::to_string),
+            cap_pipe_rendezvous_path: supervisor.cap_pipe_rendezvous_path.map(|p| p.to_path_buf()),
+            audit_rx: None,
+            child_process_for_broker: Arc::new(Mutex::new(None)),
         };
 
         runtime.start_control_pipe_server()?;
@@ -231,8 +252,146 @@ impl WindowsSupervisorRuntime {
             runtime.start_data_pipe_server()?;
         }
 
+        // Start the capability pipe server only when the caller wired up
+        // BOTH a token and a rendezvous path. Either being `None` keeps
+        // `WindowsSupervisorDenyAllApprovalBackend` as the effective fallback
+        // (SC #4: deny-all backend remains active when the feature isn't
+        // attached).
+        if runtime.session_token.is_some() && runtime.cap_pipe_rendezvous_path.is_some() {
+            runtime.start_capability_pipe_server()?;
+        }
+
         runtime.state = WindowsSupervisorLifecycleState::ControlChannelReady;
         Ok(runtime)
+    }
+
+    /// Capability-pipe background thread. Binds a Low Integrity-accessible
+    /// named pipe at `cap_pipe_rendezvous_path`, waits for the parent to
+    /// publish the spawned child's process handle, then loops
+    /// `recv_message → handle_windows_supervisor_message` and forwards audit
+    /// entries through an mpsc channel drained by `run_child_event_loop`.
+    ///
+    /// The thread exits naturally on pipe EOF or when `terminate_requested`
+    /// is set. No token value is ever written to logs.
+    fn start_capability_pipe_server(&mut self) -> Result<()> {
+        let session_token = self.session_token.clone().ok_or_else(|| {
+            NonoError::SandboxInit("Capability pipe server requires a session token".to_string())
+        })?;
+        let rendezvous_path = self.cap_pipe_rendezvous_path.clone().ok_or_else(|| {
+            NonoError::SandboxInit("Capability pipe server requires a rendezvous path".to_string())
+        })?;
+
+        let (audit_tx, audit_rx) = std::sync::mpsc::channel::<Vec<AuditEntry>>();
+        self.audit_rx = Some(audit_rx);
+
+        let terminate_requested = self.terminate_requested.clone();
+        let child_process_for_broker = self.child_process_for_broker.clone();
+        let session_id = self.session_id.clone();
+
+        std::thread::spawn(move || {
+            let mut sock = match nono::SupervisorSocket::bind_low_integrity(&rendezvous_path) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(
+                        session_id = %session_id,
+                        error = %e,
+                        "Failed to bind Windows capability pipe; capability expansion disabled for this session",
+                    );
+                    return;
+                }
+            };
+
+            // Wait for the parent to publish the spawned child's process
+            // handle before processing any messages. Without a live target
+            // process, `DuplicateHandle` cannot broker granted file handles.
+            let target = loop {
+                if terminate_requested.load(Ordering::SeqCst) {
+                    tracing::debug!(
+                        session_id = %session_id,
+                        "Capability pipe server terminating before child handle arrived",
+                    );
+                    return;
+                }
+                let lock = match child_process_for_broker.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                if let Some(handle) = *lock {
+                    break handle;
+                }
+                drop(lock);
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            };
+
+            // SAFETY: `target.0` is a live process handle owned by the
+            // spawned child wrapper for the duration of this thread.
+            let broker_target = unsafe { nono::BrokerTargetProcess::from_raw_handle(target.0) };
+
+            let backend = WindowsSupervisorDenyAllApprovalBackend;
+            // TODO(plan 11-02): swap to `TerminalApproval` once the Windows
+            // CONIN$ branch lands. Until then the deny-all backend satisfies
+            // SC #4 (fallback active when interactive approval isn't wired).
+
+            let mut seen_request_ids = HashSet::new();
+            loop {
+                if terminate_requested.load(Ordering::SeqCst) {
+                    break;
+                }
+                match sock.recv_message() {
+                    Ok(msg) => {
+                        let mut local_audit: Vec<AuditEntry> = Vec::new();
+                        if let Err(e) = handle_windows_supervisor_message(
+                            &mut sock,
+                            msg,
+                            &backend,
+                            broker_target,
+                            &mut seen_request_ids,
+                            &mut local_audit,
+                            &session_token,
+                        ) {
+                            tracing::warn!(
+                                session_id = %session_id,
+                                error = %e,
+                                "Capability pipe handler returned an error",
+                            );
+                        }
+                        if !local_audit.is_empty() {
+                            let _ = audit_tx.send(local_audit);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            session_id = %session_id,
+                            error = %e,
+                            "Capability pipe closed",
+                        );
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    /// Publish the spawned child process handle so the capability pipe
+    /// server thread can broker granted file handles via `DuplicateHandle`.
+    pub(super) fn set_child_broker_target(&self, handle: HANDLE) {
+        let mut lock = match self.child_process_for_broker.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *lock = Some(SendableHandle(handle));
+    }
+
+    /// Drain any audit entries produced by the capability pipe server
+    /// thread. Called each iteration of the main event loop.
+    fn drain_capability_audit_entries(&mut self) {
+        if let Some(rx) = self.audit_rx.as_ref() {
+            while let Ok(entries) = rx.try_recv() {
+                self.audit_log.extend(entries);
+            }
+        }
     }
 
     fn start_logging(&self) -> Result<()> {
@@ -618,6 +777,7 @@ impl WindowsSupervisorRuntime {
         );
 
         loop {
+            self.drain_capability_audit_entries();
             if self.terminate_requested.load(Ordering::SeqCst) {
                 tracing::info!(
                     "Windows supervisor received termination request, stopping child..."
@@ -680,6 +840,12 @@ impl Drop for WindowsSupervisorRuntime {
     fn drop(&mut self) {
         if self.state != WindowsSupervisorLifecycleState::Completed {
             self.shutdown();
+        }
+        // Best-effort cleanup: remove the capability pipe rendezvous file so
+        // the next session does not collide with a stale rendezvous on the
+        // same session id.
+        if let Some(path) = self.cap_pipe_rendezvous_path.as_ref() {
+            let _ = std::fs::remove_file(path);
         }
     }
 }
@@ -937,7 +1103,11 @@ mod capability_handler_tests {
         .expect("handle");
 
         // Backend was never called: token check happens first.
-        assert_eq!(backend.calls(), 0, "backend must not be called on bad token");
+        assert_eq!(
+            backend.calls(),
+            0,
+            "backend must not be called on bad token"
+        );
         assert_eq!(audit_log.len(), 1);
         assert!(audit_log[0].decision.is_denied());
         assert_eq!(audit_log[0].request.session_token, "");

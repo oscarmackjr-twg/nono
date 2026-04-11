@@ -97,6 +97,12 @@ pub struct ExecConfig<'a> {
     pub current_dir: &'a Path,
     pub session_sid: Option<String>,
     pub interactive_shell: bool,
+    /// Per-session 32-byte hex token authenticating capability requests
+    /// from the sandboxed child. `None` disables runtime capability
+    /// expansion for this execution (deny-all fallback stays active).
+    pub session_token: Option<String>,
+    /// Rendezvous file path the capability pipe server binds.
+    pub cap_pipe_rendezvous_path: Option<PathBuf>,
 }
 
 pub struct SupervisorConfig<'a> {
@@ -105,6 +111,13 @@ pub struct SupervisorConfig<'a> {
     pub support: nono::WindowsSupervisorSupport,
     pub approval_backend: &'a dyn ApprovalBackend,
     pub interactive_shell: bool,
+    /// 32-byte hex session token that the child must echo back on every
+    /// `RequestCapability` message. `None` disables the capability pipe
+    /// server (the deny-all fallback remains active). Never log.
+    pub session_token: Option<&'a str>,
+    /// Rendezvous file path at which the capability pipe server binds.
+    /// `None` disables the capability pipe server.
+    pub cap_pipe_rendezvous_path: Option<&'a Path>,
 }
 
 pub struct WindowsSupervisorDenyAllApprovalBackend;
@@ -626,6 +639,10 @@ pub fn execute_supervised(
         session_id,
     )
     .map_err(|err| runtime.startup_failure(err.to_string()))?;
+
+    // Publish the child's process handle so the capability pipe server
+    // thread can broker granted file handles via `DuplicateHandle`.
+    runtime.set_child_broker_target(child.process_handle_raw());
 
     let exit_code = runtime
         .run_child_event_loop(&mut child)

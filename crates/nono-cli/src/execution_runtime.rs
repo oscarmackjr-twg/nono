@@ -183,12 +183,46 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
 
     apply_pre_fork_sandbox(strategy, &caps, flags.silent)?;
 
+    // Generate per-session runtime capability expansion credentials BEFORE
+    // building `env_vars` so the owned strings outlive the `ExecConfig`.
+    //
+    // `NONO_SESSION_TOKEN`: 32 random bytes, hex-encoded (64 chars). This is
+    // the secret the sandboxed child must echo back on every
+    // `RequestCapability` message; the supervisor validates it in constant
+    // time before invoking any approval backend.
+    //
+    // `NONO_SUPERVISOR_PIPE`: rendezvous file path where the supervisor
+    // capability pipe server binds. Unique per session id to avoid collisions.
+    //
+    // Never log `windows_session_token`.
+    #[cfg(target_os = "windows")]
+    let windows_session_token: String = {
+        let mut bytes = [0u8; 32];
+        getrandom::fill(&mut bytes).map_err(|e| {
+            NonoError::SandboxInit(format!("Failed to generate session token: {e}"))
+        })?;
+        bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    #[cfg(target_os = "windows")]
+    let windows_cap_pipe_path: std::path::PathBuf =
+        std::env::temp_dir().join(format!("nono-cap-{}.pipe", flags.session.session_id));
+    #[cfg(target_os = "windows")]
+    let windows_cap_pipe_path_str: String = windows_cap_pipe_path.to_string_lossy().into_owned();
+
     let mut env_vars: Vec<(&str, &str)> = loaded_secrets
         .iter()
         .map(|secret| (secret.env_var.as_str(), secret.value.as_str()))
         .collect();
     for (key, value) in &proxy_env_vars {
         env_vars.push((key.as_str(), value.as_str()));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        env_vars.push(("NONO_SESSION_TOKEN", windows_session_token.as_str()));
+        env_vars.push(("NONO_SUPERVISOR_PIPE", windows_cap_pipe_path_str.as_str()));
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -280,6 +314,8 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
         current_dir: &current_dir,
         session_sid: Some(exec_strategy::generate_session_sid()),
         interactive_shell: flags.interactive_shell,
+        session_token: Some(windows_session_token.clone()),
+        cap_pipe_rendezvous_path: Some(windows_cap_pipe_path.clone()),
     };
 
     match strategy {

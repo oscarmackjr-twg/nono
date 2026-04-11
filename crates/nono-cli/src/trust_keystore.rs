@@ -393,10 +393,8 @@ mod backend_tests {
     #[test]
     fn backend_description_mentions_windows_credential_manager() {
         let key_ref = TrustKeyRef::Keystore("default".to_string());
-        assert!(
-            backend_description_for_ref(&key_ref, "nono-trust")
-                .contains("Windows Credential Manager")
-        );
+        assert!(backend_description_for_ref(&key_ref, "nono-trust")
+            .contains("Windows Credential Manager"));
     }
 }
 

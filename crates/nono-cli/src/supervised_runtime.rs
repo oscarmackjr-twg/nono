@@ -199,6 +199,8 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
         }),
         approval_backend: &approval_backend,
         interactive_shell: session.interactive_pty && !session.detached_start,
+        session_token: config.session_token.as_deref(),
+        cap_pipe_rendezvous_path: config.cap_pipe_rendezvous_path.as_deref(),
     };
 
     let trust_interceptor = create_trust_interceptor(trust);

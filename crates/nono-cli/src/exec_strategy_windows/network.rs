@@ -1561,6 +1561,8 @@ mod tests {
             current_dir: &current_dir,
             session_sid: Some("S-1-5-117-123456789-1234-5678-9012".to_string()),
             interactive_shell: false,
+            session_token: None,
+            cap_pipe_rendezvous_path: None,
         };
         let probe_config = make_test_probe_config();
 
@@ -1613,6 +1615,8 @@ mod tests {
             current_dir: &current_dir,
             session_sid: Some("S-1-5-117-123456789-1234-5678-9012".to_string()),
             interactive_shell: false,
+            session_token: None,
+            cap_pipe_rendezvous_path: None,
         };
         let probe_config = make_test_probe_config();
 

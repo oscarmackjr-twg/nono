@@ -36,8 +36,7 @@ const SDDL_REVISION_1: u32 = 1;
 /// SDDL string for the capability pipe. Grants full access to SYSTEM, Built-in
 /// Administrators, and the owner; adds a mandatory integrity SACL allowing
 /// Low Integrity processes to write (`NW`) to the pipe.
-const CAPABILITY_PIPE_SDDL: &str =
-    "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)S:(ML;;NW;;;LW)";
+const CAPABILITY_PIPE_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)S:(ML;;NW;;;LW)";
 
 /// Length prefix size: 4 bytes (u32 big-endian)
 const LENGTH_PREFIX_SIZE: usize = 4;
