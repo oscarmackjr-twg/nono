@@ -58,24 +58,35 @@ fn wfp_port_permit_allows_real_tcp_connection() {
         return;
     }
 
-    let allowed_port: u16 = 19876;
-    let blocked_port: u16 = 19877;
-
-    // 1. Bind loopback TCP listeners on both ports.
+    // 1. Bind loopback TCP listeners on ephemeral ports.
     //    The blocked-port listener exists only so that a connect attempt to it
     //    would succeed at the TCP level if WFP were not active — we want the
     //    WFP block-all sublayer filter to be what rejects the connection, not a
     //    "connection refused" from the OS.
-    let allowed_listener = TcpListener::bind(format!("127.0.0.1:{}", allowed_port))
-        .expect("bind allowed loopback listener");
+    //
+    //    Using ephemeral ports (127.0.0.1:0) avoids port-collision panics when
+    //    the previous hardcoded ports (19876/19877) are already in use on the
+    //    test host. The kernel assigns the port and we read it back via
+    //    local_addr(). See v1.0-MILESTONE-AUDIT.md Phase 09 tech_debt.
+    let allowed_listener =
+        TcpListener::bind("127.0.0.1:0").expect("bind allowed loopback listener");
     allowed_listener
         .set_nonblocking(true)
         .expect("set allowed listener nonblocking");
-    let blocked_listener = TcpListener::bind(format!("127.0.0.1:{}", blocked_port))
-        .expect("bind blocked loopback listener");
+    let allowed_port: u16 = allowed_listener
+        .local_addr()
+        .expect("allowed listener local_addr")
+        .port();
+
+    let blocked_listener =
+        TcpListener::bind("127.0.0.1:0").expect("bind blocked loopback listener");
     blocked_listener
         .set_nonblocking(true)
         .expect("set blocked listener nonblocking");
+    let blocked_port: u16 = blocked_listener
+        .local_addr()
+        .expect("blocked listener local_addr")
+        .port();
 
     // 2. Build a CapabilitySet with Blocked network mode and one allowlisted
     //    localhost port.
