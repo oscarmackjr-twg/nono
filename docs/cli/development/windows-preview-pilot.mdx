@@ -1,11 +1,11 @@
 ---
-title: Windows Preview Pilot
-description: Packaging, handoff, and operator guidance for the current Windows validation track
+title: Windows Release Artifacts & Operator Guide
+description: Packaging, handoff, and operator guidance for the supported Windows command surface
 ---
 
-This guide is the handoff package for the current Windows validation track. It covers how to obtain a build, what the supported Windows surface can do safely today, and which commands to use during validation.
+This guide is the handoff package for the supported Windows command surface. It covers how to obtain a build, what the supported Windows surface can do safely today, and which commands to use when validating an installation.
 
-The `preview` name is historical. The active product contract is the current Windows supported command surface, not a generic preview-everything label.
+The filename slug keeps the historical `preview` label for stable routing, but the content reflects the current supported Windows command surface, not a generic preview-everything label.
 
 For the current Windows filesystem boundary, see [Windows Filesystem Parity Contract](/cli/development/windows-filesystem-parity-contract).
 
@@ -38,7 +38,7 @@ Start-Process msiexec.exe -Wait -ArgumentList @("/i", $path)
 nono --version
 ```
 
-## Preview Scope
+## Supported Command Surface
 
 Available now:
 
@@ -57,7 +57,7 @@ Intentionally blocked when real enforcement would be implied, or when Windows ha
 - `nono wrap` (documented unsupported Windows live mode)
 - generic supervised enforcement outside the current rollback-oriented supported subset
 
-The current Windows validation track is for startup, config, dry-run, direct execution path validation, and the supported restricted-execution surface. It is not a claim of full Windows sandbox parity.
+The current Windows command surface covers startup, config, dry-run, direct execution paths, and the supported restricted-execution flow. It is not a claim of full Windows sandbox parity.
 
 ## Current Packaging Limits
 
