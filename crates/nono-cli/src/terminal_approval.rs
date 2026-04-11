@@ -10,9 +10,16 @@ use std::io::{BufRead, IsTerminal, Write};
 /// Interactive terminal approval backend.
 ///
 /// Prints capability expansion requests to stderr and reads the user's
-/// response from `/dev/tty` (not stdin, which belongs to the sandboxed child).
+/// response from a dedicated terminal input device (not stdin, which belongs
+/// to the sandboxed child):
 ///
-/// Returns `Denied` automatically if no terminal is available.
+/// - On Unix, opens `/dev/tty`.
+/// - On Windows, opens `\\.\CONIN$` (the process's attached console input
+///   buffer). When no console is attached (for example, a detached or
+///   service-hosted supervisor), the backend fail-secure denies with a
+///   reason that mentions "console".
+///
+/// Returns `Denied` automatically if no interactive terminal is available.
 pub struct TerminalApproval;
 
 impl ApprovalBackend for TerminalApproval {
@@ -39,10 +46,29 @@ impl ApprovalBackend for TerminalApproval {
         eprint!("[nono] Grant access? [y/N] ");
         let _ = std::io::stderr().flush();
 
-        // Read from /dev/tty, not stdin (which belongs to the sandboxed child)
+        // Read from a dedicated terminal device, not stdin (which belongs
+        // to the sandboxed child). On Windows, `\\.\CONIN$` is the
+        // equivalent of `/dev/tty`: it opens the process's attached console
+        // input buffer regardless of stdin redirection. If no console is
+        // attached the open fails, which we translate to a fail-secure
+        // denial (T-11-10).
+        #[cfg(unix)]
         let tty = std::fs::File::open("/dev/tty").map_err(|e| {
             NonoError::SandboxInit(format!("Failed to open /dev/tty for approval prompt: {e}"))
         })?;
+
+        #[cfg(target_os = "windows")]
+        let tty = match std::fs::File::open(r"\\.\CONIN$") {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!(
+                    "TerminalApproval: no console available for interactive approval: {e}"
+                );
+                return Ok(ApprovalDecision::Denied {
+                    reason: "No console available for interactive approval".to_string(),
+                });
+            }
+        };
         let mut reader = std::io::BufReader::new(tty);
         let mut input = String::new();
         reader.read_line(&mut input).map_err(|e| {
@@ -247,5 +273,54 @@ mod tests {
         let sanitized = sanitize_for_terminal(malicious);
         assert!(!sanitized.contains('\x1b'));
         assert!(sanitized.contains("/tmp/"));
+    }
+
+    /// Regression guard for Task 1 (plan 11-02): `sanitize_for_terminal`
+    /// must remain platform-agnostic and strip ANSI SGR escapes.
+    #[test]
+    fn sanitize_for_terminal_strips_ansi() {
+        let input = "\x1b[31mred\x1b[0m";
+        let sanitized = sanitize_for_terminal(input);
+        assert_eq!(sanitized, "red");
+    }
+
+    /// Windows-only fail-secure check (plan 11-02 Task 1, T-11-10).
+    ///
+    /// Under `cargo test`, stderr is captured, so `is_terminal()` returns
+    /// false and `request_capability` returns `Denied` at the first guard.
+    /// That guard's reason mentions "terminal". If a runner ever surfaces
+    /// a real console to the test process, the `\\.\CONIN$` open path is
+    /// the fallback; either path must produce a denial whose reason
+    /// references the absent interactive device.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_no_console_denies_gracefully() {
+        let backend = TerminalApproval;
+        let request = CapabilityRequest {
+            request_id: "test-req-1".to_string(),
+            path: std::path::PathBuf::from(r"C:\tmp\x"),
+            access: AccessMode::Read,
+            reason: Some("unit test".to_string()),
+            child_pid: std::process::id(),
+            session_id: "sess-test".to_string(),
+            session_token: String::new(),
+        };
+
+        let decision = backend
+            .request_capability(&request)
+            .expect("request_capability must not error on the deny path");
+
+        match decision {
+            ApprovalDecision::Denied { reason } => {
+                let lower = reason.to_lowercase();
+                assert!(
+                    lower.contains("terminal")
+                        || lower.contains("console")
+                        || lower.contains("tty"),
+                    "denial reason should mention the missing interactive device: {reason}"
+                );
+            }
+            other => panic!("expected Denied, got {other:?}"),
+        }
     }
 }

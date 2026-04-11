@@ -60,10 +60,6 @@ mod session_commands;
 mod setup;
 mod startup_runtime;
 mod supervised_runtime;
-#[cfg(not(target_os = "windows"))]
-mod terminal_approval;
-#[cfg(target_os = "windows")]
-#[path = "terminal_approval_windows.rs"]
 mod terminal_approval;
 mod theme;
 mod trust_cmd;
