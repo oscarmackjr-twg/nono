@@ -693,7 +693,6 @@ pub(super) fn initialize_supervisor_control_channel(
     })
 }
 
-#[cfg(test)]
 pub(super) fn open_windows_supervisor_path(
     path: &Path,
     access: &nono::AccessMode,
@@ -720,7 +719,46 @@ pub(super) fn open_windows_supervisor_path(
     })
 }
 
-#[cfg(test)]
+/// Constant-time byte-slice comparison used for session-token validation.
+///
+/// Uses `subtle::ConstantTimeEq::ct_eq` so attackers cannot learn prefix
+/// information from timing. The token string is NEVER logged or formatted —
+/// callers must also redact it before constructing any `AuditEntry`.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    use subtle::ConstantTimeEq;
+    if a.len() != b.len() {
+        return false;
+    }
+    a.ct_eq(b).into()
+}
+
+/// Build an `AuditEntry` for a `CapabilityRequest` while redacting the
+/// `session_token` field. Never embed the raw request directly — always go
+/// through this helper so the token cannot leak via audit serialization.
+fn audit_entry_with_redacted_token(
+    request: &nono::CapabilityRequest,
+    decision: &nono::ApprovalDecision,
+    backend_name: &str,
+    started_at: Instant,
+) -> AuditEntry {
+    let mut redacted = request.clone();
+    redacted.session_token.clear();
+    AuditEntry {
+        timestamp: SystemTime::now(),
+        request: redacted,
+        decision: decision.clone(),
+        backend: backend_name.to_string(),
+        duration_ms: started_at.elapsed().as_millis() as u64,
+    }
+}
+
+/// Dispatch a single supervisor message from a sandboxed child.
+///
+/// The `expected_session_token` parameter is the 32-byte hex token generated
+/// per-session by the supervisor. It is compared in constant time against
+/// the inbound `CapabilityRequest.session_token` BEFORE the approval backend
+/// is consulted. The token is NEVER logged and is redacted before any
+/// `AuditEntry` is constructed.
 pub(super) fn handle_windows_supervisor_message(
     sock: &mut nono::SupervisorSocket,
     msg: nono::supervisor::SupervisorMessage,
@@ -728,6 +766,7 @@ pub(super) fn handle_windows_supervisor_message(
     target_process: nono::BrokerTargetProcess,
     seen_request_ids: &mut HashSet<String>,
     audit_log: &mut Vec<AuditEntry>,
+    expected_session_token: &str,
 ) -> Result<()> {
     match msg {
         nono::supervisor::SupervisorMessage::Request(request) => {
@@ -736,13 +775,12 @@ pub(super) fn handle_windows_supervisor_message(
                 let decision = nono::ApprovalDecision::Denied {
                     reason: "Duplicate request_id rejected (replay detected)".to_string(),
                 };
-                audit_log.push(AuditEntry {
-                    timestamp: SystemTime::now(),
-                    request: request.clone(),
-                    decision: decision.clone(),
-                    backend: approval_backend.backend_name().to_string(),
-                    duration_ms: started_at.elapsed().as_millis() as u64,
-                });
+                audit_log.push(audit_entry_with_redacted_token(
+                    &request,
+                    &decision,
+                    approval_backend.backend_name(),
+                    started_at,
+                ));
                 return sock.send_response(&nono::supervisor::SupervisorResponse::Decision {
                     request_id: request.request_id,
                     decision,
@@ -750,6 +788,28 @@ pub(super) fn handle_windows_supervisor_message(
                 });
             }
             seen_request_ids.insert(request.request_id.clone());
+
+            // Constant-time token check BEFORE any approval backend is
+            // consulted. Mismatch or empty token is a hard denial.
+            if !constant_time_eq(
+                request.session_token.as_bytes(),
+                expected_session_token.as_bytes(),
+            ) {
+                let decision = nono::ApprovalDecision::Denied {
+                    reason: "Invalid session token".to_string(),
+                };
+                audit_log.push(audit_entry_with_redacted_token(
+                    &request,
+                    &decision,
+                    approval_backend.backend_name(),
+                    started_at,
+                ));
+                return sock.send_response(&nono::supervisor::SupervisorResponse::Decision {
+                    request_id: request.request_id,
+                    decision,
+                    grant: None,
+                });
+            }
 
             let decision = approval_backend
                 .request_capability(&request)
@@ -768,13 +828,12 @@ pub(super) fn handle_windows_supervisor_message(
                 None
             };
 
-            audit_log.push(AuditEntry {
-                timestamp: SystemTime::now(),
-                request: request.clone(),
-                decision: decision.clone(),
-                backend: approval_backend.backend_name().to_string(),
-                duration_ms: started_at.elapsed().as_millis() as u64,
-            });
+            audit_log.push(audit_entry_with_redacted_token(
+                &request,
+                &decision,
+                approval_backend.backend_name(),
+                started_at,
+            ));
 
             sock.send_response(&nono::supervisor::SupervisorResponse::Decision {
                 request_id: request.request_id,
@@ -800,5 +859,233 @@ pub(super) fn handle_windows_supervisor_message(
             // Detach is handled via the background control pipe thread, not here.
             Ok(())
         }
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+#[allow(clippy::unwrap_used)]
+mod capability_handler_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    /// Mock approval backend that always denies and counts invocations.
+    struct CountingDenyBackend {
+        calls: AtomicUsize,
+    }
+
+    impl CountingDenyBackend {
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(AtomicOrdering::SeqCst)
+        }
+    }
+
+    impl ApprovalBackend for CountingDenyBackend {
+        fn request_capability(
+            &self,
+            _request: &nono::CapabilityRequest,
+        ) -> Result<nono::ApprovalDecision> {
+            self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+            Ok(nono::ApprovalDecision::Denied {
+                reason: "mock deny".to_string(),
+            })
+        }
+
+        fn backend_name(&self) -> &str {
+            "counting-deny"
+        }
+    }
+
+    fn make_request(session_token: &str) -> nono::CapabilityRequest {
+        nono::CapabilityRequest {
+            request_id: "cap-req-001".to_string(),
+            path: std::path::PathBuf::from(r"C:\tmp\does-not-matter"),
+            access: nono::AccessMode::Read,
+            reason: Some("unit test".to_string()),
+            child_pid: std::process::id(),
+            session_id: "sess-test".to_string(),
+            session_token: session_token.to_string(),
+        }
+    }
+
+    fn new_pair() -> (nono::SupervisorSocket, nono::SupervisorSocket) {
+        nono::SupervisorSocket::pair().expect("pair")
+    }
+
+    #[test]
+    fn handle_rejects_missing_token() {
+        let backend = CountingDenyBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        let request = make_request("");
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(request),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            "expected-token",
+        )
+        .expect("handle");
+
+        // Backend was never called: token check happens first.
+        assert_eq!(backend.calls(), 0, "backend must not be called on bad token");
+        assert_eq!(audit_log.len(), 1);
+        assert!(audit_log[0].decision.is_denied());
+        assert_eq!(audit_log[0].request.session_token, "");
+
+        // Drain the child side so the pipe does not fill.
+        let resp = child.recv_response().expect("recv");
+        match resp {
+            nono::supervisor::SupervisorResponse::Decision { decision, .. } => {
+                assert!(decision.is_denied());
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn handle_rejects_wrong_token() {
+        let backend = CountingDenyBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        let request = make_request("wrong");
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(request),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            "right",
+        )
+        .expect("handle");
+
+        assert_eq!(backend.calls(), 0);
+        assert_eq!(audit_log.len(), 1);
+        assert!(audit_log[0].decision.is_denied());
+
+        let _ = child.recv_response().expect("drain");
+    }
+
+    #[test]
+    fn handle_consults_backend_for_valid_token() {
+        let backend = CountingDenyBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        let request = make_request("the-token");
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(request),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            "the-token",
+        )
+        .expect("handle");
+
+        // Backend was consulted exactly once; resulting decision is a
+        // backend-sourced denial (still denied but NOT "Invalid session token").
+        assert_eq!(backend.calls(), 1);
+        assert_eq!(audit_log.len(), 1);
+        if let nono::ApprovalDecision::Denied { reason } = &audit_log[0].decision {
+            assert_eq!(reason, "mock deny");
+        } else {
+            panic!("expected denied with mock reason");
+        }
+
+        let _ = child.recv_response().expect("drain");
+    }
+
+    #[test]
+    fn handle_redacts_token_in_audit_entry_json() {
+        let backend = CountingDenyBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        let sensitive_token = "super-secret-token-value-do-not-log";
+        let request = make_request(sensitive_token);
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(request),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            sensitive_token,
+        )
+        .expect("handle");
+
+        assert_eq!(audit_log.len(), 1);
+        assert_eq!(audit_log[0].request.session_token, "");
+        let json = serde_json::to_string(&audit_log[0]).expect("serialize");
+        assert!(
+            !json.contains(sensitive_token),
+            "audit JSON must not contain the raw session token: {json}"
+        );
+
+        let _ = child.recv_response().expect("drain");
+    }
+
+    #[test]
+    fn handle_rejects_replay_with_valid_token() {
+        let backend = CountingDenyBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        let request = make_request("the-token");
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(request.clone()),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            "the-token",
+        )
+        .expect("first handle");
+
+        // Replay: same request_id.
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(request),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            "the-token",
+        )
+        .expect("second handle");
+
+        // Backend was consulted once (first call only); replay path short-circuits
+        // before the token check consults the backend.
+        assert_eq!(backend.calls(), 1);
+        assert_eq!(audit_log.len(), 2);
+        assert!(audit_log[1].decision.is_denied());
+        if let nono::ApprovalDecision::Denied { reason } = &audit_log[1].decision {
+            assert!(
+                reason.contains("replay"),
+                "second denial should cite replay: {reason}"
+            );
+        }
+
+        // Drain both responses from the child side.
+        let _ = child.recv_response().expect("drain 1");
+        let _ = child.recv_response().expect("drain 2");
     }
 }

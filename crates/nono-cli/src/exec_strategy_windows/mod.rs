@@ -28,7 +28,6 @@ use std::process::Command;
 #[cfg(debug_assertions)]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-#[cfg(test)]
 use std::time::SystemTime;
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
 use windows_sys::Win32::Security::{

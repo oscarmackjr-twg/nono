@@ -1835,6 +1835,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_sensitive_paths_nix_store_symlink_end_to_end() {
         // End-to-end: a symlinked deny target whose canonical form is NOT
@@ -2751,6 +2752,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_deny_access_skips_nix_store_canonical_on_linux() {
         // Verify that add_deny_access_rules still includes canonical paths

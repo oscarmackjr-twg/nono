@@ -386,12 +386,17 @@ pub(crate) fn load_secret(service: &str, account: &str) -> Result<Zeroizing<Stri
 
 #[cfg(test)]
 mod backend_tests {
+    #[cfg(target_os = "windows")]
     use super::*;
 
     #[cfg(target_os = "windows")]
     #[test]
     fn backend_description_mentions_windows_credential_manager() {
-        assert!(backend_description("nono-trust").contains("Windows Credential Manager"));
+        let key_ref = TrustKeyRef::Keystore("default".to_string());
+        assert!(
+            backend_description_for_ref(&key_ref, "nono-trust")
+                .contains("Windows Credential Manager")
+        );
     }
 }
 
