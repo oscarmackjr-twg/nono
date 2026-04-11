@@ -14,7 +14,7 @@ This roadmap outlines the path to functional parity between the Windows implemen
 - [x] **Phase 8: ConPTY Shell** - Enable interactive nono shell on Windows via ConPTY. (completed 2026-04-10)
 - [x] **Phase 9: WFP Port-Level + Proxy Filtering** - Enable port-granular network policy and proxy credential injection. (completed 2026-04-10)
 - [x] **Phase 10: ETW-Based Learn Command** - Implement nono learn on Windows via Event Tracing for Windows. (completed 2026-04-10)
-- [ ] **Phase 11: Runtime Capability Expansion** - (Stretch) Enable sandboxed child to request additional capabilities at runtime.
+- [x] **Phase 11: Runtime Capability Expansion** - (Stretch) Enable sandboxed child to request additional capabilities at runtime. (completed 2026-04-11, human verification pending)
 
 ## Phase Details
 
@@ -140,9 +140,10 @@ Plans:
   2. The supervisor presents the capability request to the user for interactive approval before any grant is issued; no capability is granted silently.
   3. Capability requests that do not include a valid session token are denied immediately using a constant-time comparison; the token is never written to any log level.
   4. The existing deny-all fallback (`WindowsSupervisorDenyAllApprovalBackend`) remains active and keeps the system secure when this feature is disabled or unavailable.
-**Plans**: 1 plan
+**Plans**: 2 plans
 Plans:
-- [ ] 07-01-PLAN.md — Fix nono wrap Direct strategy return path and verify session commands
+- [ ] 11-01-PLAN.md — Core IPC wiring: session_token field, low-integrity SACL pipe, constant-time token check, capability pipe server, env var injection
+- [ ] 11-02-PLAN.md — TerminalApproval Windows CONIN$ branch + handler test suite with audit redaction regression
 
 ## Progress Table
 
@@ -158,4 +159,4 @@ Plans:
 | 8. ConPTY Shell | 1/1 | Complete | 2026-04-10 |
 | 9. WFP Port-Level + Proxy Filtering | 4/4 | Complete | 2026-04-10 |
 | 10. ETW-Based Learn Command | 3/3 | Complete   | 2026-04-10 |
-| 11. Runtime Capability Expansion | 0/2 | Not started | - |
+| 11. Runtime Capability Expansion | 0/2 | Planned | - |

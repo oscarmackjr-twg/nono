@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: completed
+status: executing
 stopped_at: Phase 10 context gathered
-last_updated: "2026-04-10T14:09:32.283Z"
-last_activity: 2026-04-10
+last_updated: "2026-04-11T21:47:31.871Z"
+last_activity: 2026-04-11
 progress:
   total_phases: 11
-  completed_phases: 8
-  total_plans: 23
-  completed_plans: 23
+  completed_phases: 10
+  total_plans: 28
+  completed_plans: 28
   percent: 100
 ---
 
@@ -20,14 +20,14 @@ progress:
 
 **Core Value:** Every nono command that works on Linux/macOS should work on Windows with equivalent security guarantees, or be explicitly documented as intentionally unsupported with a clear rationale.
 
-**Current Focus:** Phase 09 — wfp-port-level-proxy-filtering (COMPLETE; awaiting human verification for SC5 WFP TCP test and proxy E2E)
+**Current Focus:** Phase 11 — runtime-capability-expansion
 
 ## Current Position
 
-Phase: 09 (wfp-port-level-proxy-filtering) — COMPLETE (human_needed: 2 items require Windows host with admin + WFP service)
-Plan: 4 of 4
-Status: Phase 09 complete. Next: Phase 08 (ConPTY Shell) or Phase 10 (ETW-Based Learn Command).
-Last activity: 2026-04-10 — Phase 09 gap closure (09-04-PLAN.md) verified; 555 tests pass, cargo check clean.
+Phase: 11 (runtime-capability-expansion) — EXECUTING
+Plan: 1 of 2
+Status: Executing Phase 11
+Last activity: 2026-04-11 -- Phase 11 execution started
 
 ```
 Progress: [████████████████████] 73% (8/11 phases complete)
@@ -92,6 +92,6 @@ Progress: [████████████████████] 73% (8/
 ## Session Continuity
 
 **Current Milestone:** v2.0 Windows Gap Closure
-**Last Activity:** 2026-04-10
+**Last Activity:** 2026-04-11
 **Stopped At:** Phase 10 context gathered
 **Next Steps:** Phase 08 (ConPTY Shell) or Phase 10 (ETW-Based Learn Command) — both are plannable now. Phase 09 human-verification items noted in Todos above.
