@@ -15,6 +15,8 @@ This roadmap outlines the path to functional parity between the Windows implemen
 - [x] **Phase 9: WFP Port-Level + Proxy Filtering** - Enable port-granular network policy and proxy credential injection. (completed 2026-04-10)
 - [x] **Phase 10: ETW-Based Learn Command** - Implement nono learn on Windows via Event Tracing for Windows. (completed 2026-04-10)
 - [x] **Phase 11: Runtime Capability Expansion** - (Stretch) Enable sandboxed child to request additional capabilities at runtime. (completed 2026-04-11, human verification pending)
+- [ ] **Phase 12: Milestone Bookkeeping Cleanup** - Close planning-trail tech debt from v1.0 audit (checkbox sweep, retro VERIFICATION.md for 04/10, ROADMAP reconciliation, minor code nits).
+- [ ] **Phase 13: v1.0 Human Verification UAT** - Execute the 10 live-host human-verification items deferred across phases 05, 07, 09, 11 in one Windows session.
 
 ## Phase Details
 
@@ -145,6 +147,32 @@ Plans:
 - [ ] 11-01-PLAN.md — Core IPC wiring: session_token field, low-integrity SACL pipe, constant-time token check, capability pipe server, env var injection
 - [ ] 11-02-PLAN.md — TerminalApproval Windows CONIN$ branch + handler test suite with audit redaction regression
 
+### Phase 12: Milestone Bookkeeping Cleanup
+**Goal**: Close the planning-trail and minor-code tech debt identified by `v1.0-MILESTONE-AUDIT.md` so the milestone can be archived cleanly.
+**Depends on**: Nothing — pure bookkeeping + small code fixes.
+**Requirements**: None (closes tech debt on existing satisfied requirements)
+**Gap Closure**: Closes tech_debt items from v1.0 audit (no structural gaps).
+**Success Criteria** (what must be TRUE):
+  1. REQUIREMENTS.md v2.0 checkboxes (WRAP-01, SESS-01/02/03, SHELL-01, PORT-01, PROXY-01, LEARN-01, TRUST-01) reflect actual satisfaction state; traceability table Status column matches.
+  2. ROADMAP.md progress table line 162 shows Phase 11 as `2/2 Complete` (consistent with the body `[x]` marker).
+  3. `.planning/phases/04-state-integrity-deployment/04-VERIFICATION.md` and `.planning/phases/10-etw-based-learn-command/10-VERIFICATION.md` exist and retroactively document phase-level verification against plan SUMMARYs.
+  4. `crates/nono/src/sandbox/windows.rs` no longer contains the stale `placeholder` module doc comment.
+  5. The `#[ignore]`d WFP port integration test no longer hardcodes a loopback port that panics on collision; it either binds an ephemeral port or skips gracefully.
+  6. `make ci` still passes after the code changes.
+
+### Phase 13: v1.0 Human Verification UAT
+**Goal**: Execute all deferred human-verification items from v1.0 on a real Windows host in one bundled UAT pass, so every `human_needed` VERIFICATION.md can be resolved before milestone archive.
+**Depends on**: Phase 12 (clean planning trail first)
+**Requirements**: None (resolves human-verification debt on WRAP/SESS/SHELL/PORT/PROXY/TRUST requirements)
+**Gap Closure**: Closes the 10 live-host verification items tracked in the v1.0 audit `tech_debt` frontmatter.
+**Success Criteria** (what must be TRUE):
+  1. Phase 05 items verified: live `nono run --detach` + `nono attach` cycle succeeds on Windows; fail-closed error path triggers when the Named Pipe readiness probe times out.
+  2. Phase 07 items verified: `nono wrap` propagates child exit code; `nono setup` help text documents Windows supervisor-stays-alive behavior; `nono logs`/`inspect`/`prune` round-trip against a real Windows session.
+  3. Phase 09 items verified: `HTTPS_PROXY` and `NONO_PROXY_TOKEN` are present in the sandboxed child's environment under `--proxy-only`; `cargo test -p nono-cli --test wfp_port_integration -- --ignored` passes under admin with `nono-wfp-service` running.
+  4. Phase 11 items verified: end-to-end supervised run shows the `[nono] Grant access?` prompt on a real Windows console via CONIN$; a Low Integrity child successfully connects to the capability pipe across the SACL boundary; `RUST_LOG=trace` output under a real subscriber contains no session-token material.
+  5. Each verified item is recorded in a `13-UAT.md` log with host details (Windows build, admin status), command invocation, observed output, and pass/fail verdict.
+  6. On completion, each upstream phase's VERIFICATION.md status moves from `human_needed` to `passed` (or a gap is filed if any item fails).
+
 ## Progress Table
 
 | Phase | Plans Complete | Status | Completed |
@@ -160,3 +188,5 @@ Plans:
 | 9. WFP Port-Level + Proxy Filtering | 4/4 | Complete | 2026-04-10 |
 | 10. ETW-Based Learn Command | 3/3 | Complete   | 2026-04-10 |
 | 11. Runtime Capability Expansion | 0/2 | Planned | - |
+| 12. Milestone Bookkeeping Cleanup | 0/0 | Planned | - |
+| 13. v1.0 Human Verification UAT | 0/0 | Planned | - |
