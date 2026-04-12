@@ -1,48 +1,47 @@
 {
   "version": "1.0",
-  "timestamp": "2026-04-06T12:59:32.653Z",
-  "phase": "none",
-  "phase_name": "v2.0-roadmap-complete",
-  "phase_dir": ".planning",
-  "plan": 0,
-  "task": 0,
-  "total_tasks": 0,
+  "timestamp": "2026-04-12T14:12:17.182Z",
+  "phase": null,
+  "phase_name": null,
+  "phase_dir": null,
+  "plan": null,
+  "task": null,
+  "total_tasks": null,
   "status": "paused",
   "completed_tasks": [
-    {"id": 1, "name": "quick-260406-ajy: Windows functional equivalence assessment", "status": "done", "commit": "67f91a8"},
-    {"id": 2, "name": "quick-260406-bem: v2.0 gap research", "status": "done", "commit": "b67f74a"},
-    {"id": 3, "name": "v2.0 REQUIREMENTS.md", "status": "done", "commit": "95be407"},
-    {"id": 4, "name": "v2.0 ROADMAP.md (Phases 7-11)", "status": "done", "commit": "45c9396"}
+    {"id": 1, "name": "Doc audit of docs/cli/development/ (19 files)", "status": "done", "commit": null},
+    {"id": 2, "name": "Cluster 4: drop preview language (3 files)", "status": "done", "commit": "2173f93"},
+    {"id": 3, "name": "PR 643 opened and closed (structurally dependent on PR 583)", "status": "done", "commit": null},
+    {"id": 4, "name": "Memory saved for PR 643 doc follow-up", "status": "done", "commit": null},
+    {"id": 5, "name": "PR 583 conflict analysis — cli.rs conflict shown to user", "status": "in_progress", "progress": "1/8 conflicts analyzed and resolution proposed (trivial keep-both). 7 remain."}
   ],
   "remaining_tasks": [
-    {"id": 5, "name": "Plan Phase 7: Quick Wins (wrap + session commands)", "status": "not_started"},
-    {"id": 6, "name": "Execute Phase 7", "status": "not_started"},
-    {"id": 7, "name": "Plan + Execute Phase 8: ConPTY Shell", "status": "not_started"},
-    {"id": 8, "name": "Plan + Execute Phase 9: WFP Port-Level + Proxy Filtering", "status": "not_started"},
-    {"id": 9, "name": "Plan + Execute Phase 10: ETW-Based Learn Command", "status": "not_started"},
-    {"id": 10, "name": "Plan + Execute Phase 11: Runtime Capability Expansion (stretch)", "status": "not_started"}
+    {"id": 6, "name": "User decides merge method (merge commit vs rebase) for PR 583", "status": "not_started"},
+    {"id": 7, "name": "Resolve remaining 7 conflicts (CHANGELOG, README, profile/mod.rs, sandbox_prepare.rs, setup.rs, trust_keystore.rs, trust.mdx)", "status": "not_started"},
+    {"id": 8, "name": "Push resolved branch and verify PR 583 mergeable", "status": "not_started"}
   ],
-  "blockers": [],
+  "blockers": [
+    {"description": "User must choose merge method before any conflict resolution can be applied to PR 583 branch", "type": "human_action", "workaround": null},
+    {"description": "7 Luke Hinds commits fail DCO — rebase method would re-trigger this; merge commit avoids it", "type": "external", "workaround": "Use merge commit instead of rebase, or get Luke Hinds to sign off"}
+  ],
   "human_actions_pending": [
-    {
-      "action": "Review WINDOWS-V2-ROADMAP.md and confirm phase order before planning Phase 7",
-      "context": "Roadmap was just generated from gap research; user approval before execution is advisable",
-      "blocking": false
-    }
+    {"action": "Choose merge method for PR 583: merge commit (DCO-safe) vs rebase (clean history, re-triggers DCO)", "context": "Determines how conflict resolution gets applied to the PR branch", "blocking": true}
   ],
   "decisions": [
-    {"decision": "Phase ordering: Phase 7 before Phase 8", "rationale": "Phase 7 validates entry-point guard removal pattern before Phase 8 layers ConPTY complexity on top", "phase": "v2.0"},
-    {"decision": "Phases 9, 10, 11 are independent of each other", "rationale": "WFP IPC, ETW, and supervisor socket are separate subsystems", "phase": "v2.0"},
-    {"decision": "Single IPC version bump for Phase 9", "rationale": "Gaps 4 (proxy) and 5 (port filtering) share WFP IPC extension; combining avoids two service deployments", "phase": "9"},
-    {"decision": "ETW library decision (ferrisetw vs windows-sys direct) deferred to plan 10-01", "rationale": "Must evaluate crates.io freshness and feature completeness before committing", "phase": "10"},
-    {"decision": "Gap 6b (runtime trust interception) deferred to v3.0", "rationale": "Requires kernel minifilter driver; no user-mode workaround acceptable", "phase": "v2.0"},
-    {"decision": "Minimum build for ConPTY and ETW: Windows 10 build 17763 (1809)", "rationale": "ConPTY API requires 1809; enforced via RtlGetVersion at runtime; no silent fallback", "phase": "8"}
+    {"decision": "PR 643 closed — doc follow-up depends on PR 583 merging first", "rationale": "Preview files don't exist on upstream/main; PR 643 dragged in 187 commits", "phase": null},
+    {"decision": "cli.rs conflict resolution: keep both flags (allow_gpu from upstream, dangerous_force_wfp_ready from pr583)", "rationale": "Two unrelated flags inserted at same location; no semantic overlap", "phase": null},
+    {"decision": "Doc branch docs/drop-windows-preview-language preserved on fork for later reopen", "rationale": "Commit 2173f93 is clean and DCO-signed; rebase onto main after PR 583 merges", "phase": null}
   ],
   "uncommitted_files": [
-    ".planning/phases/04-state-integrity-deployment/04-RESEARCH.md",
-    ".planning/quick/260406-bem-research-and-roadmap-windows-gap-closure/260406-bem-PLAN.md",
-    ".planning/quick/260406-bem-research-and-roadmap-windows-gap-closure/260406-bem-RESEARCH.md"
+    ".planning/phases/11-runtime-capability-expansion/11-01-PLAN.md",
+    ".planning/phases/11-runtime-capability-expansion/11-02-PLAN.md",
+    ".planning/v1.0-MILESTONE-AUDIT.md",
+    ".planning/phases/10-etw-based-learn-command/10-RESEARCH.md",
+    ".planning/phases/10-etw-based-learn-command/10-UAT.md",
+    ".planning/phases/12-milestone-bookkeeping-cleanup/12-02-PLAN.md",
+    ".planning/quick/260410-nlt-fix-three-uat-gaps-in-phase-10-etw-learn/260410-nlt-PLAN.md",
+    ".planning/v1.0-INTEGRATION-REPORT.md"
   ],
-  "next_action": "Run `/gsd:plan-phase 7` to begin Phase 7 (Quick Wins: nono wrap + session log commands). Phases 9, 10, 11 can be planned in parallel if multiple sessions run concurrently.",
-  "context_notes": "v1.0 is complete (6 phases, all verified). v2.0 roadmap (Phases 7-11) was created in this session from gap analysis. No v2.0 code has been written yet. Three .planning files are uncommitted (see uncommitted_files). Branch is pr/windows-epic12-clean-v2."
+  "next_action": "Decide merge method for PR 583 (merge commit vs rebase), then resolve the 7 remaining conflicts starting with the trivial ones (CHANGELOG, README, trust.mdx) before tackling profile/mod.rs (8 hunks).",
+  "context_notes": "Scratch worktree at /tmp/nono-merge-scratch has all 8 conflicts in their conflicted state (upstream/main merged into pr555/windows-epic12-clean-v3). This worktree is disposable and can be recreated. The profile/mod.rs file has 8 conflict hunks and is the riskiest resolution. The doc branch docs/drop-windows-preview-language on fork is rebased onto pr555/windows-epic12-clean-v3 and holds commit 2173f93."
 }
