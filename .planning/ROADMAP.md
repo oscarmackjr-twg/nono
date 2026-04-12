@@ -177,6 +177,9 @@ Plans:
   4. Phase 11 items verified: end-to-end supervised run shows the `[nono] Grant access?` prompt on a real Windows console via CONIN$; a Low Integrity child successfully connects to the capability pipe across the SACL boundary; `RUST_LOG=trace` output under a real subscriber contains no session-token material.
   5. Each verified item is recorded in a `13-UAT.md` log with host details (Windows build, admin status), command invocation, observed output, and pass/fail verdict.
   6. On completion, each upstream phase's VERIFICATION.md status moves from `human_needed` to `passed` (or a gap is filed if any item fails).
+**Plans**: 1 plan
+Plans:
+- [ ] 13-01-PLAN.md — Write UAT runbook, human executes tests, update upstream VERIFICATION.md files
 
 ## Progress Table
 
@@ -194,4 +197,4 @@ Plans:
 | 10. ETW-Based Learn Command | 3/3 | Complete   | 2026-04-10 |
 | 11. Runtime Capability Expansion | 2/2 | Complete | 2026-04-11 |
 | 12. Milestone Bookkeeping Cleanup | 3/3 | Complete   | 2026-04-11 |
-| 13. v1.0 Human Verification UAT | 0/0 | Planned | - |
+| 13. v1.0 Human Verification UAT | 0/1 | In Progress | - |
