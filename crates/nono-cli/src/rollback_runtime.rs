@@ -20,6 +20,17 @@ pub(crate) type RollbackRuntimeState = (
     HashSet<PathBuf>,
 );
 
+/// Lightweight snapshot state for audit-only sessions (no rollback).
+///
+/// Captures pre-execution merkle root so the audit trail includes a
+/// cryptographic commitment to filesystem state even when rollback
+/// restore is not enabled.
+pub(crate) struct AuditSnapshotState {
+    pub(crate) manager: nono::undo::SnapshotManager,
+    pub(crate) baseline_root: nono::undo::ContentHash,
+    pub(crate) tracked_paths: Vec<PathBuf>,
+}
+
 pub(crate) struct RollbackExitContext<'a> {
     pub(crate) audit_state: Option<&'a AuditState>,
     pub(crate) rollback_state: Option<RollbackRuntimeState>,
@@ -32,6 +43,12 @@ pub(crate) struct RollbackExitContext<'a> {
     /// when audit-integrity was not requested (zero-overhead path; existing
     /// callers see byte-identical behavior to pre-22-05a).
     pub(crate) audit_recorder: Option<&'a Mutex<AuditRecorder>>,
+    /// Upstream 4ec61c29: lightweight pre/post Merkle root capture for
+    /// audit-only sessions. When `Some`, `finalize_supervised_exit`
+    /// recomputes the root post-execution and stores both roots in
+    /// `SessionMetadata.merkle_roots` for tamper-evidence (no full
+    /// snapshot storage overhead).
+    pub(crate) audit_snapshot_state: Option<AuditSnapshotState>,
     pub(crate) proxy_handle: Option<&'a nono_proxy::server::ProxyHandle>,
     pub(crate) started: &'a str,
     pub(crate) ended: &'a str,
@@ -223,6 +240,65 @@ pub(crate) fn warn_if_rollback_flags_ignored(rollback: &RollbackLaunchOptions, s
     }
 }
 
+/// Derive tracked paths from capabilities: user-granted writable directories.
+///
+/// Upstream 4ec61c29 refactor: extracted from `initialize_rollback_state` so
+/// `initialize_audit_snapshots` can reuse the same selector for audit-only
+/// (no-rollback) sessions.
+fn derive_tracked_paths(caps: &CapabilitySet) -> Vec<PathBuf> {
+    caps.fs_capabilities()
+        .iter()
+        .filter(|cap| {
+            !cap.is_file
+                && matches!(cap.access, AccessMode::Write | AccessMode::ReadWrite)
+                && matches!(cap.source, nono::CapabilitySource::User)
+        })
+        .map(|cap| cap.resolved.clone())
+        .collect()
+}
+
+/// Initialize lightweight audit snapshots for merkle root computation.
+///
+/// When rollback is not requested but audit is active, this captures a
+/// pre-execution merkle root so the audit trail includes a cryptographic
+/// commitment to filesystem state.
+pub(crate) fn initialize_audit_snapshots(
+    caps: &CapabilitySet,
+    audit_state: &AuditState,
+) -> Result<Option<AuditSnapshotState>> {
+    let tracked_paths = derive_tracked_paths(caps);
+    if tracked_paths.is_empty() {
+        return Ok(None);
+    }
+
+    let exclusion_config = nono::undo::ExclusionConfig {
+        use_gitignore: true,
+        exclude_patterns: rollback_vcs_exclusions(),
+        exclude_globs: Vec::new(),
+        force_include: Vec::new(),
+    };
+    let gitignore_root = tracked_paths
+        .first()
+        .cloned()
+        .unwrap_or_else(|| PathBuf::from("."));
+    let exclusion = nono::undo::ExclusionFilter::new(exclusion_config, &gitignore_root)?;
+
+    let manager = nono::undo::SnapshotManager::new(
+        audit_state.session_dir.clone(),
+        tracked_paths.clone(),
+        exclusion,
+        nono::undo::WalkBudget::default(),
+    )?;
+
+    let baseline_root = manager.compute_merkle_root()?;
+
+    Ok(Some(AuditSnapshotState {
+        manager,
+        baseline_root,
+        tracked_paths,
+    }))
+}
+
 /// Initialize rollback state for a supervised session.
 ///
 /// Returns `Ok((Some(state), RollbackStatus::Available))` on success, or
@@ -252,16 +328,7 @@ pub(crate) fn initialize_rollback_state(
         return Ok((None, RollbackStatus::Skipped));
     };
 
-    let tracked_paths: Vec<PathBuf> = caps
-        .fs_capabilities()
-        .iter()
-        .filter(|cap| {
-            !cap.is_file
-                && matches!(cap.access, AccessMode::Write | AccessMode::ReadWrite)
-                && matches!(cap.source, nono::CapabilitySource::User)
-        })
-        .map(|cap| cap.resolved.clone())
-        .collect();
+    let tracked_paths = derive_tracked_paths(caps);
 
     if tracked_paths.is_empty() {
         return Ok((None, RollbackStatus::Skipped));
@@ -437,6 +504,7 @@ pub(crate) fn finalize_supervised_exit(ctx: RollbackExitContext<'_>) -> Result<(
         rollback_state,
         rollback_status,
         audit_recorder,
+        audit_snapshot_state,
         proxy_handle,
         started,
         ended,
@@ -505,17 +573,28 @@ pub(crate) fn finalize_supervised_exit(ctx: RollbackExitContext<'_>) -> Result<(
         let _ = manager.cleanup_new_atomic_temp_files(&atomic_temp_before);
     }
 
+    // Audit-only path: no rollback snapshots, but still compute pre/post
+    // merkle roots for tamper-evidence when audit snapshot state is
+    // available (upstream 4ec61c29). The audit-integrity ledger summary is
+    // populated alongside via `audit_event_count` / `audit_integrity_summary`.
     if !audit_saved {
         if let Some(audit_state) = audit_state {
+            let (merkle_roots, tracked_paths) = match audit_snapshot_state {
+                Some(snap) => {
+                    let final_root = snap.manager.compute_merkle_root()?;
+                    (vec![snap.baseline_root, final_root], snap.tracked_paths)
+                }
+                None => (Vec::new(), Vec::new()),
+            };
             let meta = nono::undo::SessionMetadata {
                 session_id: audit_state.session_id.clone(),
                 started: started.to_string(),
                 ended: Some(ended.to_string()),
                 command: command.to_vec(),
-                tracked_paths: Vec::new(),
+                tracked_paths,
                 snapshot_count: 0,
                 exit_code: Some(exit_code),
-                merkle_roots: Vec::new(),
+                merkle_roots,
                 network_events,
                 audit_event_count,
                 audit_integrity: audit_integrity_summary,

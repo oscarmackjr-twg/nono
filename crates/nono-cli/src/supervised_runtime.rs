@@ -6,7 +6,8 @@ use crate::launch_runtime::{
 #[cfg(not(target_os = "windows"))]
 use crate::protected_paths;
 use crate::rollback_runtime::{
-    create_audit_state, initialize_rollback_state, warn_if_rollback_flags_ignored, AuditState,
+    create_audit_state, initialize_audit_snapshots, initialize_rollback_state,
+    warn_if_rollback_flags_ignored, AuditState,
 };
 use crate::{
     exec_strategy, output, pty_proxy, session, terminal_approval, trust_intercept,
@@ -236,6 +237,22 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
     let (rollback_state, rollback_status) =
         initialize_rollback_state(rollback, caps, audit_state.as_ref(), silent)?;
 
+    // Upstream 4ec61c29: when rollback is not active but audit is, compute
+    // a pre-execution merkle root so the audit trail has a cryptographic
+    // commitment to filesystem state. The captured state is finalized via
+    // `compute_merkle_root()` at session end inside `finalize_supervised_exit`.
+    // Note: fork's `initialize_rollback_state` returns `(Option<state>, RollbackStatus)`
+    // (vs upstream's `Option<state>`), so the gating uses `rollback_state.is_none()`
+    // on the tuple's first element.
+    let audit_snapshot_state = if rollback_state.is_none() {
+        match audit_state.as_ref() {
+            Some(state) => initialize_audit_snapshots(caps, state)?,
+            None => None,
+        }
+    } else {
+        None
+    };
+
     // Shared Arc so both the synchronous Unix path (takes &dyn) and the
     // Windows capability pipe server thread (takes Arc<dyn +Send+Sync>)
     // can use the same backend instance. Plan 11-02 wires this on Windows.
@@ -358,6 +375,7 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
                 rollback_state,
                 rollback_status,
                 audit_recorder.as_ref(),
+                audit_snapshot_state,
                 proxy_handle,
                 command,
                 &started,
@@ -378,6 +396,7 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
                 rollback_state,
                 rollback_status,
                 audit_recorder.as_ref(),
+                audit_snapshot_state,
                 proxy_handle,
                 command,
                 &started,
@@ -390,6 +409,11 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
     if let Some(ref mut guard) = session_guard {
         guard.set_exited(exit_code);
     }
+    // Note: fork delegates `finalize_supervised_exit` to `execute_supervised`
+    // (it's called from inside exec_strategy.rs / exec_strategy_windows/mod.rs
+    // where the `audit_snapshot_state` is threaded via RollbackExitContext).
+    // Upstream 4ec61c29 placed the finalize call here; in the fork the
+    // audit_snapshot_state is forwarded through `execute_supervised` instead.
 
     Ok(exit_code)
 }
