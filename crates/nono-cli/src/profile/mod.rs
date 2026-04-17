@@ -1723,8 +1723,8 @@ pub fn list_profiles() -> Vec<String> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use std::env;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use crate::test_env::EnvVarGuard;
+    use std::sync::MutexGuard;
     use tempfile::tempdir;
 
     #[cfg(target_os = "windows")]
@@ -1768,11 +1768,7 @@ mod tests {
     }
 
     fn env_lock() -> MutexGuard<'static, ()> {
-        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        match ENV_LOCK.get_or_init(|| Mutex::new(())).lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        }
+        crate::test_env::lock_env()
     }
 
     #[test]
@@ -1790,22 +1786,15 @@ mod tests {
     #[test]
     fn test_expand_vars() {
         let _guard = env_lock();
-        // Save original HOME to restore after test (avoid polluting other parallel tests)
-        let original_home = env::var("HOME").ok();
+        let _env = EnvVarGuard::set_all(&[("HOME", test_home())]);
 
         let workdir = PathBuf::from("/projects/myapp");
-        env::set_var("HOME", test_home());
 
         let expanded = expand_vars("$WORKDIR/src", &workdir).expect("valid env");
         assert_eq!(expanded, PathBuf::from("/projects/myapp/src"));
 
         let expanded = expand_vars("$HOME/.config", &workdir).expect("valid env");
         assert_eq!(expanded, PathBuf::from(test_home()).join(".config"));
-
-        // Restore original HOME
-        if let Some(home) = original_home {
-            env::set_var("HOME", home);
-        }
     }
 
     #[test]
@@ -1815,11 +1804,10 @@ mod tests {
         // can reference it portably. Without this, users cannot write
         // add_deny_access: ["$XDG_STATE_HOME"] and the variable is treated
         // as a literal string that matches nothing.
-        let original_home = env::var("HOME").ok();
-        let original_state = env::var("XDG_STATE_HOME").ok();
-
-        env::set_var("HOME", test_home());
-        env::set_var("XDG_STATE_HOME", test_xdg_state_home());
+        let _env = EnvVarGuard::set_all(&[
+            ("HOME", test_home()),
+            ("XDG_STATE_HOME", test_xdg_state_home()),
+        ]);
 
         let workdir = PathBuf::from("/projects/myapp");
         let expanded = expand_vars("$XDG_STATE_HOME/history", &workdir).expect("valid env");
@@ -1829,7 +1817,7 @@ mod tests {
         );
 
         // Fallback when env var is unset
-        env::remove_var("XDG_STATE_HOME");
+        _env.remove("XDG_STATE_HOME");
         let expanded = expand_vars("$XDG_STATE_HOME/history", &workdir).expect("valid env");
         assert_eq!(
             expanded,
@@ -1838,52 +1826,33 @@ mod tests {
                 .join("state")
                 .join("history")
         );
-
-        // Restore
-        if let Some(home) = original_home {
-            env::set_var("HOME", home);
-        }
-        if let Some(state) = original_state {
-            env::set_var("XDG_STATE_HOME", state);
-        }
     }
 
     #[test]
     fn test_expand_vars_xdg_cache_home() {
         let _guard = env_lock();
-        let original_home = env::var("HOME").ok();
-        let original_cache = env::var("XDG_CACHE_HOME").ok();
-
-        env::set_var("HOME", test_home());
-        env::set_var("XDG_CACHE_HOME", test_xdg_cache_home());
+        let _env = EnvVarGuard::set_all(&[
+            ("HOME", test_home()),
+            ("XDG_CACHE_HOME", test_xdg_cache_home()),
+        ]);
 
         let workdir = PathBuf::from("/projects/myapp");
         let expanded = expand_vars("$XDG_CACHE_HOME/pip", &workdir).expect("valid env");
         assert_eq!(expanded, PathBuf::from(test_xdg_cache_home()).join("pip"));
 
         // Fallback when env var is unset
-        env::remove_var("XDG_CACHE_HOME");
+        _env.remove("XDG_CACHE_HOME");
         let expanded = expand_vars("$XDG_CACHE_HOME/pip", &workdir).expect("valid env");
         assert_eq!(
             expanded,
             PathBuf::from(test_home()).join(".cache").join("pip")
         );
-
-        // Restore
-        if let Some(home) = original_home {
-            env::set_var("HOME", home);
-        }
-        if let Some(cache) = original_cache {
-            env::set_var("XDG_CACHE_HOME", cache);
-        }
     }
 
     #[test]
     fn test_expand_vars_xdg_runtime_dir() {
         let _guard = env_lock();
-        let original_runtime = env::var("XDG_RUNTIME_DIR").ok();
-
-        env::set_var("XDG_RUNTIME_DIR", test_xdg_runtime_dir());
+        let _env = EnvVarGuard::set_all(&[("XDG_RUNTIME_DIR", test_xdg_runtime_dir())]);
 
         let workdir = PathBuf::from("/projects/myapp");
         let expanded = expand_vars("$XDG_RUNTIME_DIR/pulse", &workdir).expect("valid env");
@@ -1894,18 +1863,13 @@ mod tests {
 
         // When unset, $XDG_RUNTIME_DIR has no default per the spec — the
         // variable should be left unexpanded so the path won't resolve.
-        env::remove_var("XDG_RUNTIME_DIR");
+        _env.remove("XDG_RUNTIME_DIR");
         let expanded = expand_vars("$XDG_RUNTIME_DIR/pulse", &workdir).expect("valid env");
         assert_eq!(
             expanded,
             PathBuf::from("$XDG_RUNTIME_DIR/pulse"),
             "unset XDG_RUNTIME_DIR should leave variable unexpanded"
         );
-
-        // Restore
-        if let Some(runtime) = original_runtime {
-            env::set_var("XDG_RUNTIME_DIR", runtime);
-        }
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -1913,13 +1877,12 @@ mod tests {
     fn test_resolve_user_config_dir_uses_valid_absolute_xdg() {
         let _guard = env_lock();
         let tmp = tempdir().expect("tmpdir");
-        env::set_var("XDG_CONFIG_HOME", tmp.path());
+        let _env = EnvVarGuard::set_all(&[("XDG_CONFIG_HOME", tmp.path().to_str().expect("utf8 path"))]);
         let resolved = resolve_user_config_dir().expect("resolve user config dir");
         assert_eq!(
             resolved,
             tmp.path().canonicalize().expect("canonicalize tmp")
         );
-        env::remove_var("XDG_CONFIG_HOME");
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -1927,12 +1890,10 @@ mod tests {
     fn test_resolve_user_config_dir_falls_back_on_relative_xdg() {
         let _guard = env_lock();
         let expected_home = home_dir().expect("home dir");
-        env::set_var("XDG_CONFIG_HOME", "relative/path");
+        let _env = EnvVarGuard::set_all(&[("XDG_CONFIG_HOME", "relative/path")]);
 
         let resolved = resolve_user_config_dir().expect("resolve with fallback");
         assert_eq!(resolved, expected_home.join(".config"));
-
-        env::remove_var("XDG_CONFIG_HOME");
     }
 
     #[cfg(target_os = "windows")]
@@ -1942,28 +1903,17 @@ mod tests {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let tmp = tempdir().expect("tmpdir");
-        let original_appdata = env::var("APPDATA").ok();
-        let original_xdg = env::var("XDG_CONFIG_HOME").ok();
-
-        env::set_var("APPDATA", tmp.path());
-        env::remove_var("XDG_CONFIG_HOME");
+        let _env = EnvVarGuard::set_all(&[
+            ("APPDATA", tmp.path().to_str().expect("utf8 path")),
+            ("XDG_CONFIG_HOME", "placeholder"),
+        ]);
+        _env.remove("XDG_CONFIG_HOME");
 
         let resolved = resolve_user_config_dir().expect("resolve with APPDATA");
         assert_eq!(
             resolved,
             tmp.path().canonicalize().expect("canonicalize tmp")
         );
-
-        if let Some(appdata) = original_appdata {
-            env::set_var("APPDATA", appdata);
-        } else {
-            env::remove_var("APPDATA");
-        }
-        if let Some(xdg) = original_xdg {
-            env::set_var("XDG_CONFIG_HOME", xdg);
-        } else {
-            env::remove_var("XDG_CONFIG_HOME");
-        }
     }
 
     #[cfg(target_os = "windows")]
@@ -1972,13 +1922,12 @@ mod tests {
         let _guard = crate::config::test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let original_home = env::var("HOME").ok();
-        let original_userprofile = env::var("USERPROFILE").ok();
-        let original_appdata = env::var("APPDATA").ok();
-
-        env::remove_var("HOME");
-        env::set_var("USERPROFILE", r"C:\Users\tester");
-        env::set_var("APPDATA", r"C:\Users\tester\AppData\Roaming");
+        let _env = EnvVarGuard::set_all(&[
+            ("HOME", "placeholder"),
+            ("USERPROFILE", r"C:\Users\tester"),
+            ("APPDATA", r"C:\Users\tester\AppData\Roaming"),
+        ]);
+        _env.remove("HOME");
 
         let workdir = PathBuf::from(r"C:\work\repo");
 
@@ -1990,22 +1939,6 @@ mod tests {
             config,
             PathBuf::from(r"C:\Users\tester\AppData\Roaming\nono")
         );
-
-        if let Some(home) = original_home {
-            env::set_var("HOME", home);
-        } else {
-            env::remove_var("HOME");
-        }
-        if let Some(userprofile) = original_userprofile {
-            env::set_var("USERPROFILE", userprofile);
-        } else {
-            env::remove_var("USERPROFILE");
-        }
-        if let Some(appdata) = original_appdata {
-            env::set_var("APPDATA", appdata);
-        } else {
-            env::remove_var("APPDATA");
-        }
     }
 
     #[test]
