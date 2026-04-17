@@ -17,6 +17,7 @@ This roadmap outlines the path to functional parity between the Windows implemen
 - [x] **Phase 11: Runtime Capability Expansion** - (Stretch) Enable sandboxed child to request additional capabilities at runtime. (completed 2026-04-11, human verification pending)
 - [x] **Phase 12: Milestone Bookkeeping Cleanup** - Close planning-trail tech debt from v1.0 audit (checkbox sweep, retro VERIFICATION.md for 04/10, ROADMAP reconciliation, minor code nits). (completed 2026-04-11)
 - [ ] **Phase 13: v1.0 Human Verification UAT** - Execute the 10 live-host human-verification items deferred across phases 05, 07, 09, 11 in one Windows session.
+- [ ] **Phase 14: v1.0 Fix Pass** - Close three blocking gaps surfaced by Phase 13 UAT (detached console-child DLL init failure, setup help-text drift, P09 runbook correction) so v1.0 can be archived.
 
 ## Phase Details
 
@@ -181,6 +182,24 @@ Plans:
 Plans:
 - [ ] 13-01-PLAN.md — Write UAT runbook, human executes tests, update upstream VERIFICATION.md files
 
+### Phase 14: v1.0 Fix Pass
+**Goal**: Close the three blocking gaps surfaced by Phase 13 UAT so the v1.0 Windows Parity milestone can be archived with every VERIFICATION.md honestly promoted to `passed`.
+**Depends on**: Phase 13 (UAT verdicts and gap list drive this phase's scope)
+**Requirements**: None new (fixes defects against existing v1.0 requirements — WRAP on Windows, detached sessions on Windows, setup check-only output contract).
+**Gap Closure**: Closes the three gaps filed in `13-UAT.md` after the partial UAT pass on 2026-04-17.
+**Success Criteria** (what must be TRUE):
+  1. `nono run --detached --allow-cwd -- <console-cmd>` successfully starts a background session on Windows. The detached supervisor no longer exits with NT status `0xC0000142` (STATUS_DLL_INIT_FAILED); a sandboxed console-child (e.g. `ping -t 127.0.0.1`) initializes and runs. Low-Integrity isolation for the grandchild is preserved — fix does NOT widen security.
+  2. `nono setup --check-only` output on Windows contains the canonical sentence `'nono wrap' is available on Windows with Job Object + WFP enforcement (no exec-replace, unlike Unix)` and does NOT contain `remain intentionally unavailable`. The two stanzas in `crates/nono-cli/src/setup.rs` are reconciled — no self-contradiction.
+  3. Phase 13 runbook `13-UAT.md` is corrected: P09-HV-1 uses real CLI flags (`--network-profile` / `--credential` / `--upstream-proxy`), not the nonexistent `--proxy-only`. P05-HV-1 uses `--detached`, not the typoed `--detach`.
+  4. A second UAT pass runs the 5 previously-blocked items (P05-HV-1, P07-HV-3, P09-HV-1, P11-HV-1, P11-HV-3) and the 1 previously-failed item (P07-HV-2). All reach a terminal `pass` / `fail` / `waived` verdict (no `blocked`).
+  5. Upstream VERIFICATION.md files (05, 07, 09, 11) are promoted from `human_needed` to `passed` per Phase 13 Task 3 outcome handling.
+  6. `make ci` stays green (no new warnings, no new test failures, existing pre-existing failures documented in STATE.md unchanged).
+**Plans**: 3 plans
+Plans:
+- [ ] 14-01-PLAN.md — Fix Bug #3: detached console-child STATUS_DLL_INIT_FAILED (investigate + fix + regression tests for the restricted-token + DETACHED_PROCESS + console-app init interaction; directions in `.planning/debug/windows-supervised-exec-cascade.md`).
+- [ ] 14-02-PLAN.md — Fix `setup --check-only` help-text drift in `crates/nono-cli/src/setup.rs`: add the canonical wrap-availability sentence; remove the stale "remain intentionally unavailable" Windows branch.
+- [ ] 14-03-PLAN.md — Correct Phase 13 runbook (`13-UAT.md` P09-HV-1 command + P05-HV-1 flag typo); then re-run the 5 blocked items + P07-HV-2 on an admin host with `nono-wfp-service` registered; then run Phase 13 Task 3 (upstream VERIFICATION.md promotion).
+
 ## Progress Table
 
 | Phase | Plans Complete | Status | Completed |
@@ -197,4 +216,5 @@ Plans:
 | 10. ETW-Based Learn Command | 3/3 | Complete   | 2026-04-10 |
 | 11. Runtime Capability Expansion | 2/2 | Complete | 2026-04-11 |
 | 12. Milestone Bookkeeping Cleanup | 3/3 | Complete   | 2026-04-11 |
-| 13. v1.0 Human Verification UAT | 0/1 | In Progress | - |
+| 13. v1.0 Human Verification UAT | 0/1 | In Progress (partial — 2 pass, 1 fail, 5 blocked, 2 waived) | - |
+| 14. v1.0 Fix Pass | 0/3 | Not Planned | - |

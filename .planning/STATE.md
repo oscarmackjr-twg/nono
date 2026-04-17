@@ -7,11 +7,11 @@ stopped_at: Completed 12-03-PLAN.md verification — CI gate FAILS on pre-existi
 last_updated: "2026-04-12T22:10:06.056Z"
 last_activity: 2026-04-12
 progress:
-  total_phases: 13
+  total_phases: 14
   completed_phases: 11
-  total_plans: 32
+  total_plans: 35
   completed_plans: 31
-  percent: 97
+  percent: 89
 ---
 
 # Project State: nono - Windows Gap Closure
@@ -27,7 +27,7 @@ progress:
 Phase: 13 (v1-human-verification-uat) — EXECUTING
 Plan: 1 of 1
 Status: Executing Phase 13
-Last activity: 2026-04-17 -- Completed quick task 260417-wla: Windows CreateProcess handle UAF fix (Phase 13 UAT unblocker)
+Last activity: 2026-04-17 -- Phase 13 UAT partial pass (2/10) + Phase 14 (v1.0 Fix Pass) added to close 3 blocking gaps
 
 ```
 Progress: [██████████] 100% (31/31 plans complete on disk)
@@ -64,6 +64,10 @@ Progress: [██████████] 100% (31/31 plans complete on disk)
 - **Phase 09 unreachable!() scoped to Unix:** On Windows, execute_direct returns Ok(i32); unreachable!() moved inside cfg(not(windows)) block; Windows Direct branch captures exit code and calls std::process::exit(exit_code) (2026-04-10).
 - **Phase 09 stale test replaced:** apply_rejects_unsupported_proxy_with_ports removed; apply_accepts_port_level_wfp_caps asserts Ok(()) for port-level caps post-Phase-09 semantics (2026-04-10).
 - **Phase 12-03 STOP on pre-existing CI failure:** `make ci` fallback surfaced 48 `disallowed_methods` clippy errors in `profile/mod.rs`, `config/mod.rs`, `sandbox_state.rs`. Root-caused to revert `cf5a60a` (2026-04-10), predates Phase 12. Phase 12's own files (`crates/nono/src/sandbox/windows.rs`, `crates/nono-cli/tests/wfp_port_integration.rs`) produce zero clippy diagnostics. Did NOT auto-fix per plan STOP directive (2026-04-11).
+
+### Roadmap Evolution
+
+- 2026-04-17: Phase 14 (v1.0 Fix Pass) added after Phase 13 UAT surfaced three blocking gaps — detached console-child STATUS_DLL_INIT_FAILED (blocks 4 UAT items), setup help-text drift (blocks P07-HV-2), P09-HV-1 runbook flag bug. Phase 14 plans: 3 (one per gap; plan 03 also re-runs the blocked UAT items and finishes Phase 13 Task 3 upstream promotion).
 
 ### Research Flags (open)
 
