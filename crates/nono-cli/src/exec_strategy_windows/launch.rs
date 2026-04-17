@@ -830,15 +830,32 @@ pub(super) fn spawn_windows_child(
     let env_pairs = build_child_env(config);
     let mut environment_block = build_windows_environment_block(&env_pairs);
 
-    // Create restricted token if session SID was generated during network enforcement setup
-    let h_token = if let Some(ref sid) = config.session_sid {
-        restricted_token::create_restricted_token_with_sid(sid)?.h_token
+    // Bind each potential holder to a named local so its Drop does NOT run
+    // until after CreateProcess{AsUser}W uses the raw HANDLE. Previously,
+    // `?.h_token` / `?.raw()` returned a raw HANDLE from a temporary which
+    // dropped (closing the handle) before it was passed to the Win32 API,
+    // yielding ERROR_INVALID_HANDLE (6).
+    let _restricted_holder: Option<restricted_token::RestrictedToken>;
+    let _low_integrity_holder: Option<OwnedHandle>;
+    let h_token: HANDLE = if let Some(ref sid) = config.session_sid {
+        let holder = restricted_token::create_restricted_token_with_sid(sid)?;
+        let raw = holder.h_token;
+        _restricted_holder = Some(holder);
+        _low_integrity_holder = None;
+        raw
     } else if should_use_low_integrity_windows_launch(config.caps) {
-        create_low_integrity_primary_token()?.raw()
+        let holder = create_low_integrity_primary_token()?;
+        let raw = holder.0;
+        _low_integrity_holder = Some(holder);
+        _restricted_holder = None;
+        raw
     } else {
+        _restricted_holder = None;
+        _low_integrity_holder = None;
         std::ptr::null_mut() // Use current process token (CreateProcessW)
     };
-    let token = OwnedHandle(h_token);
+    // NOTE: do NOT re-wrap h_token in a fresh OwnedHandle — the holder above
+    // already owns the close. A second wrapper would double-close on Drop.
 
     let launch_program = normalize_windows_launch_path(launch_program);
     let current_dir = normalize_windows_launch_path(config.current_dir);
@@ -905,12 +922,12 @@ pub(super) fn spawn_windows_child(
 
         let lp_startup_info = &startup_info_ex.StartupInfo as *const STARTUPINFOW;
 
-        let created = if !token.0.is_null() {
+        let created = if !h_token.is_null() {
             unsafe {
                 // SAFETY: All pointers are valid for the duration of the call and
                 // EXTENDED_STARTUPINFO_PRESENT matches the provided startup struct.
                 CreateProcessAsUserW(
-                    token.raw(),
+                    h_token,
                     application_name.as_ptr(),
                     command_line.as_mut_ptr(),
                     std::ptr::null(),
@@ -954,11 +971,11 @@ pub(super) fn spawn_windows_child(
         };
         startup_info.cb = size_of::<STARTUPINFOW>() as u32;
 
-        if !token.0.is_null() {
+        if !h_token.is_null() {
             unsafe {
                 // SAFETY: All pointers are valid for the duration of the call.
                 CreateProcessAsUserW(
-                    token.raw(),
+                    h_token,
                     application_name.as_ptr(),
                     command_line.as_mut_ptr(),
                     std::ptr::null(),
