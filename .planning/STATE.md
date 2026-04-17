@@ -27,7 +27,7 @@ progress:
 Phase: 13 (v1-human-verification-uat) — EXECUTING
 Plan: 1 of 1
 Status: Executing Phase 13
-Last activity: 2026-04-17 -- Completed quick task 260417-kem: Fix EnvVarGuard migration
+Last activity: 2026-04-17 -- Completed quick task 260417-wla: Windows CreateProcess handle UAF fix (Phase 13 UAT unblocker)
 
 ```
 Progress: [██████████] 100% (31/31 plans complete on disk)
@@ -90,6 +90,7 @@ Progress: [██████████] 100% (31/31 plans complete on disk)
 | 260406-ajy | Assess Windows functional equivalence to macOS and Linux | 2026-04-06 | — | [260406-ajy-assess-windows-functional-equivalence-to](./quick/260406-ajy-assess-windows-functional-equivalence-to/) |
 | 260406-bem | Research Windows gaps and create WINDOWS-V2-ROADMAP.md | 2026-04-06 | b67f74a | [260406-bem-research-and-roadmap-windows-gap-closure](./quick/260406-bem-research-and-roadmap-windows-gap-closure/) |
 | 260417-kem | Fix EnvVarGuard migration - migrate 48 flagged tests to EnvVarGuard | 2026-04-17 | 6749494 | [260417-kem-fix-envvarguard-migration-migrate-48-fla](./quick/260417-kem-fix-envvarguard-migration-migrate-48-fla/) |
+| 260417-wla | Fix Windows CreateProcess ERROR_INVALID_HANDLE from temp-drop use-after-close in spawn_windows_child | 2026-04-17 | eb4730c | [260417-wla-fix-windows-createprocess-handle-uaf](./quick/260417-wla-fix-windows-createprocess-handle-uaf/) |
 
 ## Session Continuity
 
