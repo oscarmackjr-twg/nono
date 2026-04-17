@@ -191,6 +191,7 @@ pub fn check_sensitive_path(path_str: &str) -> Result<Option<policy::SensitivePa
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_env::EnvVarGuard;
 
     #[test]
     fn test_check_blocked_command_basic() {
@@ -289,49 +290,26 @@ mod tests {
     #[test]
     fn test_validated_home_falls_back_to_userprofile() {
         let _guard = test_env_lock().lock().expect("env lock");
-        let original_home = std::env::var("HOME").ok();
-        let original_userprofile = std::env::var("USERPROFILE").ok();
-
-        std::env::remove_var("HOME");
-        std::env::set_var("USERPROFILE", r"C:\Users\tester");
+        let _env = EnvVarGuard::set_all(&[
+            ("HOME", "placeholder"),
+            ("USERPROFILE", r"C:\Users\tester"),
+        ]);
+        _env.remove("HOME");
 
         let home = validated_home().expect("USERPROFILE should be accepted on Windows");
         assert_eq!(home, r"C:\Users\tester");
-
-        if let Some(home) = original_home {
-            std::env::set_var("HOME", home);
-        } else {
-            std::env::remove_var("HOME");
-        }
-        if let Some(userprofile) = original_userprofile {
-            std::env::set_var("USERPROFILE", userprofile);
-        } else {
-            std::env::remove_var("USERPROFILE");
-        }
     }
 
     #[cfg(target_os = "windows")]
     #[test]
     fn test_validated_home_ignores_non_absolute_home_when_userprofile_exists() {
         let _guard = test_env_lock().lock().expect("env lock");
-        let original_home = std::env::var("HOME").ok();
-        let original_userprofile = std::env::var("USERPROFILE").ok();
-
-        std::env::set_var("HOME", "/home/user");
-        std::env::set_var("USERPROFILE", r"C:\Users\tester");
+        let _env = EnvVarGuard::set_all(&[
+            ("HOME", "/home/user"),
+            ("USERPROFILE", r"C:\Users\tester"),
+        ]);
 
         let home = validated_home().expect("USERPROFILE should be accepted on Windows");
         assert_eq!(home, r"C:\Users\tester");
-
-        if let Some(home) = original_home {
-            std::env::set_var("HOME", home);
-        } else {
-            std::env::remove_var("HOME");
-        }
-        if let Some(userprofile) = original_userprofile {
-            std::env::set_var("USERPROFILE", userprofile);
-        } else {
-            std::env::remove_var("USERPROFILE");
-        }
     }
 }
