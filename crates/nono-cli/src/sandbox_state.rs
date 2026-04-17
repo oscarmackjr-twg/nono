@@ -351,7 +351,7 @@ pub fn cleanup_stale_state_files() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_env::lock_env;
+    use crate::test_env::{lock_env, EnvVarGuard};
     use tempfile::tempdir;
 
     #[test]
@@ -396,10 +396,10 @@ mod tests {
         std::fs::write(&cap_file, "{}").expect("write cap file");
 
         let _guard = lock_env();
-        let old_tmp = std::env::var_os("TMP");
-        let old_temp = std::env::var_os("TEMP");
-        std::env::set_var("TMP", dir.path());
-        std::env::set_var("TEMP", dir.path());
+        let _env = EnvVarGuard::set_all(&[
+            ("TMP", dir.path().to_str().expect("utf8 path")),
+            ("TEMP", dir.path().to_str().expect("utf8 path")),
+        ]);
 
         let validated = validate_cap_file_path(cap_file.to_str().expect("utf8 path"))
             .expect("runtime temp cap file should validate");
@@ -407,14 +407,5 @@ mod tests {
             validated,
             cap_file.canonicalize().expect("canonical cap file path")
         );
-
-        match old_tmp {
-            Some(value) => std::env::set_var("TMP", value),
-            None => std::env::remove_var("TMP"),
-        }
-        match old_temp {
-            Some(value) => std::env::set_var("TEMP", value),
-            None => std::env::remove_var("TEMP"),
-        }
     }
 }
