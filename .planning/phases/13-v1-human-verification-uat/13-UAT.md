@@ -1,5 +1,5 @@
 # --- (YAML frontmatter start)
-status: pending
+status: partial
 phase: 13-v1-human-verification-uat
 source:
   - .planning/phases/05-windows-detach-readiness-fix/05-VERIFICATION.md
@@ -7,12 +7,12 @@ source:
   - .planning/phases/09-wfp-port-level-proxy-filtering/09-VERIFICATION.md
   - .planning/phases/11-runtime-capability-expansion/11-VERIFICATION.md
 host:
-  windows_build: ""
-  admin: ""
-  nono_binary_commit: ""
-  wfp_service_running: ""
-started: ""
-updated: ""
+  windows_build: "10.0.26200 (Windows 11 Enterprise)"
+  admin: "no"
+  nono_binary_commit: "e094994 (includes handle UAF fix eb4730c and restricted-token WRITE_RESTRICTED fix e094994)"
+  wfp_service_running: "no (nono-wfp-service not registered)"
+started: "2026-04-17T21:18:00Z"
+updated: "2026-04-17T23:40:00Z"
 # --- (YAML frontmatter end)
 
 # Phase 13 — v1.0 Human Verification UAT Runbook
@@ -79,14 +79,38 @@ wave, any order is acceptable.
   Record the session ID from output.
 - then: `nono attach <session-id-from-above>`
 - expected: Connects to running session, shows ping output. Ctrl-C to detach.
-- result: [pending]
+- result: **blocked**
+- notes: Two issues surfaced on first attempt.
+  1. Runbook flag typo: `--detach` is the wrong name — real CLI flag is
+     `--detached` (see `nono run --help`; `detach` is a separate subcommand).
+  2. Even with `--detached --allow-cwd`, the detached supervisor child dies
+     with NT status `0xC0000142` STATUS_DLL_INIT_FAILED. This is the residual
+     Bug #3 from debug session `windows-supervised-exec-cascade`: after the
+     restricted-token `WRITE_RESTRICTED` fix (`e094994`) the blanket
+     `STATUS_ACCESS_DENIED` is gone, but detached console-child DLL
+     initialization still fails. Root cause not yet pinned — tracked for v1.0
+     fix phase. GUI apps reportedly work in detached mode; only console apps
+     fail. Blocks downstream items P07-HV-3, P11-HV-1, P11-HV-3.
 
 #### 2. P07-HV-2: Setup help text
 - command: `nono setup --check-only`
 - expected: Output contains the string `'nono wrap' is available on Windows
   with Job Object + WFP enforcement (no exec-replace, unlike Unix)` and does
   NOT contain `remain intentionally unavailable`.
-- result: [pending]
+- result: **fail**
+- notes: Setup output is self-contradictory. The enforcement-summary stanza
+  says: `... nono shell is supported on Windows 10 build 17763+ via ConPTY
+  (CreatePseudoConsole); the supervisor stays alive as Job Object owner.
+  nono wrap is also supported.` — consistent with the expected semantics.
+  But the closing "usage guidance" stanza still emits: `Live 'nono shell'
+  and 'nono wrap' remain intentionally unavailable on Windows; use their
+  --dry-run forms to inspect policy.` — directly contradicts the earlier
+  stanza AND violates the acceptance criterion. The expected canonical
+  string `'nono wrap' is available on Windows with Job Object + WFP
+  enforcement (no exec-replace, unlike Unix)` is absent entirely. Fix
+  belongs in `crates/nono-cli/src/setup.rs` — scrub the stale "remain
+  intentionally unavailable" line and add the canonical wrap-availability
+  sentence.
 
 #### 3. P09-HV-2: WFP port integration test
 - prereq: Admin confirmed (pre-flight step 4), WFP service running (pre-flight
@@ -96,7 +120,14 @@ wave, any order is acceptable.
 - expected: `wfp_port_permit_allows_real_tcp_connection` passes — TCP connect
   to ephemeral allowed port succeeds, TCP connect to blocked port fails. Test
   exits 0.
-- result: [pending]
+- result: **pass**
+- notes: `test wfp_port_permit_allows_real_tcp_connection ... ok`. Output:
+  `1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out`. The test self-
+  asserts both directions (allowed-port connect succeeds; blocked-port
+  connect fails) internally, so no manual split was required. Ran as
+  non-admin with `nono-wfp-service` NOT registered — the test uses a
+  self-contained WFP sublayer setup that does not require the production
+  service, which is why it still passes in this environment.
 
 ### Wave 2 — Depends on P05-HV-1 creating a session
 
@@ -109,7 +140,10 @@ wave, any order is acceptable.
     deleting
 - expected: Each reads from `~/.config/nono/sessions/` and returns real data.
   No `UnsupportedPlatform` error.
-- result: [pending]
+- result: **blocked**
+- notes: Prereq P05-HV-1 is blocked by Bug #3 (detached-path DLL init
+  failure), so no live session ID exists to feed these commands. Unblocks
+  automatically once Bug #3 is resolved.
 
 ### Wave 3 — Independent items
 
@@ -117,7 +151,14 @@ wave, any order is acceptable.
 - command: `nono wrap -- cmd.exe /c exit 42`
 - then: `echo %ERRORLEVEL%` (cmd.exe) or `$LASTEXITCODE` (PowerShell)
 - expected: Output is `42`. No panic, no `unreachable!()` error.
-- result: [pending]
+- result: **pass**
+- notes: `$LASTEXITCODE` = `42` in PowerShell. No panic, no `unreachable!()`.
+  The CWD prompt fired interactively (`Share \\?\C:\Users\omack\Nono with
+  read access? [y/N]`) and the user answered `Y`. Strategy reported as
+  `Direct` (expected for `wrap`). Cosmetic: cmd.exe emits `UNC paths are
+  not supported. Defaulting to Windows directory.` because the CWD is
+  presented with the `\\?\` extended-path prefix — does not affect the
+  exit-code result but worth noting for future UX polish.
 
 #### 6. P09-HV-1: Proxy env var injection
 - prereq: Admin confirmed, WFP service (`nono-wfp-service`) running, a network
@@ -129,9 +170,20 @@ wave, any order is acceptable.
   `nono run --proxy-only -- powershell -c "Get-ChildItem Env:"`)
 - expected: Child environment output contains
   `HTTPS_PROXY=http://localhost:<port>` and `NONO_PROXY_TOKEN=<token>`.
-- result: [pending]
-- note: If proxy configuration is not available or too complex to set up, mark
-  `blocked` with reason.
+- result: **blocked**
+- notes: Two independent reasons this item cannot run as written.
+  1. **Runbook flag bug:** `--proxy-only` does not exist on `nono run` in
+     v0.30.1. CLI response: `error: unexpected argument '--proxy-only'
+     found. tip: a similar argument exists: '--proxy-allow'`. Real proxy
+     plumbing uses `--network-profile <PROFILE>` + `--credential` +
+     `--upstream-proxy <HOST:PORT>` (see `nono run --help`). Runbook needs
+     correction before P09-HV-1 can be executed.
+  2. **Environment:** Tester is a Standard User (pre-flight admin = no)
+     and `nono-wfp-service` is NOT registered (WFP readiness: "missing
+     service"). Proxy-side env injection requires the WFP service to
+     enforce the redirect to the credential proxy.
+  Needs both a runbook fix AND admin + `nono setup --install-wfp-service`
+  before this can be re-attempted.
 
 ### Wave 4 — Complex setup items (run last)
 
@@ -220,7 +272,14 @@ $pipe.Dispose()
 - expected: The supervisor console displays `[nono] Grant access? [y/N]`
   prompt. Replying `y` returns a grant response to the child. Replying `N`
   returns a Denied response.
-- result: [pending]
+- result: **blocked**
+- notes: Blocked by Bug #3 residual (STATUS_DLL_INIT_FAILED). A supervised
+  PowerShell child cannot initialize under the detached + restricted-token
+  path at HEAD. Unblocks automatically once Bug #3 is resolved. The
+  PowerShell client script itself was already corrected in this runbook
+  (commit `c44901b`) — rendezvous-file read + flat `CapabilityRequest` +
+  `Request` envelope + length-prefix framing — so the script is ready to
+  use the moment the supervised path works.
 
 #### 8. P11-HV-3: Token leak audit under RUST_LOG=trace
 - prereq: Same supervised session setup as P11-HV-1, or run a fresh one.
@@ -235,7 +294,10 @@ $pipe.Dispose()
   not a substring. A substring could match unrelated hex strings in the log.
 - cleanup: After verification, delete `trace-output.txt` — it may contain
   sensitive debug data (T-13-01).
-- result: [pending]
+- result: **blocked**
+- notes: Same blocker as P11-HV-1 — needs a working `nono run --supervised`
+  detached path, which fails at DLL initialization (Bug #3). Re-attempt
+  after Bug #3 is fixed.
 
 #### 9. P11-HV-2: Low Integrity child pipe connectivity (WAIVER CANDIDATE)
 - rationale for waiver: Spawning a child at Low Integrity on Windows requires
@@ -248,7 +310,13 @@ $pipe.Dispose()
   a single process. Cross-boundary LI access requires specialized tooling
   outside the UAT scope.
 - recommendation: Waive with documented SDDL evidence. Mark `waived`.
-- result: [pending]
+- result: **waived**
+- notes: Waiver accepted per documented rationale. SDDL
+  `D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)S:(ML;;NW;;;LW)` verified by code
+  inspection in 11-VERIFICATION.md; `test_bind_low_integrity_roundtrip`
+  unit test exercises bind/connect within a single process as
+  intra-process evidence. Cross-boundary LI access requires out-of-scope
+  tooling.
 
 #### 10. P05-HV-2: WaitNamedPipeW fail-closed path (WAIVER CANDIDATE)
 - rationale for waiver: Triggering a specific Windows API error code (other
@@ -260,7 +328,12 @@ $pipe.Dispose()
   production scenario triggers this path without injecting faults.
 - recommendation: Waive with documented code-inspection evidence. Mark
   `waived`.
-- result: [pending]
+- result: **waived**
+- notes: Waiver accepted per documented rationale. The fail-closed branch
+  at `startup_runtime.rs:88-93` returning `Err(NonoError::SandboxInit(...))`
+  for any unexpected `WaitNamedPipeW` error is verified by code inspection
+  (05-VERIFICATION.md Truth #3). Fault-injection to reach this branch is
+  out of scope for a human UAT.
 
 ---
 
@@ -268,19 +341,120 @@ $pipe.Dispose()
 
 ```
 total: 10
-passed: 0
-issues: 0
-pending: 10
+passed: 2
+issues: 1
+pending: 0
 skipped: 0
-blocked: 0
-waived: 0
+blocked: 5
+waived: 2
 ```
+
+Disposition:
+- **pass (2):** P07-HV-1, P09-HV-2
+- **fail (1):** P07-HV-2 (help text drift)
+- **blocked (5):** P05-HV-1, P07-HV-3, P09-HV-1, P11-HV-1, P11-HV-3
+- **waived (2):** P05-HV-2, P11-HV-2
+
+Upstream VERIFICATION.md promotion cannot happen for any phase yet: P07
+has 1/3 fail, P09 has 1/2 blocked, P05 has the key supervised item
+blocked, and P11 has 2/3 blocked. A follow-up v1.0 fix phase is required
+before Task 3 can promote any upstream status from `human_needed` to
+`passed`.
 
 ---
 
 ## Gaps
 
-[none — populate this section if any item fails]
+Three gaps block v1.0 milestone archive. All three should be addressed
+in a dedicated v1.0 fix phase (tentative label: Phase 14 — v1.0 Fix
+Pass) before Task 3 of this phase (upstream VERIFICATION.md promotion)
+runs.
+
+### Gap 1 — Bug #3 residual: `STATUS_DLL_INIT_FAILED (0xC0000142)` on detached console-child launches
+- truth: `nono run --detached --allow-cwd -- ping -t 127.0.0.1` should
+  return a session ID and run the command in the background under a
+  supervisor.
+- status: failed
+- reason: The detached supervisor subprocess reaches CreateProcess and
+  the restricted token is now valid (fixed in `e094994`), but the
+  console-application grandchild fails DLL initialization with NT status
+  `0xC0000142`. Not reproducible on GUI applications (reportedly
+  unaffected per debug session notes). Likely interaction between
+  `WRITE_RESTRICTED` token + `DETACHED_PROCESS` supervisor + null stdio
+  + console-app DLL init sequence.
+- severity: major (blocks 4 UAT items and `--detached` is a core feature
+  of the v1.0 Windows Parity milestone)
+- missing: Root cause not pinned. Debug session file
+  `.planning/debug/windows-supervised-exec-cascade.md` captured three
+  candidate directions for investigation:
+  1. Add the session SID as a token *group* (not restricting SID) so WFP
+     `FWPM_CONDITION_ALE_USER_ID` still matches but no access-check
+     restriction is applied.
+  2. Use `CreateProcessAsUser` with the unrestricted supervisor token
+     and rely on Job Object containment + WFP AppID-based filtering for
+     the detached code path.
+  3. Investigate whether the detached supervisor needs to attach itself
+     to a console before spawning a console grandchild.
+- blocks: P05-HV-1, P07-HV-3, P11-HV-1, P11-HV-3
+- fix target: Phase 14 plan 01.
+
+### Gap 2 — `nono setup --check-only` help text self-contradicts
+- truth: On Windows the setup output must advertise `'nono wrap' is
+  available on Windows with Job Object + WFP enforcement (no
+  exec-replace, unlike Unix)` and must NOT emit the legacy "remain
+  intentionally unavailable" line (Phase 07 acceptance).
+- status: failed
+- reason: Two stanzas in the output directly contradict each other. The
+  enforcement-summary stanza says `nono wrap is also supported`. The
+  trailing usage-guidance stanza still says `Live 'nono shell' and 'nono
+  wrap' remain intentionally unavailable on Windows; use their --dry-run
+  forms to inspect policy.` The canonical "available on Windows with
+  Job Object + WFP enforcement" sentence is absent.
+- severity: minor (documentation drift only — `nono wrap` runs correctly
+  per P07-HV-1 pass), but it's a real test failure against the Phase 07
+  acceptance criterion and must be fixed before P07's VERIFICATION.md
+  can be promoted.
+- missing: `crates/nono-cli/src/setup.rs` — scrub the stale "remain
+  intentionally unavailable" branch for Windows and add the canonical
+  wrap-availability sentence.
+- blocks: P07-HV-2
+- fix target: Phase 14 plan 02.
+
+### Gap 3 — P09-HV-1 runbook command uses nonexistent CLI flag
+- truth: The runbook should specify a working CLI invocation that
+  triggers proxy credential injection.
+- status: failed (procedural — runbook defect)
+- reason: `nono run --proxy-only` does not exist in nono-cli v0.30.1.
+  CLI rejects with `error: unexpected argument '--proxy-only' found`.
+  Real proxy plumbing uses `--network-profile <PROFILE>` + `--credential
+  <SERVICE>` + `--upstream-proxy <HOST:PORT>` (see `nono run --help`).
+- severity: minor (procedural — no code change needed; just correct the
+  runbook so the tester can actually run the item), but compounded by
+  environment (Standard User + no WFP service) means P09-HV-1 needs
+  both a runbook fix AND an admin + WFP-registered host to re-attempt.
+- missing: Correct the P09-HV-1 command in this runbook. Provide a
+  concrete invocation using `--network-profile` or equivalent. Also
+  note the prerequisite `nono setup --install-wfp-service` step for
+  Standard User testers.
+- blocks: P09-HV-1
+- fix target: Phase 14 plan 03 (runbook correction + admin reproducer
+  + 2nd-pass UAT run of P09-HV-1).
+
+### Additional observations (non-blocking)
+
+- **Stale state files:** 55 `.nono-<hex>.json` files in the project root
+  (CWD of the PowerShell session) produce 55 `DEBUG Skipping state file
+  with invalid PID` lines on every `nono` invocation. Cleanup mechanism
+  for dead sessions is missing or incomplete. Worth a one-line follow-up
+  in Phase 14 (or a `gsd-note`).
+- **UNC path warning:** `CMD.EXE was started with the above path as the
+  current directory. UNC paths are not supported. Defaulting to Windows
+  directory.` The `\\?\`-prefixed CWD trips cmd.exe's UNC guard. Not
+  blocking any UAT item but is a UX wart worth stripping the `\\?\`
+  prefix before passing CWD to `CreateProcess`.
+- **Runbook flag typo for P05-HV-1:** `--detach` specified in the
+  runbook — real flag is `--detached`. User worked around it. Should be
+  corrected as part of the Phase 14 runbook fixes.
 
 ---
 
