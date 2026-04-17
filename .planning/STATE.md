@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: Human Verification UAT
-status: verifying
+status: executing
 stopped_at: Completed 12-03-PLAN.md verification — CI gate FAILS on pre-existing clippy errors (not Phase 12 regression); follow-up plan required before Phase 13
-last_updated: "2026-04-11T22:32:26.933Z"
-last_activity: 2026-04-11
+last_updated: "2026-04-12T22:10:06.056Z"
+last_activity: 2026-04-12
 progress:
   total_phases: 13
   completed_phases: 11
-  total_plans: 31
+  total_plans: 32
   completed_plans: 31
-  percent: 100
+  percent: 97
 ---
 
 # Project State: nono - Windows Gap Closure
@@ -20,14 +20,14 @@ progress:
 
 **Core Value:** Every nono command that works on Linux/macOS should work on Windows with equivalent security guarantees, or be explicitly documented as intentionally unsupported with a clear rationale.
 
-**Current Focus:** Phase 12 — milestone-bookkeeping-cleanup (verification complete; follow-up plan required)
+**Current Focus:** Phase 13 — v1-human-verification-uat
 
 ## Current Position
 
-Phase: 12 (milestone-bookkeeping-cleanup) — VERIFICATION COMPLETE WITH BLOCKER
-Plan: 3 of 3 (executed)
-Status: Plan 12-03 verification finished — `make ci` FAILS on 48 pre-existing `disallowed_methods` clippy errors (introduced by revert `cf5a60a` on 2026-04-10, predates Phase 12). Phase 12's own edits are clippy- and fmt-clean. A follow-up plan is required to migrate flagged tests to `EnvVarGuard` before Phase 12 can claim success criterion 6 and before Phase 13 UAT archive can proceed.
-Last activity: 2026-04-11
+Phase: 13 (v1-human-verification-uat) — EXECUTING
+Plan: 1 of 1
+Status: Executing Phase 13
+Last activity: 2026-04-17 -- Completed quick task 260417-kem: Fix EnvVarGuard migration
 
 ```
 Progress: [██████████] 100% (31/31 plans complete on disk)
@@ -79,7 +79,7 @@ Progress: [██████████] 100% (31/31 plans complete on disk)
 
 ### Blockers
 
-- **CI gate broken on `windows-squash` (pre-existing, NOT caused by Phase 12):** 48 `clippy::disallowed_methods` errors across `crates/nono-cli/src/profile/mod.rs` (30), `crates/nono-cli/src/config/mod.rs` (12), `crates/nono-cli/src/sandbox_state.rs` (6). Root cause: revert commit `cf5a60a` (2026-04-10) undid a batch of `EnvVarGuard` migrations while leaving the `disallowed_methods` lint active. Required action: quick plan to migrate the flagged tests to `crate::test_env::EnvVarGuard::set()` / `::remove()`, then re-run `cargo clippy --all-targets --all-features -- -D warnings -D clippy::unwrap_used`. Blocks Phase 12 success criterion 6 and Phase 13 UAT archive. Surfaced by Phase 12 Plan 03 verification (2026-04-11).
+(none)
 
 ### Quick Tasks Completed
 
@@ -89,10 +89,11 @@ Progress: [██████████] 100% (31/31 plans complete on disk)
 | 260405-vjj | Fix PR 555 DCO signoffs, commit PR 583 review feedback fixes, push current changes | 2026-04-06 | 4880c03 | [260405-vjj-fix-pr-555-signoffs-and-merge-conflicts-](./quick/260405-vjj-fix-pr-555-signoffs-and-merge-conflicts-/) |
 | 260406-ajy | Assess Windows functional equivalence to macOS and Linux | 2026-04-06 | — | [260406-ajy-assess-windows-functional-equivalence-to](./quick/260406-ajy-assess-windows-functional-equivalence-to/) |
 | 260406-bem | Research Windows gaps and create WINDOWS-V2-ROADMAP.md | 2026-04-06 | b67f74a | [260406-bem-research-and-roadmap-windows-gap-closure](./quick/260406-bem-research-and-roadmap-windows-gap-closure/) |
+| 260417-kem | Fix EnvVarGuard migration - migrate 48 flagged tests to EnvVarGuard | 2026-04-17 | 6749494 | [260417-kem-fix-envvarguard-migration-migrate-48-fla](./quick/260417-kem-fix-envvarguard-migration-migrate-48-fla/) |
 
 ## Session Continuity
 
 **Current Milestone:** v2.0 Windows Gap Closure
-**Last Activity:** 2026-04-11
-**Stopped At:** Completed 12-03-PLAN.md verification — CI gate FAILS on pre-existing clippy errors (not Phase 12 regression); follow-up plan required before Phase 13
+**Last Activity:** 2026-04-17
+**Stopped At:** Completed quick task 260417-kem (EnvVarGuard migration) — CI blocker resolved, clippy passes clean
 **Next Steps:** Phase 08 (ConPTY Shell) or Phase 10 (ETW-Based Learn Command) — both are plannable now. Phase 09 human-verification items noted in Todos above.
