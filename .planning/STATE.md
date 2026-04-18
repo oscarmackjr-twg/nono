@@ -1,14 +1,14 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.0
-milestone_name: Human Verification UAT
-status: ready-to-archive
-stopped_at: "Phase 14 closed 2026-04-18 with carry-forward (2/3 plans done; 14-01 escalated to Phase 15 as v1.0-known-issue per user ship-with-known-issue decision). Phase 13 UAT resolved with terminal verdicts on all 10 items (3 pass, 7 waived). v1.0 Windows Parity milestone is ready for archival."
-last_updated: "2026-04-18T02:45:00.000Z"
+milestone: v2.0
+milestone_name: Windows Gap Closure
+status: shipped
+stopped_at: "v2.0 Windows Gap Closure archived 2026-04-18. Internal planning drifted to calling this milestone 'v1.0 Windows Parity' — the formal name per PROJECT.md/REQUIREMENTS.md is v2.0 (v1.0 was the 2026-03-31 Windows Alpha, already tagged). Archive files at .planning/milestones/v2.0-*.md. Phase 15 is the first v2.1-candidate phase (detached console + ConPTY investigation); not yet planned."
+last_updated: "2026-04-18T03:00:00.000Z"
 last_activity: 2026-04-18
 progress:
   total_phases: 15
-  completed_phases: 13
+  completed_phases: 14
   total_plans: 35
   completed_plans: 33
   percent: 94
@@ -20,24 +20,30 @@ progress:
 
 **Core Value:** Every nono command that works on Linux/macOS should work on Windows with equivalent security guarantees, or be explicitly documented as intentionally unsupported with a clear rationale.
 
-**Current Focus:** v1.0 milestone ready-to-archive (with documented known-issue). Phase 15 is the first v1.1 phase, investigating the carry-forward bug.
+**Current Focus:** v2.0 Windows Gap Closure SHIPPED 2026-04-18. Archive files at `.planning/milestones/v2.0-*.md`. Phase 15 (candidate v2.1) scoped in ROADMAP; not yet planned.
 
 ## Current Position
 
-Phase: 14 (v1-fix-pass) — COMPLETE with carry-forward 2026-04-18
+Milestone: v2.0 Windows Gap Closure — SHIPPED 2026-04-18 (with documented known-issue carry-forward).
+  - v1.0 Windows Alpha — shipped 2026-03-31 (tag `v1.0`).
+  - v2.0 Windows Gap Closure — shipped 2026-04-18 (tag `v2.0` to be created in the milestone-close workflow).
+
+Phase 14 (v2.0 Fix Pass) — COMPLETE with carry-forward 2026-04-18
   - 14-01: ESCALATED to Phase 15 (code reverted 2026-04-18; both Direction 3 AllocConsole and Direction 2 null-token failed the user smoke gate)
   - 14-02: DONE (setup.rs wrap-availability sentence — commit 8e200f8)
   - 14-03: DONE (runbook typo fixes + 2nd-pass UAT + upstream VERIFICATION.md promotion — commits 647e0a5, 14a9ef0, 6500bb1, 952f8e1)
 
-Phase 13 (v1.0 Human Verification UAT) — RESOLVED 2026-04-18. All 10 items terminal: 3 pass, 7 waived (4 v1.0-known-issue, 1 no-test-fixture, 2 pre-existing).
+Phase 13 (v2.0 Human Verification UAT) — RESOLVED 2026-04-18. All 10 items terminal: 3 pass, 7 waived (4 v2.0-known-issue, 1 no-test-fixture, 2 pre-existing).
 
-Phase 15 (Detached Console + ConPTY Architecture Investigation) — NOT PLANNED. First v1.1 candidate phase.
+Phase 15 (Detached Console + ConPTY Architecture Investigation) — NOT PLANNED. First v2.1 candidate phase.
 
 Next actions:
-  - Archive v1.0 milestone (via `/gsd-complete-milestone` or manual close) — if ready.
-  - Or `/gsd-plan-phase 15` to scope the detached+PTY investigation as the first Phase of v1.1.
+  - `/gsd-plan-phase 15` to scope the detached + ConPTY investigation as the first phase of v2.1.
+  - Or `/gsd-new-milestone` to formally start v2.1.
 
-Last activity: 2026-04-18 -- Phase 14 closed with carry-forward; upstream VERIFICATION.md files promoted.
+Naming note: the phase directories `13-v1-human-verification-uat/` and `14-v1-fix-pass/` and in-phase references to `v1.0-known-issue` are internal naming drift — the formal milestone is v2.0 per PROJECT.md and REQUIREMENTS.md.
+
+Last activity: 2026-04-18 -- v2.0 milestone archived; ROADMAP, PROJECT, MILESTONES, STATE updated; archive files written.
 
 ```
 Progress: [██████████] 100% (31/31 plans complete on disk)

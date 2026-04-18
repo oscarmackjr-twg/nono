@@ -1,235 +1,69 @@
-# Roadmap: Windows Parity Milestone
+# Roadmap: nono Windows Gap Closure
 
-This roadmap outlines the path to functional parity between the Windows implementation of `nono` and its Unix counterparts, focusing on robust lifecycle management, kernel-level networking, and state integrity.
+This roadmap tracks the path to full Windows/Unix parity for `nono`. The v2.0 milestone shipped 2026-04-18; Phase 15 is the first follow-on phase for the one carry-forward known issue.
+
+## Milestones
+
+- ✅ **v1.0 Windows Alpha** — Phases 1–4 (shipped 2026-03-31; tag `v1.0`)
+- ✅ **v2.0 Windows Gap Closure** — Phases 5–14 (shipped 2026-04-18 with v2.0-known-issue carry-forward; tag `v2.0`)
+- 🚧 **Next (unversioned; candidate v2.1)** — Phase 15 (detached console + ConPTY investigation)
 
 ## Phases
 
-- [x] **Phase 1: Windows Control Foundation** - Establish process lifecycle management and basic IPC using Job Objects.
-- [x] **Phase 2: Persistent Sessions (Detach/Attach)** - Enable long-running agent support with persistent background monitoring.
-- [x] **Phase 3: Network Sandboxing (WFP Integration)** - Implement robust, kernel-level network enforcement via Windows Filtering Platform.
-- [x] **Phase 4: State Integrity & Deployment** - Finalize filesystem protection and automated release pipelines for Windows.
-- [x] **Phase 5: Windows Detach Readiness Fix** - Fix run --detach readiness probe on Windows.
-- [x] **Phase 6: WFP Enforcement Activation** - Replace stub with real SID-based WFP activation call.
-- [x] **Phase 7: Quick Wins** - Unblock everyday UX by enabling nono wrap and session log commands on Windows. (completed 2026-04-08)
-- [x] **Phase 8: ConPTY Shell** - Enable interactive nono shell on Windows via ConPTY. (completed 2026-04-10)
-- [x] **Phase 9: WFP Port-Level + Proxy Filtering** - Enable port-granular network policy and proxy credential injection. (completed 2026-04-10)
-- [x] **Phase 10: ETW-Based Learn Command** - Implement nono learn on Windows via Event Tracing for Windows. (completed 2026-04-10)
-- [x] **Phase 11: Runtime Capability Expansion** - (Stretch) Enable sandboxed child to request additional capabilities at runtime. (completed 2026-04-11, human verification pending)
-- [x] **Phase 12: Milestone Bookkeeping Cleanup** - Close planning-trail tech debt from v1.0 audit (checkbox sweep, retro VERIFICATION.md for 04/10, ROADMAP reconciliation, minor code nits). (completed 2026-04-11)
-- [x] **Phase 13: v1.0 Human Verification UAT** - Execute the 10 live-host human-verification items deferred across phases 05, 07, 09, 11 in one Windows session. (resolved 2026-04-18; 2nd-pass verdicts: 3 pass, 7 waived — 4 as v1.0-known-issue carry-forward to Phase 15, 1 as no-test-fixture, 2 pre-existing)
-- [x] **Phase 14: v1.0 Fix Pass** - Close three blocking gaps surfaced by Phase 13 UAT (detached console-child DLL init failure, setup help-text drift, P09 runbook correction) so v1.0 can be archived. (closed 2026-04-18 with 2/3 plans complete: 14-02 text fix landed; 14-03 runbook + UAT bookkeeping landed; 14-01 escalated to Phase 15 as v1.0 documented known issue)
-- [ ] **Phase 15: Detached Console + ConPTY Architecture Investigation** - Investigate why `null token + ConPTY` in a `DETACHED_PROCESS` supervisor still fails DLL init with `0xC0000142`, and deliver either (a) a working architecture that keeps PTY in detached mode, or (b) a gated PTY-disable path for detached mode with explicit stdio trade-offs. Unblocks Phase 14 closure and the 4 Phase 13 UAT items still `blocked`.
+<details>
+<summary>✅ v1.0 Windows Alpha (Phases 1–4) — SHIPPED 2026-03-31</summary>
 
-## Phase Details
+- [x] Phase 1: Windows Control Foundation (3/3 plans) — completed 2026-04-04
+- [x] Phase 2: Persistent Sessions — Detach/Attach (4/4 plans) — completed 2026-04-04
+- [x] Phase 3: Network Sandboxing — WFP Integration (4/4 plans) — completed 2026-04-04
+- [x] Phase 4: State Integrity & Deployment (3/3 plans) — completed 2026-04-05
 
-### Phase 1: Windows Control Foundation (COMPLETED)
-**Goal**: Establish process lifecycle management and basic IPC.
-**Success Criteria**:
-  1. User can list all active `nono` agents on the system via `nono ps`.
-  2. User can terminate an agent and its entire process tree using `nono stop`.
-  3. User can verify if their Windows environment meets the security requirements via `nono setup --check-only`.
-  4. Agent processes are managed via named Job Objects that persist after the initiating CLI process terminates.
+</details>
 
-### Phase 2: Persistent Sessions (Detach/Attach) (COMPLETED)
-**Goal**: Enable long-running agent support with persistent background monitoring.
-**Success Criteria**:
-  1. User can start an agent and return to their shell immediately with `nono run --detach`.
-  2. User can re-attach to the output and input stream of a detached agent with `nono attach`.
-  3. Agent session state is maintained by a background supervisor process across detach/attach cycles.    
+<details>
+<summary>✅ v2.0 Windows Gap Closure (Phases 5–14) — SHIPPED 2026-04-18 with carry-forward</summary>
 
-### Phase 3: Network Sandboxing (WFP Integration) (COMPLETED)
-**Goal**: Implement robust, kernel-level network enforcement via WFP.
-**Success Criteria**:
-  1. User can verify that an agent started with network blocking cannot reach any external or local IP addresses.
-  2. User can selectively allow specific ports (e.g., a local dev server) while blocking all other traffic.
-  3. Network restrictions remain in effect even when the agent is detached and the CLI process is closed. 
+- [x] Phase 5: Windows Detach Readiness Fix (1/1 plan) — completed 2026-04-05
+- [x] Phase 6: WFP Enforcement Activation (2/2 plans) — completed 2026-04-06
+- [x] Phase 7: Quick Wins (2/2 plans) — completed 2026-04-08
+- [x] Phase 8: ConPTY Shell (1/1 plan, UAT-driven) — completed 2026-04-10
+- [x] Phase 9: WFP Port-Level + Proxy Filtering (4/4 plans) — completed 2026-04-10
+- [x] Phase 10: ETW-Based Learn Command (3/3 plans) — completed 2026-04-10
+- [x] Phase 11: Runtime Capability Expansion — stretch (2/2 plans) — completed 2026-04-11
+- [x] Phase 12: Milestone Bookkeeping Cleanup (3/3 plans) — completed 2026-04-11
+- [x] Phase 13: v2.0 Human Verification UAT (1/1 plan) — resolved 2026-04-18 (3 pass, 7 waived; all terminal)
+- [x] Phase 14: v2.0 Fix Pass (2/3 plans, 1 escalated) — complete-with-carry-forward 2026-04-18
 
-### Phase 4: State Integrity & Deployment
-**Goal**: Finalize filesystem protection and automated release pipelines.
-**Depends on**: Phase 1
-**Requirements**: STAT-01, STAT-02, DEPL-01
-**Success Criteria** (what must be TRUE):
-  1. User can create a filesystem snapshot that captures the initial state of a workspace.
-  2. User can run `nono rollback` to undo any unauthorized or accidental file modifications made by an agent.
-  3. Signed `.msi` installers (machine and user) are generated by GitHub Actions, ready for distribution. 
-**Plans**: 3 plans
-Plans:
-- [x] 04-01-PLAN.md - Make Windows rollback capture warning-only on snapshot failure, record rollback availability in session metadata, and add Windows rollback restore coverage.
-- [x] 04-02-PLAN.md - Add WFP startup cleanup plus Event Log reporting and bind the service/event-log install surface to the machine MSI with an MSRV bump.
-- [x] 04-03-PLAN.md - Harden the tag-only Windows signing workflow so both MSIs and the shipped executable are signed and verified before upload.
+Carry-forward → Phase 15: detached-console-grandchild `0xC0000142 STATUS_DLL_INIT_FAILED` bug. Affected UAT items P05-HV-1, P07-HV-3, P11-HV-1, P11-HV-3 waived as `v2.0-known-issue`. See `.planning/milestones/v2.0-ROADMAP.md` for the full v2.0 archive.
 
-### Phase 5: Windows Detach Readiness Fix
-**Goal:** Fix the readiness check in `startup_runtime.rs` so `nono run --detach` works on Windows by probing the Named Pipe instead of a `.sock` file.
-**Requirements:** SUPV-01, SUPV-02
-**Gap Closure:** Closes gaps from v1.0 audit — `startup_runtime.rs:70` platform guard missing, Flow A broken
-**Plans**: 1 plan
-Plans:
-- [x] 05-01-PLAN.md — Add WaitNamedPipeW readiness probe to run_detached_launch()
+</details>
 
-### Phase 6: WFP Enforcement Activation
-**Goal:** Replace the `UnsupportedPlatform` stub in `network.rs` with the real SID-based WFP activation call so WFP network blocking actually engages.
-**Requirements:** NETW-01, NETW-03
-**Gap Closure:** Closes gaps from v1.0 audit — `WfpNetworkBackend::install` stub at `network.rs:1421`, Flow B broken
-**Plans**: 2 plans
-Plans:
-- [x] 06-01-PLAN.md — Wire SID-based WFP enforcement: remove driver check, add session_sid to ExecConfig, plumb through activation request, reconcile launch.rs
-- [x] 06-02-PLAN.md — Add mock pipe unit tests and request serialization snapshot tests for WFP activation path
+### 🚧 Next — candidate v2.1
 
-### Phase 7: Quick Wins
-**Goal**: Users can run `nono wrap` and all three session log commands on Windows with the same UX as Unix.
-**Depends on**: Nothing — can start immediately.
-**Requirements**: WRAP-01, SESS-01, SESS-02, SESS-03
-**Success Criteria** (what must be TRUE):
-  1. `nono wrap <cmd>` executes on Windows with Job Object + WFP enforcement applied; the sandboxed command runs.
-  2. `nono logs <session>`, `nono inspect <session>`, and `nono prune` all read session records from `~/.config/nono/sessions/` on Windows without PTY or Unix-specific dependencies.
-  3. Help text for `nono wrap` on Windows explicitly documents that the supervisor process stays alive as Job Object owner and does not exec-replace the CLI process, distinguishing Windows behavior from Unix.
-  4. `nono prune` refuses to execute when called from within a sandboxed process, matching the Unix reject-if-sandboxed guard.
-**Plans**: 1 plan
-Plans:
-- [x] 07-01-PLAN.md — Fix nono wrap Direct strategy return path and verify session commands
+- [ ] **Phase 15: Detached Console + ConPTY Architecture Investigation** — Deliver either (a) a working token + ConPTY configuration for sandboxed console grandchildren spawned under a `DETACHED_PROCESS` supervisor, or (b) a documented architectural pivot (e.g. gated PTY-disable in detached mode, alternate detached IPC) with explicit functional trade-offs captured. Unblocks Phase 14 closure and the 4 Phase 13 UAT items carried forward as `v2.0-known-issue`.
 
-### Phase 8: ConPTY Shell (COMPLETED)
-**Goal**: Users can launch an interactive shell session inside a Job Object + WFP sandbox on Windows via the ConPTY API.
-**Depends on**: Phase 7 (validates the entry-point guard removal pattern before adding ConPTY complexity)
-**Requirements**: SHELL-01
-**Success Criteria** (what must be TRUE):
-  1. `nono shell` launches an interactive PowerShell or cmd.exe session inside a Job Object + WFP sandbox on Windows 10 build 17763+.
-  2. Terminal resize events sent to the host are forwarded to the child shell via `ResizePseudoConsole`.
-  3. Ctrl-C is forwarded to the child process without terminating the supervisor.
-  4. Running `nono shell` on a Windows build earlier than 17763 produces a clear error message and exits; there is no silent fallback to a non-PTY path.
-  5. Job Object and WFP enforcement apply to the shell child process at the moment of spawn, before `ResumeThread` is called.
-**Plans**: 1 plan
-Plans:
-- [x] 07-01-PLAN.md — Fix nono wrap Direct strategy return path and verify session commands
-**UI hint**: yes
+  **Depends on:** Phase 14 paused state; `.planning/debug/windows-supervised-exec-cascade.md` test matrix; `.planning/phases/14-v1-fix-pass/14-01-SUMMARY.md` post-mortem.
 
-### Phase 9: WFP Port-Level + Proxy Filtering (COMPLETED)
-**Goal**: Users can configure port-granular network policy and route sandboxed agent traffic through a local proxy with credential injection.
-**Depends on**: Nothing — independent of Phases 7 and 8.
-**Requirements**: PORT-01, PROXY-01
-**Success Criteria** (what must be TRUE):
-  1. `--allow-port <N>` creates a WFP permit filter for TCP connections to port N; the port is reachable from inside the sandbox.
-  2. `--proxy-only` routes all sandboxed outbound traffic through the configured proxy port; all other outbound TCP is blocked by WFP.
-  3. Bind and connect port allowlists operate independently; allowing a bind port does not implicitly allow connect, and vice versa.
-  4. `HTTPS_PROXY` and `NONO_PROXY_TOKEN` environment variables are injected into the sandboxed child via `ExecConfig.env_vars`.
-  5. WFP per-port permit filters carry a higher weight than the block-all filter; a real TCP connection test (not merely filter presence) confirms allow-listed ports are reachable.
-**Plans**: 4 plans
-Plans:
-- [x] 09-01-PLAN.md — Remove unsupported markers from compile_network_policy, enable port-level WFP enforcement
-- [x] 09-02-PLAN.md — Add ProxyOnly pre-flight guard in execution_runtime.rs
-- [x] 09-03-PLAN.md — Integration test: real TCP connection through WFP allow-listed port
-- [x] 09-04-PLAN.md — Gap closure: replace stale test + fix Windows Direct exit-code panic
+  **Scope context:** Phase 14 plan 14-01 established empirically that the ONE working detached-mode configuration is `null token + no PTY`. The three paths tried in 14-01 (TokenGroups promotion, AllocConsole, null token with PTY still live) all failed the smoke gate. Fully matching the working row requires architecture changes to PTY wiring in `crates/nono-cli/src/supervised_runtime.rs` and the ConPTY attribute setup in `spawn_windows_child`.
 
-### Phase 10: ETW-Based Learn Command
-**Goal**: Users can run `nono learn <cmd>` on Windows to capture file and network access patterns, producing output compatible with Unix learn tooling.
-**Depends on**: Nothing — fully independent.
-**Requirements**: LEARN-01
-**Success Criteria** (what must be TRUE):
-  1. `nono learn <cmd>` emits file paths in Win32 format (`C:\...`), not NT namespace format (`\Device\HarddiskVolume3\...`); existing Unix profile tooling can consume the output without modification.
-  2. File I/O events (read, write, create) and network events (TCP connect, accept) are both captured and included in output.
-  3. Running `nono learn` without administrator privilege produces a clear, actionable error message and exits non-zero; it does not exit 0 with empty output.
-  4. The ETW library choice (`ferrisetw` vs direct `windows-sys` bindings) is documented with rationale before any ETW code is written.
-**Plans**: 3 plans
-Plans:
-- [x] 10-01-PLAN.md — Foundation: add ferrisetw + ETW feature, create learn_windows module scaffold, wire dispatch and tests
-- [x] 10-02-PLAN.md — ETW consumer: process tree tracking, file event capture (D-04 Option B), full run_learn orchestration
-- [x] 10-03-PLAN.md — Network events: Kernel-Network provider, TcpIp handlers, Windows integration test, phase close-out
-
-### Phase 11: Runtime Capability Expansion
-**Goal**: A sandboxed child process can request additional capabilities from the supervisor at runtime via the named-pipe IPC channel, with user approval and session token authentication.
-**Depends on**: Nothing — named-pipe supervisor IPC is in place from v1.0.
-**Requirements**: TRUST-01
-**Success Criteria** (what must be TRUE):
-  1. A sandboxed child process can send a `RequestCapability` JSON message to the supervisor's named pipe and receive a grant or deny response.
-  2. The supervisor presents the capability request to the user for interactive approval before any grant is issued; no capability is granted silently.
-  3. Capability requests that do not include a valid session token are denied immediately using a constant-time comparison; the token is never written to any log level.
-  4. The existing deny-all fallback (`WindowsSupervisorDenyAllApprovalBackend`) remains active and keeps the system secure when this feature is disabled or unavailable.
-**Plans**: 2 plans
-Plans:
-- [ ] 11-01-PLAN.md — Core IPC wiring: session_token field, low-integrity SACL pipe, constant-time token check, capability pipe server, env var injection
-- [ ] 11-02-PLAN.md — TerminalApproval Windows CONIN$ branch + handler test suite with audit redaction regression
-
-### Phase 12: Milestone Bookkeeping Cleanup
-**Goal**: Close the planning-trail and minor-code tech debt identified by `v1.0-MILESTONE-AUDIT.md` so the milestone can be archived cleanly.
-**Depends on**: Nothing — pure bookkeeping + small code fixes.
-**Requirements**: None (closes tech debt on existing satisfied requirements)
-**Gap Closure**: Closes tech_debt items from v1.0 audit (no structural gaps).
-**Success Criteria** (what must be TRUE):
-  1. REQUIREMENTS.md v2.0 checkboxes (WRAP-01, SESS-01/02/03, SHELL-01, PORT-01, PROXY-01, LEARN-01, TRUST-01) reflect actual satisfaction state; traceability table Status column matches.
-  2. ROADMAP.md progress table line 162 shows Phase 11 as `2/2 Complete` (consistent with the body `[x]` marker).
-  3. `.planning/phases/04-state-integrity-deployment/04-VERIFICATION.md` and `.planning/phases/10-etw-based-learn-command/10-VERIFICATION.md` exist and retroactively document phase-level verification against plan SUMMARYs.
-  4. `crates/nono/src/sandbox/windows.rs` no longer contains the stale `placeholder` module doc comment.
-  5. The `#[ignore]`d WFP port integration test no longer hardcodes a loopback port that panics on collision; it either binds an ephemeral port or skips gracefully.
-  6. `make ci` still passes after the code changes.
-**Plans**: 3 plans
-Plans:
-- [x] 12-01-PLAN.md — Planning-trail fixes: flip v2.0 REQUIREMENTS.md checkboxes, reconcile ROADMAP Phase 11 row, create retro 04/10 VERIFICATION.md
-- [x] 12-02-PLAN.md — Code fixes: remove stale placeholder module doc from sandbox/windows.rs; replace hardcoded ports in wfp_port_integration.rs with ephemeral bind
-- [x] 12-03-PLAN.md — CI gate: run make ci and confirm no regression
-
-### Phase 13: v1.0 Human Verification UAT
-**Goal**: Execute all deferred human-verification items from v1.0 on a real Windows host in one bundled UAT pass, so every `human_needed` VERIFICATION.md can be resolved before milestone archive.
-**Depends on**: Phase 12 (clean planning trail first)
-**Requirements**: None (resolves human-verification debt on WRAP/SESS/SHELL/PORT/PROXY/TRUST requirements)
-**Gap Closure**: Closes the 10 live-host verification items tracked in the v1.0 audit `tech_debt` frontmatter.
-**Success Criteria** (what must be TRUE):
-  1. Phase 05 items verified: live `nono run --detach` + `nono attach` cycle succeeds on Windows; fail-closed error path triggers when the Named Pipe readiness probe times out.
-  2. Phase 07 items verified: `nono wrap` propagates child exit code; `nono setup` help text documents Windows supervisor-stays-alive behavior; `nono logs`/`inspect`/`prune` round-trip against a real Windows session.
-  3. Phase 09 items verified: `HTTPS_PROXY` and `NONO_PROXY_TOKEN` are present in the sandboxed child's environment under `--proxy-only`; `cargo test -p nono-cli --test wfp_port_integration -- --ignored` passes under admin with `nono-wfp-service` running.
-  4. Phase 11 items verified: end-to-end supervised run shows the `[nono] Grant access?` prompt on a real Windows console via CONIN$; a Low Integrity child successfully connects to the capability pipe across the SACL boundary; `RUST_LOG=trace` output under a real subscriber contains no session-token material.
-  5. Each verified item is recorded in a `13-UAT.md` log with host details (Windows build, admin status), command invocation, observed output, and pass/fail verdict.
-  6. On completion, each upstream phase's VERIFICATION.md status moves from `human_needed` to `passed` (or a gap is filed if any item fails).
-**Plans**: 1 plan
-Plans:
-- [ ] 13-01-PLAN.md — Write UAT runbook, human executes tests, update upstream VERIFICATION.md files
-
-### Phase 14: v1.0 Fix Pass
-**Goal**: Close the three blocking gaps surfaced by Phase 13 UAT so the v1.0 Windows Parity milestone can be archived with every VERIFICATION.md honestly promoted to `passed`.
-**Depends on**: Phase 13 (UAT verdicts and gap list drive this phase's scope)
-**Requirements**: None new (fixes defects against existing v1.0 requirements — WRAP on Windows, detached sessions on Windows, setup check-only output contract).
-**Gap Closure**: Closes the three gaps filed in `13-UAT.md` after the partial UAT pass on 2026-04-17.
-**Success Criteria** (what must be TRUE):
-  1. `nono run --detached --allow-cwd -- <console-cmd>` successfully starts a background session on Windows. The detached supervisor no longer exits with NT status `0xC0000142` (STATUS_DLL_INIT_FAILED); a sandboxed console-child (e.g. `ping -t 127.0.0.1`) initializes and runs. Low-Integrity isolation for the grandchild is preserved — fix does NOT widen security.
-  2. `nono setup --check-only` output on Windows contains the canonical sentence `'nono wrap' is available on Windows with Job Object + WFP enforcement (no exec-replace, unlike Unix)` and does NOT contain `remain intentionally unavailable`. The two stanzas in `crates/nono-cli/src/setup.rs` are reconciled — no self-contradiction.
-  3. Phase 13 runbook `13-UAT.md` is corrected: P09-HV-1 uses real CLI flags (`--network-profile` / `--credential` / `--upstream-proxy`), not the nonexistent `--proxy-only`. P05-HV-1 uses `--detached`, not the typoed `--detach`.
-  4. A second UAT pass runs the 5 previously-blocked items (P05-HV-1, P07-HV-3, P09-HV-1, P11-HV-1, P11-HV-3) and the 1 previously-failed item (P07-HV-2). All reach a terminal `pass` / `fail` / `waived` verdict (no `blocked`).
-  5. Upstream VERIFICATION.md files (05, 07, 09, 11) are promoted from `human_needed` to `passed` per Phase 13 Task 3 outcome handling.
-  6. `make ci` stays green (no new warnings, no new test failures, existing pre-existing failures documented in STATE.md unchanged).
-**Plans**: 3 plans
-Plans:
-- [!] 14-01-PLAN.md — Fix Bug #3: detached console-child STATUS_DLL_INIT_FAILED. **ESCALATED OUT OF SCOPE.** Both code directions (Direction 3 AllocConsole, Direction 2 null token) failed the user smoke-gate on 2026-04-18. Direction 1 (session SID as TokenGroups) was infeasible pre-commit. All 14-01 code changes reverted (`bd55893`, `1980df5`). Real fix requires PTY + detached-supervisor architecture work deferred to a follow-up phase. See `14-01-SUMMARY.md` for the full post-mortem and the debug-doc matrix pointing to "null token + no PTY" as the true working configuration.
-- [x] 14-02-PLAN.md — Fix `setup --check-only` help-text drift in `crates/nono-cli/src/setup.rs`: add the canonical wrap-availability sentence; remove the stale "remain intentionally unavailable" Windows branch.
-- [x] 14-03-PLAN.md — Correct Phase 13 runbook (`13-UAT.md` P09-HV-1 command + P05-HV-1 flag typo); re-ran 6 target items on admin host with `nono-wfp-service` registered (2nd-pass UAT 2026-04-18); promoted 4 upstream VERIFICATION.md files per outcome-handling matrix. 2nd-pass verdicts: P07-HV-2 `fail→pass` (14-02 fix verified); P05-HV-1/P07-HV-3/P11-HV-1/P11-HV-3 waived as `v1.0-known-issue` (Bug #3 residual → Phase 15); P09-HV-1 waived as `no-test-fixture` (runbook fix verified). 09-VERIFICATION.md and 11-VERIFICATION.md promoted `human_needed → passed`.
-
-### Phase 15: Detached Console + ConPTY Architecture Investigation
-**Goal**: Deliver either (a) a working token + ConPTY configuration for sandboxed console grandchildren spawned under a `DETACHED_PROCESS` supervisor, or (b) a documented architectural pivot (e.g. gated PTY-disable in detached mode, alternate detached IPC) with explicit functional trade-offs captured. Unblocks Phase 14 closure and Phase 13 UAT items `P05-HV-1`, `P07-HV-3`, `P11-HV-1`, `P11-HV-3`.
-**Depends on**: Phase 14 paused state; `.planning/debug/windows-supervised-exec-cascade.md` test matrix; `.planning/phases/14-v1-fix-pass/14-01-SUMMARY.md` post-mortem (Direction 1/2/3 failures).
-**Scope context**: Phase 14 plan 14-01 established empirically that the ONE working detached-mode configuration from the debug matrix is `null token + no PTY`. The three paths tried in 14-01 (Direction 1 TokenGroups promotion, Direction 3 AllocConsole, Direction 2 null token with PTY still live) all failed. Fully matching the working row requires architecture changes to PTY wiring in `crates/nono-cli/src/supervised_runtime.rs` and the ConPTY attribute setup in `spawn_windows_child` that are too invasive for a tactical plan — hence this dedicated investigation phase.
-**Success Criteria** (what must be TRUE):
-  1. A working configuration for detached console grandchildren is identified AND committed, verified by the Phase 14 4-row smoke-gate matrix reproduced in this phase. The configuration must preserve: sandbox filesystem boundary, Job Object containment, Low-Integrity isolation, and some kernel-level network identity (session-SID WFP preferred; AppID WFP acceptable with explicit trade-off note).
-  2. If the investigation concludes that NO configuration satisfies (1) without disabling PTY in detached mode, Phase 15 instead delivers: a launch.rs / supervised_runtime.rs change that makes PTY allocation conditional on `!detached_mode`, AND a redirected-stdio path for detached supervisors (pipe-based stdout capture for `nono attach`), AND a commit-body waiver that documents the loss of interactive-terminal semantics for detached children.
-  3. Phase 14's 4-row smoke-gate matrix passes under the chosen configuration (Pass-3 effectively).
-  4. `make ci` stays green.
-  5. The debug doc `.planning/debug/windows-supervised-exec-cascade.md` is updated with the final resolution and moved to `.planning/debug/resolved/`.
-**Gap Closure**: Closes plan 14-01's escalation. After this phase lands, Phase 14 resumes with 14-03 and completes.
-**Plans**: TBD during `/gsd-plan-phase 15` (likely 1-2 plans: investigation + fix).
+  **Plans:** TBD during `/gsd-plan-phase 15` (likely 1–2 plans: investigation + fix).
 
 ## Progress Table
 
-| Phase | Plans Complete | Status | Completed |
-|-------|----------------|--------|-----------|
-| 1. Windows Control Foundation | 3/3 | Complete | 2026-04-04 |
-| 2. Persistent Sessions | 4/4 | Complete | 2026-04-04 |
-| 3. Network Sandboxing | 4/4 | Complete | 2026-04-04 |
-| 4. State Integrity & Deployment | 3/3 | Complete | 2026-04-05 |
-| 5. Windows Detach Readiness Fix | 1/1 | Complete   | 2026-04-05 |
-| 6. WFP Enforcement Activation | 2/2 | Complete   | 2026-04-06 |
-| 7. Quick Wins | 2/2 | Complete   | 2026-04-08 |
-| 8. ConPTY Shell | 1/1 | Complete | 2026-04-10 |
-| 9. WFP Port-Level + Proxy Filtering | 4/4 | Complete | 2026-04-10 |
-| 10. ETW-Based Learn Command | 3/3 | Complete   | 2026-04-10 |
-| 11. Runtime Capability Expansion | 2/2 | Complete | 2026-04-11 |
-| 12. Milestone Bookkeeping Cleanup | 3/3 | Complete   | 2026-04-11 |
-| 13. v1.0 Human Verification UAT | 1/1 | Resolved (2nd-pass 2026-04-18 — 3 pass, 7 waived incl. 4 v1.0-known-issue) | 2026-04-18 |
-| 14. v1.0 Fix Pass | 2/3 | Complete with carry-forward (14-02 done; 14-03 done; 14-01 escalated to Phase 15 as v1.0-known-issue) | 2026-04-18 |
-| 15. Detached Console + ConPTY Architecture Investigation | 0/0 | Not Planned (run `/gsd-plan-phase 15` to start) | - |
+| Phase | Milestone | Plans Complete | Status | Completed |
+|-------|-----------|----------------|--------|-----------|
+| 1. Windows Control Foundation | v1.0 | 3/3 | Complete | 2026-04-04 |
+| 2. Persistent Sessions | v1.0 | 4/4 | Complete | 2026-04-04 |
+| 3. Network Sandboxing | v1.0 | 4/4 | Complete | 2026-04-04 |
+| 4. State Integrity & Deployment | v1.0 | 3/3 | Complete | 2026-04-05 |
+| 5. Windows Detach Readiness Fix | v2.0 | 1/1 | Complete | 2026-04-05 |
+| 6. WFP Enforcement Activation | v2.0 | 2/2 | Complete | 2026-04-06 |
+| 7. Quick Wins | v2.0 | 2/2 | Complete | 2026-04-08 |
+| 8. ConPTY Shell | v2.0 | 1/1 | Complete | 2026-04-10 |
+| 9. WFP Port-Level + Proxy Filtering | v2.0 | 4/4 | Complete | 2026-04-10 |
+| 10. ETW-Based Learn Command | v2.0 | 3/3 | Complete | 2026-04-10 |
+| 11. Runtime Capability Expansion | v2.0 | 2/2 | Complete | 2026-04-11 |
+| 12. Milestone Bookkeeping Cleanup | v2.0 | 3/3 | Complete | 2026-04-11 |
+| 13. Human Verification UAT | v2.0 | 1/1 | Resolved (2nd-pass 2026-04-18 — 3 pass, 7 waived incl. 4 v2.0-known-issue) | 2026-04-18 |
+| 14. Fix Pass | v2.0 | 2/3 | Complete with carry-forward (14-02 done; 14-03 done; 14-01 escalated to Phase 15) | 2026-04-18 |
+| 15. Detached Console + ConPTY Architecture Investigation | v2.1 (candidate) | 0/0 | Not Planned (run `/gsd-plan-phase 15` to start) | - |
