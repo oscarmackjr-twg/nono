@@ -828,11 +828,40 @@ fn print_check_only_summary() {
     }
     print_windows_foundation_report("");
     print_windows_wfp_readiness_report("", &wfp);
-    println!("Use 'nono run --dry-run ...' to validate profiles and policy.");
-    println!("Plain 'nono run -- <command>' uses the current supported Windows command surface with backend-owned launch validation and low-integrity write boundaries.");
-    println!("Blocked-network and other enforcement-dependent Windows flows require current backend readiness; check the WFP readiness lines above before treating them as available.");
-    println!("Live 'nono shell' and 'nono wrap' remain intentionally unavailable on Windows; use their --dry-run forms to inspect policy.");
-    println!("Run 'nono run --help' to inspect the current command surface.");
+    let wfp_ready = wfp.status_label == "ready";
+    print!("{}", trailing_usage_guidance(wfp_ready));
+}
+
+/// Shape A helper for the Windows `nono setup --check-only` trailing guidance.
+/// Extracted so tests can assert on the rendered output (see `windows_check_only_tests`).
+/// Fix for Phase 07 P07-HV-2 / Phase 14 Plan 14-02: the stale wrap-unavailable line
+/// was replaced by the canonical wrap-availability sentence required by the Phase 07
+/// acceptance criterion.
+#[cfg(target_os = "windows")]
+fn trailing_usage_guidance(_wfp_ready: bool) -> String {
+    let mut out = String::new();
+    use std::fmt::Write;
+    let _ = writeln!(
+        out,
+        "Use 'nono run --dry-run ...' to validate profiles and policy."
+    );
+    let _ = writeln!(
+        out,
+        "Plain 'nono run -- <command>' uses the current supported Windows command surface with backend-owned launch validation and low-integrity write boundaries."
+    );
+    let _ = writeln!(
+        out,
+        "Blocked-network and other enforcement-dependent Windows flows require current backend readiness; check the WFP readiness lines above before treating them as available."
+    );
+    let _ = writeln!(
+        out,
+        "'nono wrap' is available on Windows with Job Object + WFP enforcement (no exec-replace, unlike Unix)."
+    );
+    let _ = writeln!(
+        out,
+        "Run 'nono run --help' to inspect the current command surface."
+    );
+    out
 }
 
 #[cfg(target_os = "windows")]
@@ -1090,5 +1119,39 @@ mod tests {
             .feature_names()
             .iter()
             .any(|n| n.starts_with("TCP network filtering")));
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_check_only_tests {
+    use super::*;
+
+    #[test]
+    fn check_only_summary_includes_canonical_wrap_availability_sentence() {
+        let out: String = trailing_usage_guidance(true);
+        assert!(
+            out.contains("'nono wrap' is available on Windows with Job Object + WFP enforcement (no exec-replace, unlike Unix)"),
+            "canonical wrap-availability sentence missing from trailing usage guidance: {out}"
+        );
+    }
+
+    #[test]
+    fn check_only_summary_does_not_mention_intentionally_unavailable() {
+        let out: String = trailing_usage_guidance(true);
+        assert!(
+            !out.contains("remain intentionally unavailable"),
+            "stale 'remain intentionally unavailable' sentence resurfaced in trailing usage guidance: {out}"
+        );
+    }
+
+    #[test]
+    fn check_only_summary_is_internally_consistent_about_wrap() {
+        let out: String = trailing_usage_guidance(true);
+        let has_available = out.contains("'nono wrap' is available on Windows");
+        let has_unavailable = out.contains("remain intentionally unavailable");
+        assert!(
+            has_available && !has_unavailable,
+            "trailing usage guidance must advertise wrap as available and not unavailable: {out}"
+        );
     }
 }
