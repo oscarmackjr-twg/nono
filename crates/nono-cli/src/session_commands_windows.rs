@@ -417,8 +417,69 @@ pub fn run_inspect(args: &InspectArgs) -> Result<()> {
     if let Some(ref rollback) = record.rollback_session {
         println!("Rollback:   {}", rollback);
     }
+    if let Some(limits) = record.limits.as_ref() {
+        if !limits.is_empty() {
+            println!("\nLimits:");
+            if let Some(pct) = limits.cpu_percent {
+                println!("  cpu:     {pct}% (hard cap)");
+            }
+            if let Some(bytes) = limits.memory_bytes {
+                println!("  memory:  {} (job-wide)", format_bytes_human(bytes));
+            }
+            if let Some(secs) = limits.timeout_seconds {
+                println!(
+                    "  timeout: {}",
+                    format_duration_human(std::time::Duration::from_secs(secs))
+                );
+            }
+            if let Some(procs) = limits.max_processes {
+                println!("  procs:   {procs} (active)");
+            }
+        }
+    }
 
     Ok(())
+}
+
+/// Render bytes using binary (1024-based) units. Picks the largest unit that
+/// yields an integer representation; falls back to raw bytes for values that
+/// are not a clean multiple of any unit. Mirrors the input parser
+/// (`crate::cli::parse_byte_size`) which uses the same K/M/G/T multipliers.
+fn format_bytes_human(bytes: u64) -> String {
+    const K: u64 = 1024;
+    const M: u64 = K * 1024;
+    const G: u64 = M * 1024;
+    const T: u64 = G * 1024;
+    if bytes >= T && bytes % T == 0 {
+        format!("{} TiB", bytes / T)
+    } else if bytes >= G && bytes % G == 0 {
+        format!("{} GiB", bytes / G)
+    } else if bytes >= M && bytes % M == 0 {
+        format!("{} MiB", bytes / M)
+    } else if bytes >= K && bytes % K == 0 {
+        format!("{} KiB", bytes / K)
+    } else {
+        format!("{bytes} bytes")
+    }
+}
+
+/// Render a `Duration` as `"5 minutes"` / `"1 hour"` / `"45 seconds"`. Not a
+/// general-purpose formatter — tuned for the `parse_duration` accepted forms
+/// (s/m/h/d), which always produce whole-second durations.
+fn format_duration_human(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    if secs >= 86_400 && secs % 86_400 == 0 {
+        let n = secs / 86_400;
+        format!("{n} {}", if n == 1 { "day" } else { "days" })
+    } else if secs >= 3600 && secs % 3600 == 0 {
+        let n = secs / 3600;
+        format!("{n} {}", if n == 1 { "hour" } else { "hours" })
+    } else if secs >= 60 && secs % 60 == 0 {
+        let n = secs / 60;
+        format!("{n} {}", if n == 1 { "minute" } else { "minutes" })
+    } else {
+        format!("{secs} {}", if secs == 1 { "second" } else { "seconds" })
+    }
 }
 
 pub fn run_prune(args: &PruneArgs) -> Result<()> {
@@ -589,5 +650,84 @@ fn follow_event_log(path: &Path, tail: Option<usize>, as_json: bool) -> Result<(
             continue;
         }
         print!("{}", line);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod inspect_formatting_tests {
+    use super::{format_bytes_human, format_duration_human};
+    use std::time::Duration;
+
+    #[test]
+    fn bytes_512_mib() {
+        assert_eq!(format_bytes_human(512 * 1024 * 1024), "512 MiB");
+    }
+
+    #[test]
+    fn bytes_1_gib() {
+        assert_eq!(format_bytes_human(1024 * 1024 * 1024), "1 GiB");
+    }
+
+    #[test]
+    fn bytes_256_kib() {
+        assert_eq!(format_bytes_human(256 * 1024), "256 KiB");
+    }
+
+    #[test]
+    fn bytes_1_tib() {
+        assert_eq!(format_bytes_human(1024u64.pow(4)), "1 TiB");
+    }
+
+    #[test]
+    fn bytes_non_clean_multiple_falls_back_to_bytes() {
+        // 1000 is not a clean multiple of 1024 → rendered as raw bytes.
+        assert_eq!(format_bytes_human(1000), "1000 bytes");
+    }
+
+    #[test]
+    fn bytes_zero_renders_as_zero_bytes() {
+        assert_eq!(format_bytes_human(0), "0 bytes");
+    }
+
+    #[test]
+    fn duration_45_seconds() {
+        assert_eq!(format_duration_human(Duration::from_secs(45)), "45 seconds");
+    }
+
+    #[test]
+    fn duration_1_second_is_singular() {
+        assert_eq!(format_duration_human(Duration::from_secs(1)), "1 second");
+    }
+
+    #[test]
+    fn duration_5_minutes() {
+        assert_eq!(format_duration_human(Duration::from_secs(300)), "5 minutes");
+    }
+
+    #[test]
+    fn duration_1_minute_is_singular() {
+        assert_eq!(format_duration_human(Duration::from_secs(60)), "1 minute");
+    }
+
+    #[test]
+    fn duration_1_hour_is_singular() {
+        assert_eq!(format_duration_human(Duration::from_secs(3600)), "1 hour");
+    }
+
+    #[test]
+    fn duration_2_hours() {
+        assert_eq!(format_duration_human(Duration::from_secs(7200)), "2 hours");
+    }
+
+    #[test]
+    fn duration_1_day_is_singular() {
+        assert_eq!(format_duration_human(Duration::from_secs(86_400)), "1 day");
+    }
+
+    #[test]
+    fn duration_90s_not_clean_minute() {
+        // 90s is not a clean minute → falls back to seconds.
+        assert_eq!(format_duration_human(Duration::from_secs(90)), "90 seconds");
     }
 }

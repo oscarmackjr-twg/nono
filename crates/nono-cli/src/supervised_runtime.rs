@@ -98,6 +98,7 @@ fn create_session_runtime_state(
     caps: &CapabilitySet,
     session: &SessionLaunchOptions,
     audit_state: Option<&AuditState>,
+    resource_limits: &crate::launch_runtime::ResourceLimits,
 ) -> Result<SessionRuntimeState> {
     let started = chrono::Local::now().to_rfc3339();
     let short_session_id = std::env::var(DETACHED_SESSION_ID_ENV)
@@ -137,6 +138,7 @@ fn create_session_runtime_state(
             None
         },
         rollback_session: audit_state.map(|state| state.session_id.clone()),
+        limits: session::ResourceLimitsRecord::from_resource_limits(resource_limits),
     };
     let session_guard = Some(session::SessionGuard::new(session_record)?);
     let pty_pair = if should_allocate_pty(session) {
@@ -245,8 +247,13 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
     };
 
     let trust_interceptor = create_trust_interceptor(trust);
-    let session_runtime =
-        create_session_runtime_state(command, caps, session, audit_state.as_ref())?;
+    let session_runtime = create_session_runtime_state(
+        command,
+        caps,
+        session,
+        audit_state.as_ref(),
+        resource_limits,
+    )?;
     let SessionRuntimeState {
         started,
         short_session_id,
