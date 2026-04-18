@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: Resource Limits, Extended IPC, Attach-Streaming & Cleanup
-status: Phase 19 in progress — plans 19-01 (CLEAN-01) and 19-02 (CLEAN-02) complete
-stopped_at: Phase 19 plans 19-01 + 19-02 executed; 2 remaining (19-03, 19-04)
-last_updated: "2026-04-18T22:00:00.000Z"
-last_activity: 2026-04-18 — Phase 19 plan 19-02 (CLEAN-02) complete-with-deviation; 5 Windows test flakes fixed + 1 production bug in query_path UNC-prefix handling; commits 400f8c9, 8412fda, a449454, 4db849d
+status: Phase 19 in progress — plans 19-01 (CLEAN-01), 19-02 (CLEAN-02), and 19-03 (CLEAN-03) complete
+stopped_at: Phase 19 plans 19-01 + 19-02 + 19-03 executed; 1 remaining (19-04)
+last_updated: "2026-04-18T23:30:00.000Z"
+last_activity: 2026-04-18 — Phase 19 plan 19-03 (CLEAN-03 WIP triage) complete; 10 disk-resident WIP items resolved via user-approved disposition table (6 backfilled commits, 2 reverts, 2 deletes, 2 new .gitignore patterns); commits a208761, a4100aa, db4547b, 0391e37, d49fda8, d6bf88f
 progress:
   total_phases: 19
   completed_phases: 14
   total_plans: 44
-  completed_plans: 41
-  percent: 93
+  completed_plans: 42
+  percent: 95
 ---
 
 # Project State: nono — v2.1 (Resource Limits, Extended IPC, Attach-Streaming & Cleanup)
@@ -24,8 +24,8 @@ progress:
 
 ## Current Position
 
-Phase: 19 (cleanup) — IN PROGRESS (2/4 plans)
-Plan: 2 of 4 complete (19-01 SUMMARY at `.planning/phases/19-cleanup/19-01-SUMMARY.md`, 19-02 SUMMARY at `.planning/phases/19-cleanup/19-02-SUMMARY.md`); next up: 19-03 (CLEAN-03 WIP triage), 19-04 (CLEAN-04 session retention) — both Wave 1 parallelizable.
+Phase: 19 (cleanup) — IN PROGRESS (3/4 plans)
+Plan: 3 of 4 complete (19-01 SUMMARY at `.planning/phases/19-cleanup/19-01-SUMMARY.md`, 19-02 SUMMARY at `.planning/phases/19-cleanup/19-02-SUMMARY.md`, 19-03 SUMMARY at `.planning/phases/19-cleanup/19-03-SUMMARY.md`); next up: 19-04 (CLEAN-04 session retention + auto-prune + one-shot cleanup + docs).
 Milestone: v2.1 — Phase 16 done; Phase 19 underway.
 
   - v1.0 Windows Alpha — shipped 2026-03-31 (tag `v1.0`).
@@ -49,10 +49,10 @@ Next actions:
 
 Naming note: phase directories `13-v1-human-verification-uat/` and `14-v1-fix-pass/` retain v1-era naming — v2.0/v2.1 is the formal milestone sequence per PROJECT.md/REQUIREMENTS.md.
 
-Last activity: 2026-04-18 -- Phase 19 plan 19-02 (CLEAN-02 Windows test flakes + query_path UNC production fix) complete-with-deviation; commits 400f8c9, 8412fda, a449454, 4db849d
+Last activity: 2026-04-18 -- Phase 19 plan 19-03 (CLEAN-03 disk-resident WIP triage, 10 items) complete; 6 backfill/housekeeping commits (a208761, a4100aa, db4547b, 0391e37, d49fda8, d6bf88f) + 2 reverts + 1 untracked delete + 2 new .gitignore patterns
 
 ```
-Progress: [██████░░░░]  60% (6/10 v2.1 requirements validated — RESL-01..04, CLEAN-01, CLEAN-02 shipped)
+Progress: [███████░░░]  70% (7/10 v2.1 requirements validated — RESL-01..04, CLEAN-01, CLEAN-02, CLEAN-03 shipped)
 ```
 
 ## Accumulated Context
@@ -94,6 +94,7 @@ Progress: [██████░░░░]  60% (6/10 v2.1 requirements validate
 - **Phase 19 CLEAN-02 hypothesis D-07 (parallel env-var contamination) was wrong:** diagnosis revealed all 5 tests were deterministic Windows platform bugs of 4 distinct flavors — JSON escape when embedding backslash paths, non-absolute Unix-shaped XDG paths in env guards, UNC `\\?\` prefix mismatch between canonicalized and policy-expanded paths (a genuine production bug in `query_path`), and a Unix-only path literal colliding with a correct production `debug_assert!(path.is_absolute())`. None needed `lock_env() + EnvVarGuard`; each fix was file-local and cfg-gated or helper-routed (2026-04-18).
 - **Phase 19 CLEAN-02 option C scope expansion (deviation D-08):** user-approved in-place expansion to land a minimal production fix (UNC-prefix strip in `query_path` + new `#[cfg(windows)]` regression test) alongside the 4 test-only fixes. Production fix is scoped to a single call site with a local helper; no new dependency, no broader normalization refactor. Rationale: fixing the test without fixing the underlying under-reporting of sensitive-path denials for non-existent paths on Windows would have papered over a real bug in `nono why ~/.ssh` (2026-04-18).
 - **Phase 19 CLEAN-02 D-06 scope boundary strictly honored:** `tests/env_vars.rs` integration failures (19) and `trust_scan::tests::*` tempdir-race flakes (1–3) exist pre- and post-fix on this Windows host but are NOT in D-06's 5-test scope and were NOT fixed in this plan. Documented in 19-02-SUMMARY § Deferred Issues for potential future cleanup (2026-04-18).
+- **Phase 19 CLEAN-03 per-file disposition review:** 10 disk-resident WIP items from D-12 resolved via user-approved disposition table — 6 committed alive (`10-RESEARCH.md`, `10-UAT.md`, quick-260410-nlt PLAN, quick-260412-ajy directory's 7 files, `v1.0-INTEGRATION-REPORT.md`), 2 reverted to HEAD (11-01-PLAN.md, 11-02-PLAN.md working-tree drift), 2 deleted (`host.nono_binary.commit` and `query` debug crumbs + untracked 12-02-PLAN.md reconstruction). Two new root-anchored `.gitignore` patterns prevent recurrence of WFP-service debug crumbs. No production code touched; commits a208761, a4100aa, db4547b, 0391e37, d49fda8, d6bf88f (2026-04-18).
 
 ### Roadmap Evolution
 
@@ -129,13 +130,13 @@ Progress: [██████░░░░]  60% (6/10 v2.1 requirements validate
 ## Session Continuity
 
 **Current Milestone:** v2.1 — Resource Limits, Extended IPC, Attach-Streaming & Cleanup
-**Last Activity:** 2026-04-18 — Phase 19 plan 19-02 (CLEAN-02 Windows test flakes + query_path UNC production fix) complete-with-deviation; commits `400f8c9`, `8412fda`, `a449454`, `4db849d` on `windows-squash`
-**Stopped At:** Phase 19 plans 19-01 + 19-02 complete; 19-03/19-04 remaining (Wave 1 parallel)
-**Next Steps:** Execute plan 19-03 (CLEAN-03 — disk-resident WIP triage, 10 items), plan 19-04 (CLEAN-04 — session retention + auto-prune + `nono prune` flags + one-shot cleanup of 1172 stale session files + docs). Or pivot to `/gsd-plan-phase 17` (ATCH-01) / `/gsd-plan-phase 18` (AIPC-01) if a feature phase is the priority.
+**Last Activity:** 2026-04-18 — Phase 19 plan 19-03 (CLEAN-03 disk-resident WIP triage, 10 items) complete; 6 backfill/housekeeping commits (`a208761`, `a4100aa`, `db4547b`, `0391e37`, `d49fda8`, `d6bf88f`) + 2 reverts + 1 untracked delete + 2 new `.gitignore` patterns on `windows-squash`
+**Stopped At:** Phase 19 plans 19-01 + 19-02 + 19-03 complete; 19-04 remaining
+**Next Steps:** Execute plan 19-04 (CLEAN-04 — session retention predicate + auto-prune trigger + `nono prune` flags + one-shot cleanup of 1172 stale session files + docs). Or pivot to `/gsd-plan-phase 17` (ATCH-01) / `/gsd-plan-phase 18` (AIPC-01) if a feature phase is the priority.
 
 **Status of Phase 19 CLEAN items:**
 
 - CLEAN-01 — COMPLETE (commit `c87b10b`, 2026-04-18). `cargo fmt --all -- --check` exits 0 on whole workspace.
 - CLEAN-02 — COMPLETE-WITH-DEVIATION (commits `400f8c9`, `8412fda`, `a449454`, `4db849d`, 2026-04-18). All 5 D-06 tests now pass deterministically; 1 `#[cfg(windows)]` regression test added for the UNC-prefix production fix in `query_path`. Hypothesis D-07 contradicted: real root causes were 4 distinct deterministic Windows platform bugs, not parallel env-var contamination. Deviation D-08 tripped and user-approved (option C). Pre-existing `tests/env_vars.rs` (19) and `trust_scan::tests::*` (1–3) failures are NOT in D-06 scope and remain deferred.
-- CLEAN-03 — pending. 10 disk-resident WIP items to triage per-file (D-12).
+- CLEAN-03 — COMPLETE (commits `a208761`, `a4100aa`, `db4547b`, `0391e37`, `d49fda8`, `d6bf88f`, 2026-04-18). All 10 disk-resident WIP items from D-12 resolved via user-approved disposition table: 6 backfilled alive (`10-RESEARCH.md`, `10-UAT.md`, quick-260410-nlt PLAN, quick-260412-ajy 7-file directory, `v1.0-INTEGRATION-REPORT.md`); 2 reverted to HEAD (11-01-PLAN.md, 11-02-PLAN.md); 2 deleted (`host.nono_binary.commit` + `query` debug crumbs, untracked 12-02-PLAN.md reconstruction); 2 new root-anchored `.gitignore` patterns prevent recurrence. No production code touched; `cargo fmt --all -- --check` still exit 0.
 - CLEAN-04 — pending. 1172 stale session files + retention policy + `nono prune` flag work.
