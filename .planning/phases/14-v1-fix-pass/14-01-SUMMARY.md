@@ -1,13 +1,20 @@
 ---
 phase: 14-v1-fix-pass
 plan: 01
-completed: 2026-04-18T01:55:00Z
-status: awaiting-smoke-gate
+completed: 2026-04-18T02:05:00Z
+status: awaiting-direction-2-regate
 ---
 
 ## What built
 
-Fixed the detached-supervisor `STATUS_DLL_INIT_FAILED (0xC0000142)` that killed sandboxed console grandchildren. The supervisor now calls `AllocConsole` before spawning, so the grandchild inherits a valid console handle for DLL loader init. This is Direction 3 from plan 14-01 — **not** the originally-prescribed Direction 1, which was found infeasible.
+Fixed the detached-supervisor `STATUS_DLL_INIT_FAILED (0xC0000142)` that killed sandboxed console grandchildren.
+
+**Evolution of the fix across this phase:**
+1. **Direction 1** (session SID as `TokenGroups`) — abandoned before commit: infeasible with user-mode Windows APIs (`AdjustTokenGroups` cannot add new SIDs; `SetTokenInformation(TokenGroups)` requires `SE_TCB_NAME`).
+2. **Direction 3** (pre-allocate console via `AllocConsole` in detached supervisor, keep WRITE_RESTRICTED + session SID restricting) — committed (`b06aebe`), user-smoked 2026-04-18, **FAILED** rows 1 and 2. AllocConsole did not unblock 0xC0000142.
+3. **Direction 2** (null token in detached mode; non-detached keeps WRITE_RESTRICTED + session SID) — committed (`005f6bc`), **PENDING** user re-gate.
+
+Direction 2 is the plan's documented "last-resort" fallback. The pivot was automatic per the plan's failure policy — no further Direction-3 debugging.
 
 ## Key files
 
@@ -119,4 +126,30 @@ Expected per row: no `0xC0000142`, no `0xC0000022`, target process live in `task
 
 ## Smoke-gate results
 
-_[Awaiting human execution. Append results here with timestamps, exit codes, and tasklist/stdout captures per the matrix above.]_
+### Pass 1 — Direction 3 (AllocConsole) — 2026-04-18T02:00
+
+Executed by user on admin Windows 11 Enterprise host with `nono-wfp-service` running.
+
+| # | Config | Command | Result | Evidence |
+|---|--------|---------|--------|----------|
+| 1 | restricted token + AllocConsole (no PTY) | `nono run --detached --allow-cwd -- ping -t 127.0.0.1` | **FAIL** | `Detached session failed to start (exit status: exit code: 0xc0000142)` |
+| 2 | restricted token + ConPTY | `nono run --detached --allow-cwd -- cmd /c "echo hello"` | **FAIL** | `Detached session failed to start (exit status: exit code: 0xc0000142)` |
+| 3 | non-detached regression | `nono run --allow-cwd -- cmd /c "echo hello"` | **PASS** | `hello` printed, supervisor exited 0 after 72ms. UNC path warning "UNC paths are not supported. Defaulting to Windows directory." is pre-existing (cmd.exe behavior with `\\?\C:\...` current dir), unrelated to this plan. |
+| 4 | `--block-net` WFP regression | `nono run --detached --block-net --allow-cwd -- cmd /c "curl --max-time 5 http://example.com"` | **DIFFERENT FAILURE** | `Detached session failed to become attachable within startup timeout` — **no 0xC0000142**. Matches the debug doc's "null token + no PTY → ping runs, attach-pipe timeout" row, suggesting the grandchild actually started when the restricted token was absent/bypassed on this path. Cannot evaluate `--block-net` enforcement until row 4 reaches an attach-ready state under Direction 2. |
+
+**Verdict: Direction 3 failed rows 1 + 2.** Per the plan's failure policy (`14-01-PLAN.md <smoke_test_gate>` step 3), Direction 2 pivot applied immediately without further Direction-3 debugging.
+
+### Pass 2 — Direction 2 (null token in detached mode) — PENDING
+
+Binary rebuilt at `target/release/nono.exe` after commit `005f6bc`. User to re-run all 4 rows.
+
+| # | Config | Command | Status |
+|---|--------|---------|--------|
+| 1 | null token + no PTY (detached)  | `nono run --detached --allow-cwd -- ping -t 127.0.0.1` | **PENDING** |
+| 2 | null token + ConPTY (detached)  | `nono run --detached --allow-cwd -- cmd /c "echo hello"` | **PENDING** |
+| 3 | non-detached regression (WRITE_RESTRICTED path unchanged) | `nono run --allow-cwd -- cmd /c "echo hello"` | **PENDING** (re-confirm row 3 did not regress) |
+| 4 | `--block-net` WFP regression (AppID filter path) | `nono run --detached --block-net --allow-cwd -- cmd /c "curl --max-time 5 http://example.com"` | **PENDING** |
+
+Expected per row: no `0xC0000142`, no `0xC0000022`, target process live in `tasklist` (rows 1, 4), stdout observable (rows 2, 3), row 4's child exits non-zero with a curl failure in stderr (MUST still drop — AppID filter is now the kernel-level boundary).
+
+If Pass 2 also fails: per the plan, escalate — the bug is neither console-init nor restricting-SID and is out of scope for this plan.
