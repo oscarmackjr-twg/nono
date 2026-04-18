@@ -2,10 +2,10 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: Resource Limits, Extended IPC, Attach-Streaming & Cleanup
-status: Phase 16 complete; ready to plan Phase 17
-stopped_at: Phase 19 context gathered
-last_updated: "2026-04-18T18:23:43.591Z"
-last_activity: 2026-04-18 — Phase 16 (Resource Limits) complete; RESL-01..04 shipped on `windows-squash`
+status: Phase 19 planned; ready to execute
+stopped_at: Phase 19 plans created (4 plans, 1 wave)
+last_updated: "2026-04-18T19:15:00.000Z"
+last_activity: 2026-04-18 — Phase 19 (Cleanup) planned; 4 plans committed on `windows-squash` (verification passed iteration 2/3)
 progress:
   total_phases: 18
   completed_phases: 14
