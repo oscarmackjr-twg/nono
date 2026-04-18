@@ -77,7 +77,7 @@ Carry-forward → Phase 15: detached-console-grandchild `0xC0000142 STATUS_DLL_I
   **Depends on:** Nothing; can run in parallel with the feature phases. Recommended to run last so it catches any drift introduced by the feature phases too.
 
   **Plans:** 4 plans (all Wave 1, parallel — disjoint files_modified).
-  - [ ] 19-01-PLAN.md — CLEAN-01 fmt drift fix on 3 files from commit 6749494
+  - [x] 19-01-PLAN.md — CLEAN-01 fmt drift fix on 3 files from commit 6749494 (complete 2026-04-18, commit `c87b10b`)
   - [ ] 19-02-PLAN.md — CLEAN-02 restore 5 pre-existing Windows test flakes via EnvVarGuard + lock_env
   - [ ] 19-03-PLAN.md — CLEAN-03 triage 10 disk-resident WIP items (per-file disposition)
   - [ ] 19-04-PLAN.md — CLEAN-04 session retention predicate + auto-prune trigger + one-shot cleanup + docs
@@ -104,4 +104,4 @@ Carry-forward → Phase 15: detached-console-grandchild `0xC0000142 STATUS_DLL_I
 | 16. Resource Limits (RESL-01..04) | v2.1 | 2/2 | Complete (RESL-01..04 shipped: CPU/memory/processes kernel-enforced, timeout via supervisor timer, `nono inspect` Limits block) | 2026-04-18 |
 | 17. Attach-Streaming (ATCH-01) | v2.1 | 0/? | Not Planned (run `/gsd-plan-phase 17` to start) | - |
 | 18. Extended IPC (AIPC-01) | v2.1 | 0/? | Not Planned (run `/gsd-plan-phase 18` to start) | - |
-| 19. Cleanup (CLEAN-01..04) | v2.1 | 0/? | Not Planned (run `/gsd-plan-phase 19` to start) | - |
+| 19. Cleanup (CLEAN-01..04) | v2.1 | 1/4 | In Progress (19-01 CLEAN-01 fmt drift complete; 19-02/19-03/19-04 pending, Wave 1 parallel) | - |

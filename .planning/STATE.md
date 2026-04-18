@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: Resource Limits, Extended IPC, Attach-Streaming & Cleanup
-status: Phase 19 planned; ready to execute
-stopped_at: Phase 19 plans created (4 plans, 1 wave)
-last_updated: "2026-04-18T19:15:00.000Z"
-last_activity: 2026-04-18 — Phase 19 (Cleanup) planned; 4 plans committed on `windows-squash` (verification passed iteration 2/3)
+status: Phase 19 in progress — plan 19-01 (CLEAN-01 fmt drift) complete
+stopped_at: Phase 19 plan 19-01 executed; 3 remaining (19-02, 19-03, 19-04)
+last_updated: "2026-04-18T20:04:15.000Z"
+last_activity: 2026-04-18 — Phase 19 plan 19-01 (CLEAN-01) complete; fmt drift on 3 files resolved via commit c87b10b
 progress:
-  total_phases: 18
+  total_phases: 19
   completed_phases: 14
-  total_plans: 40
-  completed_plans: 39
-  percent: 98
+  total_plans: 44
+  completed_plans: 40
+  percent: 91
 ---
 
 # Project State: nono — v2.1 (Resource Limits, Extended IPC, Attach-Streaming & Cleanup)
@@ -24,9 +24,9 @@ progress:
 
 ## Current Position
 
-Phase: 16 (resource-limits) — COMPLETE (2/2 plans)
-Plan: 2 of 2 (16-02 SUMMARY at `.planning/phases/16-resource-limits/16-02-SUMMARY.md`)
-Milestone: v2.1 — Phase 16 done.
+Phase: 19 (cleanup) — IN PROGRESS (1/4 plans)
+Plan: 1 of 4 complete (19-01 SUMMARY at `.planning/phases/19-cleanup/19-01-SUMMARY.md`); next up: 19-02 (CLEAN-02 test flakes), 19-03 (CLEAN-03 WIP triage), 19-04 (CLEAN-04 session retention) — all Wave 1 parallelizable.
+Milestone: v2.1 — Phase 16 done; Phase 19 underway.
 
   - v1.0 Windows Alpha — shipped 2026-03-31 (tag `v1.0`).
   - v2.0 Windows Gap Closure — shipped 2026-04-18 (tag `v2.0` pending on merge). Carry-forward closed by Phase 15 the same day.
@@ -49,10 +49,10 @@ Next actions:
 
 Naming note: phase directories `13-v1-human-verification-uat/` and `14-v1-fix-pass/` retain v1-era naming — v2.0/v2.1 is the formal milestone sequence per PROJECT.md/REQUIREMENTS.md.
 
-Last activity: 2026-04-18 -- Phase 16 execution complete
+Last activity: 2026-04-18 -- Phase 19 plan 19-01 (CLEAN-01 fmt drift) complete; commit c87b10b
 
 ```
-Progress: [████░░░░░░]  40% (4/10 v2.1 requirements validated — RESL-01..04 shipped)
+Progress: [█████░░░░░]  50% (5/10 v2.1 requirements validated — RESL-01..04, CLEAN-01 shipped)
 ```
 
 ## Accumulated Context
@@ -86,6 +86,11 @@ Progress: [████░░░░░░]  40% (4/10 v2.1 requirements validate
 - **Phase 09 unreachable!() scoped to Unix:** On Windows, execute_direct returns Ok(i32); unreachable!() moved inside cfg(not(windows)) block; Windows Direct branch captures exit code and calls std::process::exit(exit_code) (2026-04-10).
 - **Phase 09 stale test replaced:** apply_rejects_unsupported_proxy_with_ports removed; apply_accepts_port_level_wfp_caps asserts Ok(()) for port-level caps post-Phase-09 semantics (2026-04-10).
 - **Phase 12-03 STOP on pre-existing CI failure:** `make ci` fallback surfaced 48 `disallowed_methods` clippy errors in `profile/mod.rs`, `config/mod.rs`, `sandbox_state.rs`. Root-caused to revert `cf5a60a` (2026-04-10), predates Phase 12. Phase 12's own files (`crates/nono/src/sandbox/windows.rs`, `crates/nono-cli/tests/wfp_port_integration.rs`) produce zero clippy diagnostics. Did NOT auto-fix per plan STOP directive (2026-04-11).
+
+### Key Decisions (v2.1)
+
+- **Phase 19 CLEAN-01 fmt-only commit:** Single `style(19-CLEAN-01):` commit on 3 files (`config/mod.rs`, `restricted_token.rs`, `profile/mod.rs`), no logic changes. `cargo fmt --all -- --check` is now green on the whole workspace (2026-04-18).
+- **Phase 19 CLEAN-01 smoke deliberately excludes `make ci`:** CLEAN-02's 5 pending test flakes would keep `make test` red for reasons unrelated to fmt; CLEAN-01 smoke is restricted to `cargo fmt --all -- --check` as specified by the plan (2026-04-18).
 
 ### Roadmap Evolution
 
@@ -121,11 +126,13 @@ Progress: [████░░░░░░]  40% (4/10 v2.1 requirements validate
 ## Session Continuity
 
 **Current Milestone:** v2.1 — Resource Limits, Extended IPC, Attach-Streaming & Cleanup
-**Last Activity:** 2026-04-18 — Phase 16 (Resource Limits) complete; RESL-01..04 shipped on `windows-squash`
-**Stopped At:** Phase 19 context gathered
-**Next Steps:** `/gsd-plan-phase 17` (ATCH-01 Attach-Streaming) or `/gsd-plan-phase 18` (AIPC-01 Extended IPC). Both phases are independent of each other. Phase 19 (CLEAN) is recommended last so it catches any drift introduced by 17/18.
+**Last Activity:** 2026-04-18 — Phase 19 plan 19-01 (CLEAN-01 fmt drift) complete; commit `c87b10b` on `windows-squash`
+**Stopped At:** Phase 19 plan 19-01 complete; 19-02/19-03/19-04 remaining (Wave 1 parallel)
+**Next Steps:** Execute plan 19-02 (CLEAN-02 — restore 5 pre-existing Windows test flakes), plan 19-03 (CLEAN-03 — disk-resident WIP triage), plan 19-04 (CLEAN-04 — session retention + auto-prune). Or pivot to `/gsd-plan-phase 17` (ATCH-01) / `/gsd-plan-phase 18` (AIPC-01) if a feature phase is the priority.
 
-**Known carry-forward into Phase 19 CLEAN:**
+**Status of Phase 19 CLEAN items:**
 
-- Pre-existing `cargo fmt --check` drift in 3 files unrelated to Phase 16 (`config/mod.rs`, `restricted_token.rs`, `profile/mod.rs`).
-- 5 pre-existing workspace test failures (Phase-11 era; identical on commit 070a851 long before Phase 16). Not blocking; documented in 16-02 SUMMARY.
+- CLEAN-01 — COMPLETE (commit `c87b10b`, 2026-04-18). `cargo fmt --all -- --check` exits 0 on whole workspace.
+- CLEAN-02 — pending. 5 pre-existing workspace test failures (Phase-11 era; identical on commit 070a851 long before Phase 16). Documented in 16-02 SUMMARY and 19-CONTEXT.md D-06. `make ci` remains red until this plan lands.
+- CLEAN-03 — pending. 10 disk-resident WIP items to triage per-file (D-12).
+- CLEAN-04 — pending. 1172 stale session files + retention policy + `nono prune` flag work.
