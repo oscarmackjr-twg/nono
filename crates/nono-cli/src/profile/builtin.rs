@@ -353,12 +353,48 @@ mod tests {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
+
+        // Env-var guards must hold paths that pass `Path::is_absolute()` on
+        // the host platform. `/home/nono-test/...` is absolute on Unix but
+        // NOT on Windows (no drive letter), which causes `expand_vars` to
+        // reject the XDG_* paths and the whole test to fail with
+        // EnvVarValidation. Use platform-absolute tempdir-backed paths on
+        // Windows and keep the existing Unix-shaped guard on Unix.
+        #[cfg(not(target_os = "windows"))]
         let _env = crate::test_env::EnvVarGuard::set_all(&[
             ("HOME", "/home/nono-test"),
             ("XDG_CONFIG_HOME", "/home/nono-test/.config"),
             ("XDG_DATA_HOME", "/home/nono-test/.local/share"),
             ("XDG_STATE_HOME", "/home/nono-test/.local/state"),
             ("XDG_CACHE_HOME", "/home/nono-test/.cache"),
+        ]);
+
+        #[cfg(target_os = "windows")]
+        let home_tmp = tempdir().expect("home tmpdir");
+        #[cfg(target_os = "windows")]
+        let home_str = home_tmp
+            .path()
+            .to_str()
+            .expect("home tmpdir path is utf-8")
+            .to_string();
+        #[cfg(target_os = "windows")]
+        let xdg_config = format!("{home_str}\\.config");
+        #[cfg(target_os = "windows")]
+        let xdg_data = format!("{home_str}\\.local\\share");
+        #[cfg(target_os = "windows")]
+        let xdg_state = format!("{home_str}\\.local\\state");
+        #[cfg(target_os = "windows")]
+        let xdg_cache = format!("{home_str}\\.cache");
+        #[cfg(target_os = "windows")]
+        let _env = crate::test_env::EnvVarGuard::set_all(&[
+            ("HOME", home_str.as_str()),
+            // USERPROFILE wins over HOME in validated_home() on Windows, so
+            // pin it to the same tempdir to keep the resolution consistent.
+            ("USERPROFILE", home_str.as_str()),
+            ("XDG_CONFIG_HOME", xdg_config.as_str()),
+            ("XDG_DATA_HOME", xdg_data.as_str()),
+            ("XDG_STATE_HOME", xdg_state.as_str()),
+            ("XDG_CACHE_HOME", xdg_cache.as_str()),
         ]);
 
         let workdir = tempdir().expect("tmpdir");
