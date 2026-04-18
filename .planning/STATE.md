@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: Human Verification UAT
-status: paused
-stopped_at: "Phase 14 paused 2026-04-18 after plan 14-01 escalated out of scope. 14-02 committed (setup.rs wrap-availability); 14-01 code reverted after Direction 3 (AllocConsole) + Direction 2 (null token) both failed the user smoke gate. Phase 15 created for the PTY + detached-supervisor architecture investigation that unblocks 14-01."
-last_updated: "2026-04-18T02:20:00.000Z"
+status: ready-to-archive
+stopped_at: "Phase 14 closed 2026-04-18 with carry-forward (2/3 plans done; 14-01 escalated to Phase 15 as v1.0-known-issue per user ship-with-known-issue decision). Phase 13 UAT resolved with terminal verdicts on all 10 items (3 pass, 7 waived). v1.0 Windows Parity milestone is ready for archival."
+last_updated: "2026-04-18T02:45:00.000Z"
 last_activity: 2026-04-18
 progress:
-  total_phases: 13
-  completed_phases: 11
-  total_plans: 32
-  completed_plans: 31
-  percent: 97
+  total_phases: 15
+  completed_phases: 13
+  total_plans: 35
+  completed_plans: 33
+  percent: 94
 ---
 
 # Project State: nono - Windows Gap Closure
@@ -20,20 +20,24 @@ progress:
 
 **Core Value:** Every nono command that works on Linux/macOS should work on Windows with equivalent security guarantees, or be explicitly documented as intentionally unsupported with a clear rationale.
 
-**Current Focus:** Phase 15 planning (investigation) — Phase 14 paused pending Phase 15 resolution.
+**Current Focus:** v1.0 milestone ready-to-archive (with documented known-issue). Phase 15 is the first v1.1 phase, investigating the carry-forward bug.
 
 ## Current Position
 
-Phase: 14 (v1-fix-pass) — PAUSED 2026-04-18
-Plans in Phase 14:
-  - 14-01: ESCALATED to Phase 15 (code reverted; both Direction 3 AllocConsole and Direction 2 null-token failed the user smoke gate)
-  - 14-02: DONE (setup.rs wrap-availability sentence landed at commit 8e200f8)
-  - 14-03: PENDING (waiting on Phase 15 so the 4 UAT items blocked by 14-01 become runnable)
+Phase: 14 (v1-fix-pass) — COMPLETE with carry-forward 2026-04-18
+  - 14-01: ESCALATED to Phase 15 (code reverted 2026-04-18; both Direction 3 AllocConsole and Direction 2 null-token failed the user smoke gate)
+  - 14-02: DONE (setup.rs wrap-availability sentence — commit 8e200f8)
+  - 14-03: DONE (runbook typo fixes + 2nd-pass UAT + upstream VERIFICATION.md promotion — commits 647e0a5, 14a9ef0, 6500bb1, 952f8e1)
 
-Phase 15 (Detached Console + ConPTY Architecture Investigation) — NOT PLANNED.
-Next action: `/gsd-plan-phase 15` to scope the investigation, or make the v1.0 shipping-as-known-issue decision first.
+Phase 13 (v1.0 Human Verification UAT) — RESOLVED 2026-04-18. All 10 items terminal: 3 pass, 7 waived (4 v1.0-known-issue, 1 no-test-fixture, 2 pre-existing).
 
-Last activity: 2026-04-18 -- Phase 14 paused; Phase 15 created as the follow-up investigation.
+Phase 15 (Detached Console + ConPTY Architecture Investigation) — NOT PLANNED. First v1.1 candidate phase.
+
+Next actions:
+  - Archive v1.0 milestone (via `/gsd-complete-milestone` or manual close) — if ready.
+  - Or `/gsd-plan-phase 15` to scope the detached+PTY investigation as the first Phase of v1.1.
+
+Last activity: 2026-04-18 -- Phase 14 closed with carry-forward; upstream VERIFICATION.md files promoted.
 
 ```
 Progress: [██████████] 100% (31/31 plans complete on disk)
