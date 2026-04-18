@@ -1877,7 +1877,8 @@ mod tests {
     fn test_resolve_user_config_dir_uses_valid_absolute_xdg() {
         let _guard = env_lock();
         let tmp = tempdir().expect("tmpdir");
-        let _env = EnvVarGuard::set_all(&[("XDG_CONFIG_HOME", tmp.path().to_str().expect("utf8 path"))]);
+        let _env =
+            EnvVarGuard::set_all(&[("XDG_CONFIG_HOME", tmp.path().to_str().expect("utf8 path"))]);
         let resolved = resolve_user_config_dir().expect("resolve user config dir");
         assert_eq!(
             resolved,
