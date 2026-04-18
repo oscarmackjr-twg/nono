@@ -68,6 +68,24 @@ fn create_trust_interceptor(
     }
 }
 
+/// Determine whether the supervised session should allocate a ConPTY/PTY pair.
+///
+/// Non-Windows: allocate when detached-start is requested (so the supervisor owns
+/// a PTY the child writes into for `nono attach`) or when the caller asked for an
+/// interactive PTY (`nono shell`).
+///
+/// Windows: allocate only for interactive sessions (`nono shell`). Detached supervisors
+/// on Windows must not allocate a `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` because combining
+/// it with `DETACHED_PROCESS` causes console-application grandchildren to exit with
+/// `STATUS_DLL_INIT_FAILED (0xC0000142)`. See `.planning/debug/resolved/windows-supervised-exec-cascade.md`.
+fn should_allocate_pty(session: &SessionLaunchOptions) -> bool {
+    if cfg!(target_os = "windows") {
+        session.interactive_pty
+    } else {
+        session.detached_start || session.interactive_pty
+    }
+}
+
 fn create_session_runtime_state(
     command: &[String],
     caps: &CapabilitySet,
@@ -114,7 +132,7 @@ fn create_session_runtime_state(
         rollback_session: audit_state.map(|state| state.session_id.clone()),
     };
     let session_guard = Some(session::SessionGuard::new(session_record)?);
-    let pty_pair = if session.detached_start || session.interactive_pty {
+    let pty_pair = if should_allocate_pty(session) {
         Some(pty_proxy::open_pty()?)
     } else {
         None
@@ -277,4 +295,44 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
     }
 
     Ok(exit_code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_session(detached: bool, interactive: bool) -> SessionLaunchOptions {
+        SessionLaunchOptions {
+            detached_start: detached,
+            interactive_pty: interactive,
+            ..SessionLaunchOptions::default()
+        }
+    }
+
+    #[test]
+    fn interactive_sessions_always_allocate_pty() {
+        assert!(should_allocate_pty(&make_session(false, true)));
+        assert!(should_allocate_pty(&make_session(true, true)));
+    }
+
+    #[test]
+    fn non_detached_non_interactive_never_allocates_pty() {
+        assert!(!should_allocate_pty(&make_session(false, false)));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_detached_supervisor_does_not_allocate_pty() {
+        // Detached + non-interactive on Windows must skip PTY allocation to avoid
+        // PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE + DETACHED_PROCESS → 0xC0000142.
+        assert!(!should_allocate_pty(&make_session(true, false)));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn unix_detached_supervisor_allocates_pty() {
+        // Unix supervisors still open a PTY in detached mode so attach-side clients
+        // can read child output through the supervisor's PTY pair.
+        assert!(should_allocate_pty(&make_session(true, false)));
+    }
 }

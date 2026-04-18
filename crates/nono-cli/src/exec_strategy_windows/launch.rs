@@ -837,7 +837,18 @@ pub(super) fn spawn_windows_child(
     // yielding ERROR_INVALID_HANDLE (6).
     let _restricted_holder: Option<restricted_token::RestrictedToken>;
     let _low_integrity_holder: Option<OwnedHandle>;
-    let h_token: HANDLE = if let Some(ref sid) = config.session_sid {
+    // On the Windows detached launch path, the WRITE_RESTRICTED + session-SID
+    // token combines with DETACHED_PROCESS + no-PTY to trigger STATUS_DLL_INIT_FAILED
+    // (0xC0000142) in console-application grandchildren. The only configuration that
+    // initializes the loader cleanly is a null token. Kernel-level network enforcement
+    // falls back to AppID-based WFP filtering; per-session SID WFP is not available
+    // on this path. See .planning/debug/resolved/windows-supervised-exec-cascade.md.
+    let is_windows_detached_launch = is_windows_detached_launch();
+    let h_token: HANDLE = if is_windows_detached_launch {
+        _restricted_holder = None;
+        _low_integrity_holder = None;
+        std::ptr::null_mut()
+    } else if let Some(ref sid) = config.session_sid {
         let holder = restricted_token::create_restricted_token_with_sid(sid)?;
         let raw = holder.h_token;
         _restricted_holder = Some(holder);
@@ -1069,4 +1080,47 @@ pub(super) fn spawn_supervised_with_standard_token(
         None,
         session_id,
     )
+}
+
+/// Returns true when the current process is the inner detached supervisor launched by
+/// `startup_runtime::run_detached_launch`. The outer `nono run --detached` invocation
+/// re-execs itself with `NONO_DETACHED_LAUNCH=1` + `DETACHED_PROCESS`; the inner
+/// supervisor then spawns the sandboxed grandchild via `spawn_windows_child`. Only the
+/// inner path requires the null-token shape — outer invocations and non-detached runs
+/// keep their WRITE_RESTRICTED + session-SID token.
+pub(crate) fn is_windows_detached_launch() -> bool {
+    std::env::var("NONO_DETACHED_LAUNCH")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod detached_token_gate_tests {
+    use super::is_windows_detached_launch;
+    use crate::test_env::{lock_env, EnvVarGuard};
+
+    #[test]
+    fn returns_false_when_env_unset() {
+        let _lock = lock_env();
+        // Ensure the env var is cleared for the duration of the assertion.
+        let g = EnvVarGuard::set_all(&[("NONO_DETACHED_LAUNCH", "1")]);
+        g.remove("NONO_DETACHED_LAUNCH");
+        assert!(!is_windows_detached_launch());
+    }
+
+    #[test]
+    fn returns_true_when_env_is_one() {
+        let _lock = lock_env();
+        let _g = EnvVarGuard::set_all(&[("NONO_DETACHED_LAUNCH", "1")]);
+        assert!(is_windows_detached_launch());
+    }
+
+    #[test]
+    fn returns_false_when_env_is_other_value() {
+        let _lock = lock_env();
+        let _g = EnvVarGuard::set_all(&[("NONO_DETACHED_LAUNCH", "0")]);
+        assert!(!is_windows_detached_launch());
+        let _g2 = EnvVarGuard::set_all(&[("NONO_DETACHED_LAUNCH", "true")]);
+        assert!(!is_windows_detached_launch());
+    }
 }

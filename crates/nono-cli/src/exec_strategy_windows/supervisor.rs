@@ -414,6 +414,13 @@ impl WindowsSupervisorRuntime {
         let active_attachment = self.active_attachment.clone();
 
         if pty_output_read == 0 {
+            // Windows detached supervisors skip PTY allocation to avoid
+            // PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE + DETACHED_PROCESS → 0xC0000142.
+            // `nono attach` streaming for detached sessions is a v2.1+ enhancement.
+            tracing::info!(
+                session_id = %session_id,
+                "No PTY on supervised session — child output is not streamed through the supervisor (nono attach output relay is a v2.1+ feature on Windows detached sessions)"
+            );
             return Ok(());
         }
 
