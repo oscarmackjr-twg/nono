@@ -1,36 +1,64 @@
 ---
 phase: 14-v1-fix-pass
 plan: 01
-completed: 2026-04-18T02:05:00Z
-status: awaiting-direction-2-regate
+completed: 2026-04-18T02:15:00Z
+status: escalated-out-of-scope
 ---
 
-## What built
+## Outcome
 
-Fixed the detached-supervisor `STATUS_DLL_INIT_FAILED (0xC0000142)` that killed sandboxed console grandchildren.
+**Plan 14-01 is escalated out of scope for Phase 14.** Both committed fix directions failed the user-executed smoke gate; per the documented failure policy, no further debugging spiral was attempted in this plan. Code changes have been reverted. Bug #3 (detached console grandchild `STATUS_DLL_INIT_FAILED 0xC0000142`) remains open and requires a follow-up phase with a different architectural approach.
 
-**Evolution of the fix across this phase:**
-1. **Direction 1** (session SID as `TokenGroups`) — abandoned before commit: infeasible with user-mode Windows APIs (`AdjustTokenGroups` cannot add new SIDs; `SetTokenInformation(TokenGroups)` requires `SE_TCB_NAME`).
-2. **Direction 3** (pre-allocate console via `AllocConsole` in detached supervisor, keep WRITE_RESTRICTED + session SID restricting) — committed (`b06aebe`), user-smoked 2026-04-18, **FAILED** rows 1 and 2. AllocConsole did not unblock 0xC0000142.
-3. **Direction 2** (null token in detached mode; non-detached keeps WRITE_RESTRICTED + session SID) — committed (`005f6bc`), **PENDING** user re-gate.
+**Evolution of the fix attempts:**
+1. **Direction 1** (session SID as `TokenGroups` via `AdjustTokenGroups`) — abandoned before commit. Infeasible with user-mode Windows APIs (`AdjustTokenGroups` cannot add new SIDs to a token; `SetTokenInformation(TokenGroups)` requires `SE_TCB_NAME` privilege that a user process does not hold). See commit `9f02e60` (plan amendment) for the detailed API survey.
+2. **Direction 3** (`AllocConsole` in detached supervisor; keep WRITE_RESTRICTED + session SID as restricting SID). Committed `b06aebe`, smoked by user 2026-04-18T02:00 — **FAILED rows 1 and 2** with identical `0xC0000142`. AllocConsole alone did not unblock DLL loader init.
+3. **Direction 2** (null token in detached mode; non-detached keeps WRITE_RESTRICTED + session SID). Committed `005f6bc`, smoked by user 2026-04-18T02:10 — **FAILED rows 1 and 2** with identical `0xC0000142`. Null-token-in-detached did not unblock either.
 
-Direction 2 is the plan's documented "last-resort" fallback. The pivot was automatic per the plan's failure policy — no further Direction-3 debugging.
+Both committed directions were reverted:
+- `bd55893` — Revert Direction 2 (005f6bc).
+- `1980df5` — Revert Direction 3 (b06aebe).
+
+Launch.rs and restricted_token.rs are back to their pre-14-01 state (matches `dc4c18b` exactly, i.e. still carries the Bug #2 WRITE_RESTRICTED fix from commit `e094994`). No security trade-offs were left on the branch; the `0xC0000142` bug remains unfixed and surfaces only on the detached console-grandchild path.
+
+## Root cause (as reconstructed from the smoke-gate evidence)
+
+The debug doc (`.planning/debug/windows-supervised-exec-cascade.md`) matrix shows that the ONLY working detached-mode configuration is `null token + no PTY`:
+
+| Token                  | PTY  | Exit (detached, ping.exe)          |
+|------------------------|------|-------------------------------------|
+| Flags=0 restricting SID | Some | 0xC0000022 (Bug #2, fixed in e094994) |
+| WRITE_RESTRICTED       | Some | 0xC0000142 |
+| WRITE_RESTRICTED       | None | 0xC0000142 |
+| null                   | Some | 0xC0000142 |
+| null                   | None | ping runs (separate attach-pipe timeout) |
+
+My Direction 2 implementation nulled the token but left the PTY live. Per the matrix that is still `0xC0000142` — exactly what the Pass-2 smoke showed. Fully matching the matrix's working row would require **both** `null token` AND `no PTY in detached mode`. That second part is not a trivial launch.rs flip — PTY in the current supervised_runtime chain is load-bearing for stdout capture and the supervisor-child IPC handshake. Changing it is a genuine architecture decision, not a tactical fix, and thus out of scope for Phase 14.
+
+## Impact on Phase 14 roadmap
+
+- **Roadmap success criterion #1** (detached console-child initializes) — **NOT MET**. Plan 14-01 did not deliver.
+- **Phase 13 UAT items dependent on 14-01** — `P05-HV-1`, `P07-HV-3`, `P11-HV-1`, `P11-HV-3` remain `blocked`. Plan 14-03's 2nd-pass UAT will re-verify whatever it can and leave these 4 items in `blocked` status.
+- **Roadmap success criteria #2 (14-02) + #3–5 (14-03)** are not affected by 14-01 and can still be closed in this phase.
+
+## Recommended follow-up
+
+A new phase (Phase 15 candidate, or a GSD note pointing to the debug doc) to:
+1. Investigate the PTY + restricted-token + detached-supervisor interaction at the ConPTY / StartupInfoEx attribute level.
+2. Evaluate whether detached mode can gate its PTY usage on session type (interactive → PTY; `--detached` → no PTY, stdio-only supervisor).
+3. Re-test the matrix's `null + no PTY` working row on the current codebase.
+4. Consider alternate detached IPC paths that don't require PTY.
+
+This is genuine architecture work, not a code tweak. The user's "no further debugging spiral" rule was correctly enforced: stop in 14-01, document the state, punt to a proper investigation phase.
 
 ## Key files
 
-### Modified
-- `crates/nono-cli/src/exec_strategy_windows/launch.rs`
-  - Added `ensure_detached_supervisor_console_attached()` helper (detached-only, gated on `NONO_DETACHED_LAUNCH=1` env var).
-  - Called at the top of `spawn_windows_child`, before restricted-token construction + `CreateProcessAsUserW`.
-  - Uses `windows_sys::Win32::System::Console::AllocConsole` (already-enabled feature flag).
-  - Idempotent — repeated calls return `ERROR_ACCESS_DENIED` and are treated as benign.
+### Reverted (no net change on branch vs dc4c18b)
+- `crates/nono-cli/src/exec_strategy_windows/launch.rs` — restored to pre-14-01 state. Direction 3's `AllocConsole` call and `ensure_detached_supervisor_console_attached` helper reverted (commit `1980df5`). Direction 2's null-token-in-detached branch reverted (commit `bd55893`).
+- `crates/nono-cli/src/exec_strategy_windows/restricted_token.rs` — never modified by 14-01 (stays at the Bug #2 WRITE_RESTRICTED fix from `e094994`). All 4 existing regression tests still pass.
 
-### Unchanged (intentional)
-- `crates/nono-cli/src/exec_strategy_windows/restricted_token.rs` — stays at the Bug #2 WRITE_RESTRICTED fix (commit `e094994`). Session SID is still attached as a restricting SID → WFP `FWPM_CONDITION_ALE_USER_ID` still matches.
-- All 4 existing restricted-token regression tests still pass.
-
-### Planning
-- `.planning/phases/14-v1-fix-pass/14-01-PLAN.md` — amended with `<direction_decision>` (Direction 1 infeasibility, pivot to Direction 3, Direction 2 fallback) and `<smoke_test_gate>` (blocking 4-row matrix, immediate Direction 2 pivot on any failure).
+### Planning artifacts kept
+- `.planning/phases/14-v1-fix-pass/14-01-PLAN.md` — amended (commit `9f02e60`) with `<direction_decision>` (Direction 1 infeasibility analysis) and `<smoke_test_gate>` (the 4-row matrix + failure policy). These stay on branch as documentation of what was tried and why.
+- This SUMMARY file — commits `88ae5ae` (initial), `cc9884e` (Pass-1 results), and the current amendment (escalation).
 
 ## Decisions
 
@@ -86,20 +114,29 @@ Documented in `14-01-PLAN.md` `<smoke_test_gate>`. No more debugging of Directio
 | `cargo test -p nono-cli --bin nono -- restricted_token` | 4 passed / 0 failed (existing Bug #2 regression tests green) |
 | `cargo build --release -p nono-cli --bin nono` | passed (`target/release/nono.exe` ready for smoke tests) |
 
-### Manual smoke-gate matrix (BLOCKING — awaiting human execution)
+### Manual smoke-gate matrix — both passes failed, plan escalated
 
-From a fresh PowerShell window (not MSYS/bash) on an admin Windows 10/11 host with `nono-wfp-service` running:
+User executed the 4-row matrix twice on admin Windows 11 Enterprise host.
 
-| # | Config                                    | Command | Status |
-|---|-------------------------------------------|---------|--------|
-| 1 | restricted token + AllocConsole (no PTY)  | `.\target\release\nono.exe run --detached --allow-cwd -- ping -t 127.0.0.1` | **PENDING** |
-| 2 | restricted token + ConPTY (PTY path live) | `.\target\release\nono.exe run --detached --allow-cwd -- cmd /c "echo hello"` | **PENDING** |
-| 3 | non-detached regression                   | `.\target\release\nono.exe run --allow-cwd -- cmd /c "echo hello"` | **PENDING** |
-| 4 | `--block-net` WFP regression (admin host) | `.\target\release\nono.exe run --detached --block-net --allow-cwd -- cmd /c "curl --max-time 5 http://example.com"` | **PENDING** |
+**Pass 2 re-gate (Direction 2 — null token in detached) — 2026-04-18T02:10**
 
-Expected per row: no `0xC0000142`, no `0xC0000022`, target process live in `tasklist` (rows 1, 4), stdout observable (rows 2, 3), row 4's child exits non-zero with a curl failure in stderr.
+| # | Config                                          | Result | Evidence |
+|---|-------------------------------------------------|--------|----------|
+| 1 | null token + ConPTY (detached)                  | **FAIL** | `Detached session failed to start (exit status: exit code: 0xc0000142)` |
+| 2 | null token + ConPTY (detached, cmd /c echo)     | **FAIL** | `Detached session failed to start (exit status: exit code: 0xc0000142)` |
+| 3 | non-detached (WRITE_RESTRICTED path unchanged)  | **PASS** | `hello` printed, exit 0 in 52ms. UNC path warning is cmd.exe behavior, pre-existing. |
+| 4 | `--block-net` (AppID filter path; but WFP service not installed in user's environment) | **N/A** | Failed earlier at WFP registration check: `nono-wfp-service is not registered. Run nono setup --install-wfp-service first`. Not a DLL init failure and does not help evaluate Direction 2's network-enforcement properties. |
 
-**Failure policy (per `14-01-PLAN.md <smoke_test_gate>`):** if any row fails, pivot immediately to Direction 2 (null token + AppID WFP). No further Direction-3 debugging.
+Rows 1 and 2 still hit `0xC0000142` under Direction 2 (null token) — consistent with the debug-doc matrix row `null token + Some PTY → 0xC0000142`. Direction 2 as spec'd in `14-01-PLAN.md` did not disable PTY in detached mode, so this was an incomplete match of the matrix's one-working configuration.
+
+**Escalation decision:** per `14-01-PLAN.md <smoke_test_gate>` step 5, stop and escalate — "the bug is not console-init nor restricting-SID but something more fundamental, which is out of scope for this plan." Both code directions reverted.
+
+**What would be needed for a real fix** (out of scope for plan 14-01):
+- Also disable PTY allocation in detached mode (change `supervised_runtime.rs` / PTY wiring so detached mode passes `pty: None` to `spawn_windows_child`).
+- Or find an alternate detached IPC mechanism that doesn't require ConPTY.
+- Or investigate at the `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` / `StartupInfoEx` level why `null token + PTY` still fails DLL init in a `DETACHED_PROCESS` supervisor.
+
+These are genuine architecture changes, not tactical fixes. Deferred to a follow-up phase.
 
 ## Execution notes
 

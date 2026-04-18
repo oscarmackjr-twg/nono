@@ -196,7 +196,7 @@ Plans:
   6. `make ci` stays green (no new warnings, no new test failures, existing pre-existing failures documented in STATE.md unchanged).
 **Plans**: 3 plans
 Plans:
-- [~] 14-01-PLAN.md — Fix Bug #3: detached console-child STATUS_DLL_INIT_FAILED. **Code landed (Direction 3, AllocConsole in detached supervisor) — awaiting blocking smoke-gate matrix on Windows admin host before final merge.** Direction 1 (session SID as TokenGroups) found infeasible; see `14-01-PLAN.md <direction_decision>`.
+- [!] 14-01-PLAN.md — Fix Bug #3: detached console-child STATUS_DLL_INIT_FAILED. **ESCALATED OUT OF SCOPE.** Both code directions (Direction 3 AllocConsole, Direction 2 null token) failed the user smoke-gate on 2026-04-18. Direction 1 (session SID as TokenGroups) was infeasible pre-commit. All 14-01 code changes reverted (`bd55893`, `1980df5`). Real fix requires PTY + detached-supervisor architecture work deferred to a follow-up phase. See `14-01-SUMMARY.md` for the full post-mortem and the debug-doc matrix pointing to "null token + no PTY" as the true working configuration.
 - [x] 14-02-PLAN.md — Fix `setup --check-only` help-text drift in `crates/nono-cli/src/setup.rs`: add the canonical wrap-availability sentence; remove the stale "remain intentionally unavailable" Windows branch.
 - [ ] 14-03-PLAN.md — Correct Phase 13 runbook (`13-UAT.md` P09-HV-1 command + P05-HV-1 flag typo); then re-run the 5 blocked items + P07-HV-2 on an admin host with `nono-wfp-service` registered; then run Phase 13 Task 3 (upstream VERIFICATION.md promotion).
 
@@ -217,4 +217,4 @@ Plans:
 | 11. Runtime Capability Expansion | 2/2 | Complete | 2026-04-11 |
 | 12. Milestone Bookkeeping Cleanup | 3/3 | Complete   | 2026-04-11 |
 | 13. v1.0 Human Verification UAT | 0/1 | In Progress (partial — 2 pass, 1 fail, 5 blocked, 2 waived) | - |
-| 14. v1.0 Fix Pass | 1/3 | In Progress (14-02 done; 14-01 awaiting smoke-gate; 14-03 awaiting UAT re-run) | - |
+| 14. v1.0 Fix Pass | 1/3 | In Progress (14-02 done; 14-01 escalated out of scope — deferred to follow-up phase; 14-03 awaiting UAT re-run) | - |
