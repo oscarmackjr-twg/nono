@@ -5,10 +5,22 @@
 ### Documentation
 
 - *(windows)* Publish Windows filesystem parity contract and align preview/security docs with the current native subset
+- *(windows)* Correct Phase 13 UAT runbook typos — `--detach` → `--detached` (P05-HV-1), `--proxy-only` → `--network-profile` / `--credential` / `--upstream-proxy` (P09-HV-1)
 
 ### Features
 
 - *(windows)* Expand the native filesystem subset to accept exact-file grants, write-only directory rules, Windows-aware path comparisons, and policy-preprocessed `override_deny`
+
+### Bug Fixes
+
+- *(windows)* `nono setup --check-only` no longer self-contradicts about `nono wrap` — removes the stale "remain intentionally unavailable" sentence and adds the canonical "`'nono wrap' is available on Windows with Job Object + WFP enforcement (no exec-replace, unlike Unix)`" line (Phase 14 plan 14-02, closes P07-HV-2)
+
+### Known Issues
+
+- *(windows, detached)* Sandboxed **console** grandchildren spawned via `nono run --detached` fail DLL loader initialization with NT status `0xC0000142` (`STATUS_DLL_INIT_FAILED`). Root cause per the debug-session matrix (`.planning/debug/windows-supervised-exec-cascade.md`) is a `DETACHED_PROCESS` supervisor + ConPTY + restricted-token interaction. GUI apps (e.g. `notepad.exe`) initialize fine under the same conditions; only console apps are affected.
+  - **Workaround:** use non-detached mode (`nono run -- <cmd>`) for sandboxed console use cases on Windows. Non-detached path is fully functional end-to-end.
+  - **Tracking:** Phase 15 (`.planning/phases/15-detached-console-conpty-investigation/README.md`). Phase 13 UAT items `P05-HV-1`, `P07-HV-3`, `P11-HV-1`, `P11-HV-3` carry forward as `v1.0-known-issue` and will be re-verified under Phase 15's fix.
+  - **Scope:** Windows-only. Linux and macOS detached-sandbox paths are unaffected.
 
 ## [0.30.1] - 2026-04-09
 
