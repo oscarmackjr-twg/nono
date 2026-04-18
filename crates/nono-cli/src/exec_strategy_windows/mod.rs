@@ -624,8 +624,7 @@ pub fn execute_supervised(
 
     // Compute the --timeout wall-clock deadline BEFORE any spawn work so a
     // u64::MAX overflow fails fast. None when --timeout is absent.
-    let timeout_deadline =
-        supervisor::compute_deadline(limits.timeout, std::time::Instant::now())?;
+    let timeout_deadline = supervisor::compute_deadline(limits.timeout, std::time::Instant::now())?;
 
     // Plan 16-02 Step 5 reorders this block so `containment` is created BEFORE
     // `WindowsSupervisorRuntime::initialize`. The runtime borrows

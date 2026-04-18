@@ -592,8 +592,7 @@ impl WindowsSupervisorRuntime {
                                                     "Terminate requested via control pipe for session {}",
                                                     user_session_id
                                                 );
-                                                terminate_requested
-                                                    .store(true, Ordering::SeqCst);
+                                                terminate_requested.store(true, Ordering::SeqCst);
                                                 break;
                                             }
                                         }
@@ -890,9 +889,7 @@ impl WindowsSupervisorRuntime {
                     self.state = WindowsSupervisorLifecycleState::ShuttingDown;
                     self.shutdown();
                     self.state = WindowsSupervisorLifecycleState::Completed;
-                    return Ok(
-                        super::launch::STATUS_TIMEOUT_EXIT_CODE as i32,
-                    );
+                    return Ok(super::launch::STATUS_TIMEOUT_EXIT_CODE as i32);
                 }
             }
 
@@ -1533,8 +1530,7 @@ mod timeout_deadline_tests {
             .expect("cmd /c ping spawn should succeed in the deadline test");
 
         let child_handle = child.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
-        apply_process_handle_to_containment(&containment, child_handle)
-            .expect("assign to job");
+        apply_process_handle_to_containment(&containment, child_handle).expect("assign to job");
         // Forget the std::process::Child so it doesn't close its handle — the
         // Job Object controls lifetime and TerminateJobObject will reap it.
         // (We duplicate the handle via AsRawHandle before letting `child` go out

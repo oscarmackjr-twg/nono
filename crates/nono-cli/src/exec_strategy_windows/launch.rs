@@ -271,7 +271,10 @@ pub(super) fn apply_resource_limits(
             )
         };
         if ok == 0 {
-            let which = match (limits.memory_bytes.is_some(), limits.max_processes.is_some()) {
+            let which = match (
+                limits.memory_bytes.is_some(),
+                limits.max_processes.is_some(),
+            ) {
                 (true, true) => "--memory + --max-processes",
                 (true, false) => "--memory",
                 (false, true) => "--max-processes",
@@ -1432,8 +1435,7 @@ mod apply_resource_limits_tests {
             "KILL_ON_JOB_CLOSE must be preserved after apply_resource_limits"
         );
         assert!(
-            info.BasicLimitInformation.LimitFlags
-                & JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION
+            info.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION
                 != 0,
             "DIE_ON_UNHANDLED_EXCEPTION must be preserved after apply_resource_limits"
         );
