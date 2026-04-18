@@ -16,8 +16,8 @@ This roadmap outlines the path to functional parity between the Windows implemen
 - [x] **Phase 10: ETW-Based Learn Command** - Implement nono learn on Windows via Event Tracing for Windows. (completed 2026-04-10)
 - [x] **Phase 11: Runtime Capability Expansion** - (Stretch) Enable sandboxed child to request additional capabilities at runtime. (completed 2026-04-11, human verification pending)
 - [x] **Phase 12: Milestone Bookkeeping Cleanup** - Close planning-trail tech debt from v1.0 audit (checkbox sweep, retro VERIFICATION.md for 04/10, ROADMAP reconciliation, minor code nits). (completed 2026-04-11)
-- [ ] **Phase 13: v1.0 Human Verification UAT** - Execute the 10 live-host human-verification items deferred across phases 05, 07, 09, 11 in one Windows session.
-- [ ] **Phase 14: v1.0 Fix Pass** - Close three blocking gaps surfaced by Phase 13 UAT (detached console-child DLL init failure, setup help-text drift, P09 runbook correction) so v1.0 can be archived. **PAUSED 2026-04-18** after 14-01 escalated (see Phase 15).
+- [x] **Phase 13: v1.0 Human Verification UAT** - Execute the 10 live-host human-verification items deferred across phases 05, 07, 09, 11 in one Windows session. (resolved 2026-04-18; 2nd-pass verdicts: 3 pass, 7 waived — 4 as v1.0-known-issue carry-forward to Phase 15, 1 as no-test-fixture, 2 pre-existing)
+- [x] **Phase 14: v1.0 Fix Pass** - Close three blocking gaps surfaced by Phase 13 UAT (detached console-child DLL init failure, setup help-text drift, P09 runbook correction) so v1.0 can be archived. (closed 2026-04-18 with 2/3 plans complete: 14-02 text fix landed; 14-03 runbook + UAT bookkeeping landed; 14-01 escalated to Phase 15 as v1.0 documented known issue)
 - [ ] **Phase 15: Detached Console + ConPTY Architecture Investigation** - Investigate why `null token + ConPTY` in a `DETACHED_PROCESS` supervisor still fails DLL init with `0xC0000142`, and deliver either (a) a working architecture that keeps PTY in detached mode, or (b) a gated PTY-disable path for detached mode with explicit stdio trade-offs. Unblocks Phase 14 closure and the 4 Phase 13 UAT items still `blocked`.
 
 ## Phase Details
@@ -199,7 +199,7 @@ Plans:
 Plans:
 - [!] 14-01-PLAN.md — Fix Bug #3: detached console-child STATUS_DLL_INIT_FAILED. **ESCALATED OUT OF SCOPE.** Both code directions (Direction 3 AllocConsole, Direction 2 null token) failed the user smoke-gate on 2026-04-18. Direction 1 (session SID as TokenGroups) was infeasible pre-commit. All 14-01 code changes reverted (`bd55893`, `1980df5`). Real fix requires PTY + detached-supervisor architecture work deferred to a follow-up phase. See `14-01-SUMMARY.md` for the full post-mortem and the debug-doc matrix pointing to "null token + no PTY" as the true working configuration.
 - [x] 14-02-PLAN.md — Fix `setup --check-only` help-text drift in `crates/nono-cli/src/setup.rs`: add the canonical wrap-availability sentence; remove the stale "remain intentionally unavailable" Windows branch.
-- [ ] 14-03-PLAN.md — Correct Phase 13 runbook (`13-UAT.md` P09-HV-1 command + P05-HV-1 flag typo); then re-run the 5 blocked items + P07-HV-2 on an admin host with `nono-wfp-service` registered; then run Phase 13 Task 3 (upstream VERIFICATION.md promotion).
+- [x] 14-03-PLAN.md — Correct Phase 13 runbook (`13-UAT.md` P09-HV-1 command + P05-HV-1 flag typo); re-ran 6 target items on admin host with `nono-wfp-service` registered (2nd-pass UAT 2026-04-18); promoted 4 upstream VERIFICATION.md files per outcome-handling matrix. 2nd-pass verdicts: P07-HV-2 `fail→pass` (14-02 fix verified); P05-HV-1/P07-HV-3/P11-HV-1/P11-HV-3 waived as `v1.0-known-issue` (Bug #3 residual → Phase 15); P09-HV-1 waived as `no-test-fixture` (runbook fix verified). 09-VERIFICATION.md and 11-VERIFICATION.md promoted `human_needed → passed`.
 
 ### Phase 15: Detached Console + ConPTY Architecture Investigation
 **Goal**: Deliver either (a) a working token + ConPTY configuration for sandboxed console grandchildren spawned under a `DETACHED_PROCESS` supervisor, or (b) a documented architectural pivot (e.g. gated PTY-disable in detached mode, alternate detached IPC) with explicit functional trade-offs captured. Unblocks Phase 14 closure and Phase 13 UAT items `P05-HV-1`, `P07-HV-3`, `P11-HV-1`, `P11-HV-3`.
@@ -230,6 +230,6 @@ Plans:
 | 10. ETW-Based Learn Command | 3/3 | Complete   | 2026-04-10 |
 | 11. Runtime Capability Expansion | 2/2 | Complete | 2026-04-11 |
 | 12. Milestone Bookkeeping Cleanup | 3/3 | Complete   | 2026-04-11 |
-| 13. v1.0 Human Verification UAT | 0/1 | In Progress (partial — 2 pass, 1 fail, 5 blocked, 2 waived) | - |
-| 14. v1.0 Fix Pass | 1/3 | PAUSED 2026-04-18 (14-02 done; 14-01 escalated to Phase 15; 14-03 resumes after Phase 15 lands) | - |
+| 13. v1.0 Human Verification UAT | 1/1 | Resolved (2nd-pass 2026-04-18 — 3 pass, 7 waived incl. 4 v1.0-known-issue) | 2026-04-18 |
+| 14. v1.0 Fix Pass | 2/3 | Complete with carry-forward (14-02 done; 14-03 done; 14-01 escalated to Phase 15 as v1.0-known-issue) | 2026-04-18 |
 | 15. Detached Console + ConPTY Architecture Investigation | 0/0 | Not Planned (run `/gsd-plan-phase 15` to start) | - |
