@@ -19,3 +19,7 @@ bindings/node/node_modules*
 
 # Gemini CLI planning state
 
+# WFP service debug crumbs (19-CLEAN-03 D-11)
+host.nono_binary.commit
+/query
+
