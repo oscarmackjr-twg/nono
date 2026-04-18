@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: Resource Limits, Extended IPC, Attach-Streaming & Cleanup
 status: Phase 16 complete; ready to plan Phase 17
-stopped_at: Phase 16 complete — RESL-01..04 shipped (commits d36d073, 39ee157, 238fd1d, da27080, d61aef7). Next phase 17 (ATCH-01) or 18 (AIPC-01) — independent.
-last_updated: "2026-04-18T17:30:00.000Z"
-last_activity: 2026-04-18
+stopped_at: Phase 19 context gathered
+last_updated: "2026-04-18T18:23:43.591Z"
+last_activity: 2026-04-18 — Phase 16 (Resource Limits) complete; RESL-01..04 shipped on `windows-squash`
 progress:
-  total_phases: 19
-  completed_phases: 16
-  total_plans: 42
-  completed_plans: 40
-  percent: 95
+  total_phases: 18
+  completed_phases: 14
+  total_plans: 40
+  completed_plans: 39
+  percent: 98
 ---
 
 # Project State: nono — v2.1 (Resource Limits, Extended IPC, Attach-Streaming & Cleanup)
@@ -122,9 +122,10 @@ Progress: [████░░░░░░]  40% (4/10 v2.1 requirements validate
 
 **Current Milestone:** v2.1 — Resource Limits, Extended IPC, Attach-Streaming & Cleanup
 **Last Activity:** 2026-04-18 — Phase 16 (Resource Limits) complete; RESL-01..04 shipped on `windows-squash`
-**Stopped At:** Phase 16 complete. SUMMARY at `.planning/phases/16-resource-limits/16-02-SUMMARY.md`. Commits: d36d073, 39ee157, 238fd1d, da27080, d61aef7. SC-1..SC-4 smoke evidence captured live on Windows 11.
+**Stopped At:** Phase 19 context gathered
 **Next Steps:** `/gsd-plan-phase 17` (ATCH-01 Attach-Streaming) or `/gsd-plan-phase 18` (AIPC-01 Extended IPC). Both phases are independent of each other. Phase 19 (CLEAN) is recommended last so it catches any drift introduced by 17/18.
 
 **Known carry-forward into Phase 19 CLEAN:**
+
 - Pre-existing `cargo fmt --check` drift in 3 files unrelated to Phase 16 (`config/mod.rs`, `restricted_token.rs`, `profile/mod.rs`).
 - 5 pre-existing workspace test failures (Phase-11 era; identical on commit 070a851 long before Phase 16). Not blocking; documented in 16-02 SUMMARY.
