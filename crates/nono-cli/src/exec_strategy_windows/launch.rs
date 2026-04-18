@@ -819,6 +819,47 @@ pub(super) fn execute_direct_with_low_integrity(
     Ok(exit_code)
 }
 
+/// Phase 14 plan 14-01 Direction 3: ensure the detached supervisor has a
+/// console attached before spawning a grandchild.
+///
+/// `startup_runtime::run_detached_launch` spawns the supervisor with
+/// `DETACHED_PROCESS`, which detaches it from any parent console. A sandboxed
+/// grandchild launched from there under the WRITE_RESTRICTED + restricting-SID
+/// token fails DLL loader init with `STATUS_DLL_INIT_FAILED (0xC0000142)`
+/// because the loader cannot resolve a console handle to inherit. GUI apps
+/// initialize fine under the same token; only console apps fail. See
+/// `.planning/debug/windows-supervised-exec-cascade.md` for the full matrix.
+///
+/// `AllocConsole` attaches a fresh console to the current (supervisor)
+/// process. The grandchild then inherits it via `CreateProcessAsUserW`.
+/// Called only when `NONO_DETACHED_LAUNCH=1` (i.e. this process IS the
+/// detached supervisor). Non-detached paths already have a console inherited
+/// from the user's shell and do not need this.
+///
+/// Idempotent: if a console is already attached (e.g. a prior call in this
+/// process attached one), `AllocConsole` returns 0 with
+/// `ERROR_ACCESS_DENIED`; the existing console is used and the failure is
+/// treated as a non-fatal success. This also makes the function safe to call
+/// multiple times if a supervisor spawns multiple grandchildren.
+///
+/// Note: the supervisor's own stdio is null (`startup_runtime.rs` sets
+/// `Stdio::null()` on stdin/stdout/stderr), so attaching a console has no
+/// side-effect on its own output channels.
+fn ensure_detached_supervisor_console_attached() {
+    if std::env::var_os("NONO_DETACHED_LAUNCH").is_none() {
+        return;
+    }
+    // SAFETY: AllocConsole takes no arguments and has no pointer/handle
+    // invariants to uphold. Return value 0 indicates failure — which on
+    // Windows typically means ERROR_ACCESS_DENIED (already attached) or
+    // ERROR_INVALID_PARAMETER on a locked-down container. We deliberately
+    // ignore the return value because both success (new console attached)
+    // and "already-attached" are acceptable outcomes for our purposes.
+    unsafe {
+        windows_sys::Win32::System::Console::AllocConsole();
+    }
+}
+
 pub(super) fn spawn_windows_child(
     config: &ExecConfig<'_>,
     launch_program: &Path,
@@ -827,6 +868,12 @@ pub(super) fn spawn_windows_child(
     pty: Option<&pty_proxy::PtyPair>,
     _session_id: Option<&str>,
 ) -> Result<WindowsSupervisedChild> {
+    // Phase 14 plan 14-01 Direction 3. Must run BEFORE the restricted-token
+    // construction + CreateProcessAsUserW below — the grandchild's DLL loader
+    // reads the console handle during process-initialization, so the console
+    // must exist by the time CreateProcessAsUserW fires.
+    ensure_detached_supervisor_console_attached();
+
     let env_pairs = build_child_env(config);
     let mut environment_block = build_windows_environment_block(&env_pairs);
 
