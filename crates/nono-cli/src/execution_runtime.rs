@@ -329,6 +329,7 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
             {
                 let exit_code = exec_strategy::execute_direct(
                     &config,
+                    &flags.resource_limits,
                     Some(flags.session.session_id.as_str()),
                 )?;
                 cleanup_capability_state_file(&cap_file_path);

@@ -300,6 +300,7 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
                 &started,
                 silent,
                 rollback.prompt_disabled,
+                resource_limits,
             )?
         }
     };

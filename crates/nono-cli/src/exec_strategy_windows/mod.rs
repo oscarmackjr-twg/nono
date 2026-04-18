@@ -61,9 +61,12 @@ use windows_sys::Win32::Security::{
     TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_ELEVATION, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
 };
 use windows_sys::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-    SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-    JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    AssignProcessToJobObject, CreateJobObjectW, JobObjectCpuRateControlInformation,
+    JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+    JOBOBJECT_CPU_RATE_CONTROL_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JOB_OBJECT_CPU_RATE_CONTROL_ENABLE, JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
+    JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION,
+    JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 use windows_sys::Win32::System::Services::{
     OpenSCManagerW, OpenServiceW, QueryServiceStatusEx, SC_MANAGER_CONNECT, SC_STATUS_PROCESS_INFO,
@@ -562,7 +565,11 @@ pub(crate) fn cleanup_windows_network_enforcement_artifacts() {
     cleanup_stale_network_enforcement_artifacts();
 }
 
-pub fn execute_direct(config: &ExecConfig<'_>, session_id: Option<&str>) -> Result<i32> {
+pub fn execute_direct(
+    config: &ExecConfig<'_>,
+    limits: &crate::launch_runtime::ResourceLimits,
+    session_id: Option<&str>,
+) -> Result<i32> {
     let prepared = prepare_live_windows_launch(config, session_id)?;
     let launch_program = prepared.launch_program.as_path();
 
@@ -579,6 +586,7 @@ pub fn execute_direct(config: &ExecConfig<'_>, session_id: Option<&str>) -> Resu
         &containment,
         &cmd_args,
         None,
+        limits,
         session_id,
     )?;
     loop {
@@ -605,6 +613,7 @@ pub fn execute_supervised(
     started: &str,
     silent: bool,
     rollback_prompt_disabled: bool,
+    limits: &crate::launch_runtime::ResourceLimits,
 ) -> Result<i32> {
     let Some(supervisor) = supervisor else {
         return Err(NonoError::UnsupportedPlatform(
@@ -664,6 +673,7 @@ pub fn execute_supervised(
         &containment,
         &cmd_args,
         runtime.pty(),
+        limits,
         session_id,
     )
     .map_err(|err| runtime.startup_failure(err.to_string()))?;

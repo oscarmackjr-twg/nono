@@ -135,6 +135,124 @@ pub(super) fn resume_contained_process(process: HANDLE, thread: HANDLE) -> Resul
     Ok(())
 }
 
+/// Apply Phase-16 resource limits (CPU / memory / process-count) to the given
+/// Job Object via `SetInformationJobObject`. Must be called AFTER
+/// `apply_process_handle_to_containment` and BEFORE `resume_contained_process`
+/// so the child never executes without the caps in effect.
+///
+/// * **CPU (RESL-01):** `JobObjectCpuRateControlInformation` with
+///   `ControlFlags = JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | HARD_CAP` and
+///   `CpuRate = percent * 100`.
+/// * **Memory (RESL-02) + max-processes (RESL-04):** Read-modify-write on
+///   `JobObjectExtendedLimitInformation` so the OR-in of new flag bits
+///   preserves `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE |
+///   JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION` that
+///   `create_process_containment` set.
+///
+/// RESL-03 (wall-clock timeout) is NOT applied here — it is enforced by a
+/// supervisor-side timer in Plan 16-02 Task 1 via `TerminateJobObject`.
+///
+/// Fail-closed: any `SetInformationJobObject` or `QueryInformationJobObject`
+/// failure returns `Err(NonoError::SandboxInit(...))` naming the failing limit
+/// and the Win32 last-error; the caller is expected to run
+/// `terminate_suspended_process` on the child.
+pub(super) fn apply_resource_limits(
+    containment: &ProcessContainment,
+    limits: &crate::launch_runtime::ResourceLimits,
+) -> Result<()> {
+    if limits.is_empty() {
+        return Ok(());
+    }
+
+    // CPU — separate info class from the extended-limit struct.
+    if let Some(percent) = limits.cpu_percent {
+        let mut info: JOBOBJECT_CPU_RATE_CONTROL_INFORMATION = unsafe {
+            // SAFETY: FFI POD struct, zero-init is valid.
+            std::mem::zeroed()
+        };
+        info.ControlFlags =
+            JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP;
+        // CpuRate field lives inside an anonymous union representing CpuRate xor MinRate/MaxRate.
+        // 100% == 10000; percent * 100 is safe for u16 → u32 since 1..=100 * 100 <= 10000.
+        info.Anonymous.CpuRate = u32::from(percent) * 100;
+        let ok = unsafe {
+            // SAFETY: `containment.job` is a live Job Object handle; `info` is a
+            // fully-initialized FFI struct owned by this frame; size matches the info class.
+            SetInformationJobObject(
+                containment.job,
+                JobObjectCpuRateControlInformation,
+                std::ptr::addr_of!(info) as *const _,
+                size_of::<JOBOBJECT_CPU_RATE_CONTROL_INFORMATION>() as u32,
+            )
+        };
+        if ok == 0 {
+            return Err(NonoError::SandboxInit(format!(
+                "Failed to apply --cpu-percent={percent} to Windows Job Object (GetLastError={})",
+                unsafe { GetLastError() }
+            )));
+        }
+    }
+
+    // Memory + max-processes share JobObjectExtendedLimitInformation.
+    if limits.memory_bytes.is_some() || limits.max_processes.is_some() {
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe {
+            // SAFETY: FFI POD struct, zero-init is valid prior to the readback.
+            std::mem::zeroed()
+        };
+        let mut returned: u32 = 0;
+        let ok = unsafe {
+            // SAFETY: `containment.job` is live; `info` is writable for
+            // size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() bytes; size matches info class.
+            QueryInformationJobObject(
+                containment.job,
+                JobObjectExtendedLimitInformation,
+                std::ptr::addr_of_mut!(info) as *mut _,
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                &mut returned,
+            )
+        };
+        if ok == 0 {
+            return Err(NonoError::SandboxInit(format!(
+                "Failed to read current Windows Job Object extended limit info (GetLastError={})",
+                unsafe { GetLastError() }
+            )));
+        }
+
+        if let Some(mem) = limits.memory_bytes {
+            info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_JOB_MEMORY;
+            info.JobMemoryLimit = mem as usize;
+        }
+        if let Some(procs) = limits.max_processes {
+            info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+            info.BasicLimitInformation.ActiveProcessLimit = procs;
+        }
+
+        let ok = unsafe {
+            // SAFETY: `info` was populated by Query above and mutated in place; size matches.
+            SetInformationJobObject(
+                containment.job,
+                JobObjectExtendedLimitInformation,
+                std::ptr::addr_of!(info) as *const _,
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if ok == 0 {
+            let which = match (limits.memory_bytes.is_some(), limits.max_processes.is_some()) {
+                (true, true) => "--memory + --max-processes",
+                (true, false) => "--memory",
+                (false, true) => "--max-processes",
+                (false, false) => "(none)",
+            };
+            return Err(NonoError::SandboxInit(format!(
+                "Failed to apply {which} to Windows Job Object (GetLastError={})",
+                unsafe { GetLastError() }
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 pub(super) fn prepare_runtime_hardened_args(
     resolved_program: &Path,
     args: &[String],
@@ -798,6 +916,7 @@ pub(super) fn execute_direct_with_low_integrity(
     launch_program: &Path,
     containment: &ProcessContainment,
     cmd_args: &[String],
+    limits: &crate::launch_runtime::ResourceLimits,
     session_id: Option<&str>,
 ) -> Result<i32> {
     let mut child = spawn_windows_child(
@@ -806,6 +925,7 @@ pub(super) fn execute_direct_with_low_integrity(
         containment,
         cmd_args,
         None,
+        limits,
         session_id,
     )?;
     let Some(exit_code) = child.poll_exit_code()? else {
@@ -825,6 +945,7 @@ pub(super) fn spawn_windows_child(
     containment: &ProcessContainment,
     cmd_args: &[String],
     pty: Option<&pty_proxy::PtyPair>,
+    limits: &crate::launch_runtime::ResourceLimits,
     _session_id: Option<&str>,
 ) -> Result<WindowsSupervisedChild> {
     let env_pairs = build_child_env(config);
@@ -1032,6 +1153,13 @@ pub(super) fn spawn_windows_child(
         terminate_suspended_process(process.raw(), "AssignProcessToJobObject failed");
         return Err(err);
     }
+    // Phase 16 RESL-01/02/04: apply the four resource-limit info classes BEFORE
+    // ResumeThread so the child never runs with an uncapped Job Object. Any
+    // failure here is fail-closed — terminate the suspended child and propagate.
+    if let Err(err) = apply_resource_limits(containment, limits) {
+        terminate_suspended_process(process.raw(), "apply_resource_limits failed");
+        return Err(err);
+    }
     resume_contained_process(process.raw(), thread.raw())?;
 
     Ok(WindowsSupervisedChild::Native {
@@ -1044,6 +1172,7 @@ pub(super) fn spawn_supervised_with_low_integrity(
     config: &ExecConfig<'_>,
     launch_program: &Path,
     containment: &ProcessContainment,
+    limits: &crate::launch_runtime::ResourceLimits,
     session_id: Option<&str>,
 ) -> Result<WindowsSupervisedChild> {
     let cmd_args = prepare_runtime_hardened_args(
@@ -1057,6 +1186,7 @@ pub(super) fn spawn_supervised_with_low_integrity(
         containment,
         &cmd_args,
         None,
+        limits,
         session_id,
     )
 }
@@ -1065,6 +1195,7 @@ pub(super) fn spawn_supervised_with_standard_token(
     config: &ExecConfig<'_>,
     launch_program: &Path,
     containment: &ProcessContainment,
+    limits: &crate::launch_runtime::ResourceLimits,
     session_id: Option<&str>,
 ) -> Result<WindowsSupervisedChild> {
     let cmd_args = prepare_runtime_hardened_args(
@@ -1078,6 +1209,7 @@ pub(super) fn spawn_supervised_with_standard_token(
         containment,
         &cmd_args,
         None,
+        limits,
         session_id,
     )
 }
@@ -1122,5 +1254,166 @@ mod detached_token_gate_tests {
         assert!(!is_windows_detached_launch());
         let _g2 = EnvVarGuard::set_all(&[("NONO_DETACHED_LAUNCH", "true")]);
         assert!(!is_windows_detached_launch());
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod apply_resource_limits_tests {
+    use super::*;
+    use crate::launch_runtime::ResourceLimits;
+
+    fn read_extended(job: HANDLE) -> JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        let mut returned: u32 = 0;
+        let ok = unsafe {
+            QueryInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                std::ptr::addr_of_mut!(info) as *mut _,
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                &mut returned,
+            )
+        };
+        assert_ne!(
+            ok, 0,
+            "QueryInformationJobObject(ExtendedLimitInformation) must succeed"
+        );
+        info
+    }
+
+    fn read_cpu(job: HANDLE) -> JOBOBJECT_CPU_RATE_CONTROL_INFORMATION {
+        let mut info: JOBOBJECT_CPU_RATE_CONTROL_INFORMATION = unsafe { std::mem::zeroed() };
+        let mut returned: u32 = 0;
+        let ok = unsafe {
+            QueryInformationJobObject(
+                job,
+                JobObjectCpuRateControlInformation,
+                std::ptr::addr_of_mut!(info) as *mut _,
+                size_of::<JOBOBJECT_CPU_RATE_CONTROL_INFORMATION>() as u32,
+                &mut returned,
+            )
+        };
+        assert_ne!(
+            ok, 0,
+            "QueryInformationJobObject(CpuRateControl) must succeed"
+        );
+        info
+    }
+
+    #[test]
+    fn cpu_rate_control_readback_matches_applied_value() {
+        let containment = create_process_containment(None).expect("create containment");
+        let limits = ResourceLimits {
+            cpu_percent: Some(25),
+            ..ResourceLimits::default()
+        };
+        apply_resource_limits(&containment, &limits).expect("apply cpu limit");
+
+        let info = read_cpu(containment.job);
+        assert_eq!(unsafe { info.Anonymous.CpuRate }, 25 * 100);
+        assert!(info.ControlFlags & JOB_OBJECT_CPU_RATE_CONTROL_ENABLE != 0);
+        assert!(info.ControlFlags & JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP != 0);
+    }
+
+    #[test]
+    fn memory_readback_matches_applied_value() {
+        let containment = create_process_containment(None).expect("create containment");
+        let limits = ResourceLimits {
+            memory_bytes: Some(512 * 1024 * 1024),
+            ..ResourceLimits::default()
+        };
+        apply_resource_limits(&containment, &limits).expect("apply memory limit");
+
+        let info = read_extended(containment.job);
+        assert_eq!(info.JobMemoryLimit, 512 * 1024 * 1024);
+        assert!(info.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_JOB_MEMORY != 0);
+    }
+
+    #[test]
+    fn max_processes_readback_matches_applied_value() {
+        let containment = create_process_containment(None).expect("create containment");
+        let limits = ResourceLimits {
+            max_processes: Some(10),
+            ..ResourceLimits::default()
+        };
+        apply_resource_limits(&containment, &limits).expect("apply max-processes limit");
+
+        let info = read_extended(containment.job);
+        assert_eq!(info.BasicLimitInformation.ActiveProcessLimit, 10);
+        assert!(info.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_ACTIVE_PROCESS != 0);
+    }
+
+    #[test]
+    fn all_three_limits_coexist() {
+        let containment = create_process_containment(None).expect("create containment");
+        let limits = ResourceLimits {
+            cpu_percent: Some(50),
+            memory_bytes: Some(256 * 1024 * 1024),
+            max_processes: Some(20),
+            timeout: None,
+        };
+        apply_resource_limits(&containment, &limits).expect("apply all three limits");
+
+        let ext = read_extended(containment.job);
+        assert_eq!(ext.JobMemoryLimit, 256 * 1024 * 1024);
+        assert_eq!(ext.BasicLimitInformation.ActiveProcessLimit, 20);
+        assert!(ext.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_JOB_MEMORY != 0);
+        assert!(ext.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_ACTIVE_PROCESS != 0);
+
+        let cpu = read_cpu(containment.job);
+        assert_eq!(unsafe { cpu.Anonymous.CpuRate }, 50 * 100);
+        assert!(cpu.ControlFlags & JOB_OBJECT_CPU_RATE_CONTROL_ENABLE != 0);
+        assert!(cpu.ControlFlags & JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP != 0);
+    }
+
+    #[test]
+    fn empty_limits_is_noop() {
+        let containment = create_process_containment(None).expect("create containment");
+        apply_resource_limits(&containment, &ResourceLimits::default())
+            .expect("empty limits is a no-op and must succeed");
+        // Readback should show the defaults from create_process_containment (no memory/process caps),
+        // i.e. JobMemoryLimit == 0 and ActiveProcessLimit == 0.
+        let info = read_extended(containment.job);
+        assert_eq!(info.JobMemoryLimit, 0);
+        assert_eq!(info.BasicLimitInformation.ActiveProcessLimit, 0);
+    }
+
+    /// Regression guard: `apply_resource_limits` must preserve the flags set by
+    /// `create_process_containment` (KILL_ON_JOB_CLOSE + DIE_ON_UNHANDLED_EXCEPTION).
+    /// The implementation read-modifies-writes the ExtendedLimitInformation struct;
+    /// a naive write-only would clear these.
+    #[test]
+    fn preserves_kill_on_job_close() {
+        let containment = create_process_containment(None).expect("create containment");
+        let limits = ResourceLimits {
+            memory_bytes: Some(64 * 1024 * 1024),
+            max_processes: Some(8),
+            ..ResourceLimits::default()
+        };
+        apply_resource_limits(&containment, &limits).expect("apply");
+
+        let info = read_extended(containment.job);
+        assert!(
+            info.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE != 0,
+            "KILL_ON_JOB_CLOSE must be preserved after apply_resource_limits"
+        );
+        assert!(
+            info.BasicLimitInformation.LimitFlags
+                & JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION
+                != 0,
+            "DIE_ON_UNHANDLED_EXCEPTION must be preserved after apply_resource_limits"
+        );
+    }
+
+    #[test]
+    fn idempotent_same_limits_twice() {
+        let containment = create_process_containment(None).expect("create containment");
+        let limits = ResourceLimits {
+            cpu_percent: Some(30),
+            memory_bytes: Some(128 * 1024 * 1024),
+            ..ResourceLimits::default()
+        };
+        apply_resource_limits(&containment, &limits).expect("first apply");
+        apply_resource_limits(&containment, &limits).expect("second apply must also succeed");
     }
 }
