@@ -482,33 +482,36 @@ fn format_duration_human(d: std::time::Duration) -> String {
     }
 }
 
+/// Dispatch `nono prune` (Windows).
+///
+/// Mirrors the Unix `run_prune` (session_commands.rs) — shared retention rule
+/// via `session::is_prunable`, mutually exclusive `--all-exited` / `--older-than`
+/// handling, canonicalization + symlink guards (T-19-04-02/03).
 pub fn run_prune(args: &PruneArgs) -> Result<()> {
     reject_if_sandboxed("prune")?;
+
     let sessions = session::list_sessions()?;
-
-    let now = chrono::Utc::now();
-    let mut to_remove: Vec<&SessionRecord> = Vec::new();
-
-    for s in &sessions {
-        if s.status == SessionStatus::Running {
-            continue;
+    let now_epoch = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => d.as_secs(),
+        Err(e) => {
+            return Err(NonoError::ConfigParse(format!(
+                "system clock before UNIX epoch: {e}"
+            )));
         }
+    };
 
-        let should_remove = if let Some(days) = args.older_than {
-            if let Ok(started) = chrono::DateTime::parse_from_rfc3339(&s.started) {
-                let age = now.signed_duration_since(started);
-                age.num_days() >= days as i64
-            } else {
-                false
-            }
-        } else {
-            true
-        };
+    let retention_secs: u64 = if args.all_exited {
+        0
+    } else if let Some(d) = args.older_than {
+        d.as_secs()
+    } else {
+        30 * 86_400
+    };
 
-        if should_remove {
-            to_remove.push(s);
-        }
-    }
+    let mut to_remove: Vec<&SessionRecord> = sessions
+        .iter()
+        .filter(|s| session::is_prunable(s, now_epoch, retention_secs))
+        .collect();
 
     if let Some(keep) = args.keep {
         if to_remove.len() > keep {
@@ -532,6 +535,28 @@ pub fn run_prune(args: &PruneArgs) -> Result<()> {
         if args.dry_run {
             eprintln!("Would remove: {} (started {})", s.session_id, s.started);
         } else {
+            match session_file.canonicalize() {
+                Ok(resolved) => {
+                    let dir_canon = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+                    if !resolved.starts_with(&dir_canon) {
+                        debug!(
+                            "Refusing to prune {}: outside sessions dir",
+                            session_file.display()
+                        );
+                        continue;
+                    }
+                }
+                Err(_) => { /* file may be gone already; remove_file errs benignly */ }
+            }
+            if let Ok(md) = std::fs::symlink_metadata(&session_file) {
+                if md.file_type().is_symlink() {
+                    debug!(
+                        "Refusing to prune {}: is a symlink",
+                        session_file.display()
+                    );
+                    continue;
+                }
+            }
             if let Err(e) = std::fs::remove_file(&session_file) {
                 debug!(
                     "Failed to remove session file {}: {}",

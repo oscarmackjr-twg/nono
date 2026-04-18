@@ -363,7 +363,9 @@ const INSPECT_USAGE: &str = "\
 #[cfg(target_os = "windows")]
 const PRUNE_AFTER_HELP: &str = "\x1b[1mEXAMPLES\x1b[0m
   nono prune --dry-run                         # Preview what would be cleaned
-  nono prune --older-than 7                    # Remove sessions older than 7 days
+  nono prune --older-than 7d                   # Remove exited sessions older than 7 days
+  nono prune --older-than 12h                  # Remove exited sessions older than 12 hours
+  nono prune --all-exited                      # Remove every exited session (escape hatch)
   nono prune --keep 10                         # Keep only 10 most recent sessions
 ";
 
@@ -372,8 +374,11 @@ const PRUNE_AFTER_HELP: &str = "EXAMPLES:
     # Preview what would be cleaned
     nono prune --dry-run
 
-    # Remove sessions older than 7 days
-    nono prune --older-than 7
+    # Remove exited sessions older than 7 days (suffix REQUIRED)
+    nono prune --older-than 7d
+
+    # Remove every exited session (ignore age — escape hatch)
+    nono prune --all-exited
 
     # Keep only 10 most recent sessions
     nono prune --keep 10
@@ -1990,15 +1995,41 @@ pub struct InspectArgs {
     pub changes: bool,
 }
 
+/// Parse a duration for prune's `--older-than`, REQUIRING a suffix.
+///
+/// Unlike `parse_duration` directly, this rejects raw integers because
+/// `--older-than 30` used to mean "30 days" (pre-CLEAN-04) but would
+/// suddenly mean "30 seconds" under parse_duration's rules. We refuse
+/// ambiguous input instead of silently changing behavior.
+pub(crate) fn parse_prune_duration(s: &str) -> std::result::Result<std::time::Duration, String> {
+    let trimmed = s.trim();
+    // A suffix is any trailing non-digit char. parse_duration accepts both
+    // raw ("30") and suffixed ("30d") forms; we gate on the former.
+    if !trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_digit()) {
+        return Err(format!(
+            "ambiguous duration '{trimmed}' — please specify a suffix: \
+             {trimmed}s (seconds), {trimmed}m (minutes), {trimmed}h (hours), {trimmed}d (days)"
+        ));
+    }
+    parse_duration(trimmed)
+}
+
 #[derive(Parser, Debug)]
 pub struct PruneArgs {
     /// Show what would be removed without deleting
     #[arg(long)]
     pub dry_run: bool,
 
-    /// Remove sessions older than N days
-    #[arg(long, value_name = "DAYS")]
-    pub older_than: Option<u64>,
+    /// Remove exited sessions older than this duration.
+    /// Accepts 30s, 5m, 1h, 30d (no raw integers — specify a suffix).
+    /// Default when unset: 30 days.
+    #[arg(long, value_name = "DURATION", value_parser = parse_prune_duration)]
+    pub older_than: Option<std::time::Duration>,
+
+    /// Ignore age and prune every exited session (escape hatch).
+    /// Mutually exclusive with --older-than.
+    #[arg(long, conflicts_with = "older_than")]
+    pub all_exited: bool,
 
     /// Keep only the N most recent sessions
     #[arg(long, value_name = "N")]

@@ -357,38 +357,44 @@ fn format_duration_human(d: std::time::Duration) -> String {
 }
 
 /// Dispatch `nono prune`.
+///
+/// Retention rule (CLEAN-04 D-14): only sessions with `Status: Exited` are
+/// prunable; active sessions (Running / Paused) are structurally excluded.
+/// Delegates the per-record decision to `session::is_prunable` so the Windows
+/// mirror, the auto-trigger, and this handler share a single source of truth.
 pub fn run_prune(args: &PruneArgs) -> Result<()> {
     reject_if_sandboxed("prune")?;
+
     let sessions = session::list_sessions()?;
-
-    let now = chrono::Utc::now();
-    let mut to_remove: Vec<&SessionRecord> = Vec::new();
-
-    for s in &sessions {
-        // Skip running sessions
-        if s.status == SessionStatus::Running {
-            continue;
+    let now_epoch = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => d.as_secs(),
+        Err(e) => {
+            return Err(NonoError::ConfigParse(format!(
+                "system clock before UNIX epoch: {e}"
+            )));
         }
+    };
 
-        let should_remove = if let Some(days) = args.older_than {
-            if let Ok(started) = chrono::DateTime::parse_from_rfc3339(&s.started) {
-                let age = now.signed_duration_since(started);
-                age.num_days() >= days as i64
-            } else {
-                false
-            }
-        } else {
-            true // No age filter: all exited sessions are candidates
-        };
+    // Resolve retention_secs from the flags:
+    //   --all-exited          → 0 (every exited session qualifies)
+    //   --older-than SPECIFIED → that duration in seconds
+    //   neither                → 30 days default
+    let retention_secs: u64 = if args.all_exited {
+        0
+    } else if let Some(d) = args.older_than {
+        d.as_secs()
+    } else {
+        30 * 86_400
+    };
 
-        if should_remove {
-            to_remove.push(s);
-        }
-    }
+    let mut to_remove: Vec<&SessionRecord> = sessions
+        .iter()
+        .filter(|s| session::is_prunable(s, now_epoch, retention_secs))
+        .collect();
 
-    // Apply --keep: keep the N most recent, remove the rest
+    // Apply --keep: keep the N most recent, remove the rest.
+    // list_sessions() is sorted newest-first.
     if let Some(keep) = args.keep {
-        // to_remove is sorted newest-first (from list_sessions), so skip the first `keep`
         if to_remove.len() > keep {
             to_remove = to_remove[keep..].to_vec();
         } else {
@@ -410,6 +416,34 @@ pub fn run_prune(args: &PruneArgs) -> Result<()> {
         if args.dry_run {
             eprintln!("Would remove: {} (started {})", s.session_id, s.started);
         } else {
+            // Defense in depth (threat T-19-04-02/03): canonicalize the target
+            // and confirm it still lives under the sessions directory.
+            // `canonicalize` may legitimately fail if the file has already been
+            // removed between `list_sessions` and now — in that case fall
+            // through to `remove_file`, which will itself report ENOENT.
+            match session_file.canonicalize() {
+                Ok(resolved) => {
+                    let dir_canon = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+                    if !resolved.starts_with(&dir_canon) {
+                        debug!(
+                            "Refusing to prune {}: outside sessions dir",
+                            session_file.display()
+                        );
+                        continue;
+                    }
+                }
+                Err(_) => { /* file may be gone already; remove_file errs benignly */ }
+            }
+            // Refuse to follow a symlink: symlink_metadata does NOT follow.
+            if let Ok(md) = std::fs::symlink_metadata(&session_file) {
+                if md.file_type().is_symlink() {
+                    debug!(
+                        "Refusing to prune {}: is a symlink",
+                        session_file.display()
+                    );
+                    continue;
+                }
+            }
             if let Err(e) = std::fs::remove_file(&session_file) {
                 debug!(
                     "Failed to remove session file {}: {}",
