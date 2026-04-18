@@ -885,11 +885,43 @@ pub(super) fn spawn_windows_child(
     let _restricted_holder: Option<restricted_token::RestrictedToken>;
     let _low_integrity_holder: Option<OwnedHandle>;
     let h_token: HANDLE = if let Some(ref sid) = config.session_sid {
-        let holder = restricted_token::create_restricted_token_with_sid(sid)?;
-        let raw = holder.h_token;
-        _restricted_holder = Some(holder);
-        _low_integrity_holder = None;
-        raw
+        // Phase 14 plan 14-01 Direction 2 (adopted after Direction 3's
+        // AllocConsole smoke gate failed rows 1 and 2 with 0xC0000142 on
+        // 2026-04-18). In the detached-supervisor path
+        // (NONO_DETACHED_LAUNCH=1), bypass restricted-token construction and
+        // use a null token (the supervisor's unrestricted user token).
+        //
+        // Trade-off: per-session SID WFP filtering via
+        // FWPM_CONDITION_ALE_USER_ID no longer applies to detached children.
+        // Network enforcement for this path falls back to AppID-based WFP
+        // filtering (`get_app_id_blob` on the target program, wired in
+        // `crates/nono-cli/src/exec_strategy_windows/network.rs` via
+        // `nono-wfp-service.rs:1364-1367`). Job Object containment + the
+        // CapabilitySet-enforced Windows filesystem sandbox
+        // (`crates/nono/src/sandbox/windows.rs`) + Low-Integrity isolation
+        // are unchanged.
+        //
+        // Non-detached mode keeps the WRITE_RESTRICTED + restricting-SID
+        // path (smoke gate row 3 passed), so WFP session-SID identity is
+        // preserved there.
+        //
+        // See `.planning/phases/14-v1-fix-pass/14-01-PLAN.md <smoke_test_gate>`
+        // for the failing-row capture and the Direction 2 pivot policy,
+        // and `.planning/debug/windows-supervised-exec-cascade.md` for the
+        // Bug #3 test matrix that pinned the restricted-token + detached
+        // + console-grandchild interaction as the 0xC0000142 trigger.
+        if std::env::var_os("NONO_DETACHED_LAUNCH").is_some() {
+            let _ = sid;
+            _restricted_holder = None;
+            _low_integrity_holder = None;
+            std::ptr::null_mut()
+        } else {
+            let holder = restricted_token::create_restricted_token_with_sid(sid)?;
+            let raw = holder.h_token;
+            _restricted_holder = Some(holder);
+            _low_integrity_holder = None;
+            raw
+        }
     } else if should_use_low_integrity_windows_launch(config.caps) {
         let holder = create_low_integrity_primary_token()?;
         let raw = holder.0;
