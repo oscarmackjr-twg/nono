@@ -76,7 +76,11 @@ Carry-forward → Phase 15: detached-console-grandchild `0xC0000142 STATUS_DLL_I
 
   **Depends on:** Nothing; can run in parallel with the feature phases. Recommended to run last so it catches any drift introduced by the feature phases too.
 
-  **Plans:** TBD during `/gsd-plan-phase 19` (likely 4 plans, one per CLEAN requirement; can parallelize).
+  **Plans:** 4 plans (all Wave 1, parallel — disjoint files_modified).
+  - [ ] 19-01-PLAN.md — CLEAN-01 fmt drift fix on 3 files from commit 6749494
+  - [ ] 19-02-PLAN.md — CLEAN-02 restore 5 pre-existing Windows test flakes via EnvVarGuard + lock_env
+  - [ ] 19-03-PLAN.md — CLEAN-03 triage 10 disk-resident WIP items (per-file disposition)
+  - [ ] 19-04-PLAN.md — CLEAN-04 session retention predicate + auto-prune trigger + one-shot cleanup + docs
 
 ## Progress Table
 
