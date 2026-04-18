@@ -99,8 +99,18 @@ pub fn query_path(
 
     // Check if this is a sensitive path (CLI security policy), but skip
     // the check for paths that have been explicitly overridden.
+    //
+    // On Windows, `Path::canonicalize` returns the NT verbatim form
+    // (e.g. `\\?\C:\Users\me\.ssh`) while `policy::get_sensitive_paths`
+    // returns the home-expanded shape (e.g. `C:\Users\me/.ssh`). Comparing
+    // the two via `Path::starts_with` mismatches because the verbatim
+    // prefix is treated as an extra component. Strip the prefix here so
+    // the sensitive-path comparison sees the same shape on both sides.
+    let canonical_for_sensitive = strip_verbatim_prefix(&canonical);
     if !is_overridden {
-        if let Some(matched) = config::check_sensitive_path(&canonical.to_string_lossy())? {
+        if let Some(matched) =
+            config::check_sensitive_path(&canonical_for_sensitive.to_string_lossy())?
+        {
             return Ok(QueryResult::Denied {
                 reason: "sensitive_path".to_string(),
                 details: Some(format!(
@@ -300,6 +310,30 @@ fn suggested_flag_parts(path: &Path, requested: AccessMode) -> (&'static str, Pa
     (flag, target)
 }
 
+/// Strip the Windows NT verbatim / device prefixes (`\\?\`, `\\?\UNC\`, `\??\`)
+/// from a canonicalized path so it can be compared against non-canonical
+/// policy paths that were produced by env-var expansion.
+///
+/// Kept deliberately narrow: on non-Windows the returned path is identical,
+/// and on Windows only the well-known prefixes are stripped. Same pattern as
+/// `protected_paths::normalize_for_compare`, localized here so query_path's
+/// sensitive-path check does not need to pull in that module's wider
+/// normalization rules.
+#[cfg(target_os = "windows")]
+fn strip_verbatim_prefix(path: &Path) -> PathBuf {
+    let raw = path.as_os_str().to_string_lossy();
+    let stripped = raw
+        .replace("\\\\?\\UNC\\", r"\\")
+        .replace("\\\\?\\", "")
+        .replace("\\??\\", "");
+    PathBuf::from(stripped)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn strip_verbatim_prefix(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -475,6 +509,60 @@ mod tests {
                 assert!(suggested_flag.is_none());
             }
             _ => panic!("expected denied result"),
+        }
+    }
+
+    /// Regression test for the Windows UNC-prefix mismatch in
+    /// `query_path`'s sensitive-path check.
+    ///
+    /// Before this fix, `query_path` called `path.canonicalize()`-via-parent
+    /// on a non-existent path like `C:\Users\<user>\.ssh`, which returns the
+    /// NT verbatim form `\\?\C:\Users\<user>\.ssh`. The sensitive-path policy
+    /// entries are expanded but NOT canonicalized (they live in the shape
+    /// `C:\Users\<user>/.ssh`), so `Path::starts_with` between the two
+    /// mismatched because of the extra `\\?\` component and the deny was
+    /// silently dropped. Strip the verbatim prefix and the comparison works
+    /// whether or not the queried path exists on disk.
+    #[cfg(windows)]
+    #[test]
+    fn test_query_path_sensitive_detected_despite_unc_canonicalization() {
+        // Hold the env lock for the duration of the test since we rely on
+        // validated_home() reading USERPROFILE/HOME.
+        let _lock = match crate::test_env::ENV_LOCK.lock() {
+            Ok(lock) => lock,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        let home = crate::config::validated_home().expect("HOME should be valid in test");
+        // Intentionally build the .ssh path with a *different* separator mix
+        // and as a non-existent sub-path, forcing the parent-canonicalize
+        // branch which is the one that produces `\\?\` on Windows.
+        let ssh_nonexistent = PathBuf::from(format!("{home}/.ssh/does-not-exist"));
+        let caps = CapabilitySet::new();
+
+        let result =
+            query_path(&ssh_nonexistent, AccessMode::Read, &caps, &[]).expect("query succeeds");
+
+        match result {
+            QueryResult::Denied {
+                reason,
+                policy_source,
+                ..
+            } => {
+                assert_eq!(
+                    reason, "sensitive_path",
+                    "non-existent path under ~/.ssh must be flagged sensitive on Windows; \
+                     got reason={reason}"
+                );
+                assert!(
+                    policy_source
+                        .as_deref()
+                        .is_some_and(|p| p.starts_with("group:")),
+                    "expected a group: policy source; got {:?}",
+                    policy_source
+                );
+            }
+            other => panic!("expected Denied(sensitive_path); got {:?}", other),
         }
     }
 
