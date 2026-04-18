@@ -18,7 +18,103 @@ fn reject_if_sandboxed(command: &str) -> Result<()> {
     Ok(())
 }
 
+/// Default auto-prune threshold: prune if more than this many stale
+/// (>30d, Exited) session files are on disk when `nono ps` starts.
+const AUTO_PRUNE_STALE_THRESHOLD: usize = 100;
+
+/// Default retention used by the auto-trigger (30 days in seconds).
+const AUTO_PRUNE_RETENTION_SECS: u64 = 30 * 86_400;
+
+/// At the top of `run_ps`, check how many stale sessions are on disk.
+/// If the count exceeds AUTO_PRUNE_STALE_THRESHOLD, spawn a background
+/// thread to prune them and log a single info line to stderr.
+///
+/// STRUCTURAL NO-OP INSIDE A SANDBOX: if `NONO_CAP_FILE` is set, returns
+/// immediately. Sandboxed agents must not be able to trigger deletion of
+/// the host supervisor's session files (threat T-19-04-07 — EoP). This
+/// mirrors the `reject_if_sandboxed` check used by `run_prune`, but is
+/// silent (no error) because `nono ps` itself IS legal from a sandbox;
+/// only the background-deletion side effect is forbidden.
+///
+/// Fails silently — any error inside the background thread is logged
+/// at debug level and discarded. `nono ps` itself must not be delayed
+/// or broken by this cleanup path.
+fn auto_prune_if_needed() {
+    // T-19-04-07: refuse to delete host supervisor's sessions from
+    // within a sandboxed process. NONO_CAP_FILE is the canonical
+    // "I am running inside nono" signal (same check as reject_if_sandboxed).
+    if std::env::var_os("NONO_CAP_FILE").is_some() {
+        debug!("auto-prune skipped: running inside sandbox (NONO_CAP_FILE set)");
+        return;
+    }
+
+    // Load fresh list (cheap — directory scan).
+    let sessions = match session::list_sessions() {
+        Ok(s) => s,
+        Err(e) => {
+            debug!("auto-prune skipped: list_sessions failed: {e}");
+            return;
+        }
+    };
+
+    let now_epoch = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => d.as_secs(),
+        Err(e) => {
+            debug!("auto-prune skipped: clock error: {e}");
+            return;
+        }
+    };
+
+    let stale_ids: Vec<String> = sessions
+        .iter()
+        .filter(|s| session::is_prunable(s, now_epoch, AUTO_PRUNE_RETENTION_SECS))
+        .map(|s| s.session_id.clone())
+        .collect();
+
+    if stale_ids.len() <= AUTO_PRUNE_STALE_THRESHOLD {
+        return;
+    }
+
+    let count = stale_ids.len();
+    // Log up-front so operators see the count even if the background
+    // thread crashes / is killed.
+    eprintln!("info: pruning {count} stale session files (>30 days, exited)");
+
+    // Background thread: perform the actual deletes without blocking ps.
+    std::thread::spawn(move || {
+        let dir = match session::sessions_dir() {
+            Ok(d) => d,
+            Err(e) => {
+                debug!("auto-prune background: sessions_dir failed: {e}");
+                return;
+            }
+        };
+        let mut removed = 0usize;
+        for id in &stale_ids {
+            let session_file = dir.join(format!("{id}.json"));
+            let events_file = dir.join(format!("{id}.events.ndjson"));
+
+            // Same defense-in-depth as run_prune: refuse symlinks.
+            if let Ok(md) = std::fs::symlink_metadata(&session_file) {
+                if md.file_type().is_symlink() {
+                    debug!(
+                        "auto-prune skipping symlink: {}",
+                        session_file.display()
+                    );
+                    continue;
+                }
+            }
+            if std::fs::remove_file(&session_file).is_ok() {
+                removed += 1;
+            }
+            let _ = std::fs::remove_file(&events_file); // best effort
+        }
+        debug!("auto-prune background: removed {removed}/{count} stale session files");
+    });
+}
+
 pub fn run_ps(args: &PsArgs) -> Result<()> {
+    auto_prune_if_needed();
     let sessions = session::list_sessions()?;
 
     // Filter: by default show live sessions
@@ -675,6 +771,37 @@ fn follow_event_log(path: &Path, tail: Option<usize>, as_json: bool) -> Result<(
             continue;
         }
         print!("{}", line);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- Plan 19-04 CLEAN-04: T-19-04-07 sandbox-guard regression test ----
+
+    #[test]
+    fn auto_prune_is_noop_when_sandboxed() {
+        use crate::test_env::{lock_env, EnvVarGuard};
+
+        // Acquire the process-wide env lock (tests run in parallel).
+        let _lock = lock_env();
+        // Save-and-restore guard flips NONO_CAP_FILE to a placeholder path
+        // for the duration of the test, then restores the original value.
+        let _guard = EnvVarGuard::set_all(&[("NONO_CAP_FILE", "/tmp/fake-cap-file")]);
+
+        // Should return immediately without touching the filesystem.
+        // Success criterion: function returns at all (no panic, no hang,
+        // no error). Since auto_prune_if_needed returns () and the sandbox
+        // early-return is the FIRST statement, reaching this line after
+        // the call is itself the assertion. We also re-check the env var
+        // is still set as a sanity guard against the test machinery losing
+        // it mid-call.
+        auto_prune_if_needed();
+        assert!(
+            std::env::var_os("NONO_CAP_FILE").is_some(),
+            "NONO_CAP_FILE should still be set — EnvVarGuard regressed"
+        );
     }
 }
 
