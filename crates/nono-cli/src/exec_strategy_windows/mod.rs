@@ -1,3 +1,16 @@
+// `dead_code` is allowed at module scope because this module hosts a small
+// number of intentionally-unused-on-Windows symbols whose ownership lives
+// outside the Phase 16 scope:
+//   * `collect_unix_resource_limit_warnings` — Windows shim of the Unix
+//     warning collector kept for cross-platform call-site symmetry.
+//   * `WindowsSupervisorDenyAllApprovalBackend` — fallback approval backend
+//     for SC #4 callers that build a `SupervisorConfig` without an
+//     interactive backend.
+//   * `set_windows_wfp_test_force_ready` — debug-only WFP readiness toggle
+//     pair (the matching reader is wired in `network.rs`).
+// These pre-date Phase 16 and should be addressed in a follow-up cleanup.
+// The Phase 16 dead helpers in `launch.rs` were removed (16-WR-02); do NOT
+// re-introduce broad allow scopes there.
 #![allow(dead_code)]
 
 //! Windows execution strategy placeholder.

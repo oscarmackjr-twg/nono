@@ -948,34 +948,6 @@ pub(super) fn create_low_integrity_primary_token() -> Result<OwnedHandle> {
     Ok(primary_token)
 }
 
-pub(super) fn execute_direct_with_low_integrity(
-    config: &ExecConfig<'_>,
-    launch_program: &Path,
-    containment: &ProcessContainment,
-    cmd_args: &[String],
-    limits: &crate::launch_runtime::ResourceLimits,
-    session_id: Option<&str>,
-) -> Result<i32> {
-    let mut child = spawn_windows_child(
-        config,
-        launch_program,
-        containment,
-        cmd_args,
-        None,
-        limits,
-        session_id,
-    )?;
-    let Some(exit_code) = child.poll_exit_code()? else {
-        loop {
-            if let Some(exit_code) = child.poll_exit_code()? {
-                return Ok(exit_code);
-            }
-            std::thread::sleep(WINDOWS_SUPERVISOR_POLL_INTERVAL);
-        }
-    };
-    Ok(exit_code)
-}
-
 pub(super) fn spawn_windows_child(
     config: &ExecConfig<'_>,
     launch_program: &Path,
@@ -1203,52 +1175,6 @@ pub(super) fn spawn_windows_child(
         process,
         _thread: thread,
     })
-}
-
-pub(super) fn spawn_supervised_with_low_integrity(
-    config: &ExecConfig<'_>,
-    launch_program: &Path,
-    containment: &ProcessContainment,
-    limits: &crate::launch_runtime::ResourceLimits,
-    session_id: Option<&str>,
-) -> Result<WindowsSupervisedChild> {
-    let cmd_args = prepare_runtime_hardened_args(
-        launch_program,
-        &config.command[1..],
-        config.interactive_shell,
-    );
-    spawn_windows_child(
-        config,
-        launch_program,
-        containment,
-        &cmd_args,
-        None,
-        limits,
-        session_id,
-    )
-}
-
-pub(super) fn spawn_supervised_with_standard_token(
-    config: &ExecConfig<'_>,
-    launch_program: &Path,
-    containment: &ProcessContainment,
-    limits: &crate::launch_runtime::ResourceLimits,
-    session_id: Option<&str>,
-) -> Result<WindowsSupervisedChild> {
-    let cmd_args = prepare_runtime_hardened_args(
-        launch_program,
-        &config.command[1..],
-        config.interactive_shell,
-    );
-    spawn_windows_child(
-        config,
-        launch_program,
-        containment,
-        &cmd_args,
-        None,
-        limits,
-        session_id,
-    )
 }
 
 /// Returns true when the current process is the inner detached supervisor launched by
