@@ -78,7 +78,7 @@ Carry-forward → Phase 15: detached-console-grandchild `0xC0000142 STATUS_DLL_I
 
   **Plans:** 4 plans (all Wave 1, parallel — disjoint files_modified).
   - [x] 19-01-PLAN.md — CLEAN-01 fmt drift fix on 3 files from commit 6749494 (complete 2026-04-18, commit `c87b10b`)
-  - [ ] 19-02-PLAN.md — CLEAN-02 restore 5 pre-existing Windows test flakes via EnvVarGuard + lock_env
+  - [x] 19-02-PLAN.md — CLEAN-02 restore 5 pre-existing Windows test flakes — fixed as 4 distinct deterministic Windows platform bugs (JSON-escape, non-absolute Unix-shaped XDG env guard, UNC-prefix production bug in `query_path`, Unix-only path literal vs absolute-path debug_assert). Hypothesis D-07 (parallel env contamination) contradicted; deviation D-08 tripped and user-approved option C for the production fix (complete-with-deviation 2026-04-18, commits `400f8c9`, `8412fda`, `a449454`, `4db849d`)
   - [ ] 19-03-PLAN.md — CLEAN-03 triage 10 disk-resident WIP items (per-file disposition)
   - [ ] 19-04-PLAN.md — CLEAN-04 session retention predicate + auto-prune trigger + one-shot cleanup + docs
 
@@ -104,4 +104,4 @@ Carry-forward → Phase 15: detached-console-grandchild `0xC0000142 STATUS_DLL_I
 | 16. Resource Limits (RESL-01..04) | v2.1 | 2/2 | Complete (RESL-01..04 shipped: CPU/memory/processes kernel-enforced, timeout via supervisor timer, `nono inspect` Limits block) | 2026-04-18 |
 | 17. Attach-Streaming (ATCH-01) | v2.1 | 0/? | Not Planned (run `/gsd-plan-phase 17` to start) | - |
 | 18. Extended IPC (AIPC-01) | v2.1 | 0/? | Not Planned (run `/gsd-plan-phase 18` to start) | - |
-| 19. Cleanup (CLEAN-01..04) | v2.1 | 1/4 | In Progress (19-01 CLEAN-01 fmt drift complete; 19-02/19-03/19-04 pending, Wave 1 parallel) | - |
+| 19. Cleanup (CLEAN-01..04) | v2.1 | 2/4 | In Progress (19-01 CLEAN-01 fmt drift complete; 19-02 CLEAN-02 5 test flakes + query_path UNC prod fix complete-with-deviation; 19-03/19-04 pending, Wave 1 parallel) | - |
