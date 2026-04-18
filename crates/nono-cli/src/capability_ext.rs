@@ -942,14 +942,18 @@ mod tests {
         std::fs::write(&read_file, "token=123").expect("write file");
 
         let profile_path = dir.path().join("read-file-profile.json");
+        // Use json_string() to emit a properly-escaped JSON string literal
+        // for the path. On Windows `read_file.display()` is a path like
+        // `C:\Users\...\config.txt` whose backslashes form invalid JSON
+        // escape sequences (`\U`, `\c`) when inlined into the raw string.
         std::fs::write(
             &profile_path,
             format!(
                 r#"{{
                 "meta": {{ "name": "read-file-profile" }},
-                "filesystem": {{ "read": ["{}"] }}
+                "filesystem": {{ "read": [{read}] }}
             }}"#,
-                read_file.display()
+                read = json_string(&read_file),
             ),
         )
         .expect("write profile");
@@ -1093,14 +1097,18 @@ mod tests {
         std::fs::create_dir_all(&lock_dir).expect("create lock dir");
 
         let profile_path = dir.path().join("lock-dir-profile.json");
+        // Use json_string() to emit a properly-escaped JSON string literal
+        // for the path. On Windows `lock_dir.display()` is a path like
+        // `C:\Users\...\claude.lock` whose backslashes form invalid JSON
+        // escape sequences when inlined into the raw string.
         std::fs::write(
             &profile_path,
             format!(
                 r#"{{
                 "meta": {{ "name": "lock-dir-profile" }},
-                "filesystem": {{ "allow_file": ["{}"] }}
+                "filesystem": {{ "allow_file": [{lock}] }}
             }}"#,
-                lock_dir.display()
+                lock = json_string(&lock_dir),
             ),
         )
         .expect("write profile");
