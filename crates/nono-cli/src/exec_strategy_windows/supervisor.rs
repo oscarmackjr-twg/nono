@@ -878,6 +878,10 @@ impl WindowsSupervisorRuntime {
                         self.session_id,
                         self.started_at.elapsed().as_millis()
                     );
+                    // Signal the capability pipe thread to exit before we drop
+                    // the runtime (which closes the child HANDLE the thread
+                    // caches inside its `BrokerTargetProcess`). See WR-01.
+                    self.terminate_requested.store(true, Ordering::SeqCst);
                     if let Err(err) = super::launch::terminate_job_object(
                         self.containment_job,
                         super::launch::STATUS_TIMEOUT_EXIT_CODE,
@@ -894,6 +898,10 @@ impl WindowsSupervisorRuntime {
             }
 
             if let Some(exit_code) = child.wait_for_exit(100)? {
+                // Signal the capability pipe thread to exit before we drop
+                // the runtime (which closes the child HANDLE the thread
+                // caches inside its `BrokerTargetProcess`). See WR-01.
+                self.terminate_requested.store(true, Ordering::SeqCst);
                 self.state = WindowsSupervisorLifecycleState::ShuttingDown;
                 self.shutdown();
                 self.state = WindowsSupervisorLifecycleState::Completed;
@@ -945,6 +953,12 @@ impl WindowsSupervisorRuntime {
 
 impl Drop for WindowsSupervisorRuntime {
     fn drop(&mut self) {
+        // Signal the capability pipe background thread (if any) to exit its
+        // loop before the runtime's child HANDLE is closed. The thread caches
+        // the raw child handle inside a `BrokerTargetProcess`; without this
+        // signal it could race and invoke `DuplicateHandle` against a
+        // dangling handle. See WR-01.
+        self.terminate_requested.store(true, Ordering::SeqCst);
         if self.state != WindowsSupervisorLifecycleState::Completed {
             self.shutdown();
         }
