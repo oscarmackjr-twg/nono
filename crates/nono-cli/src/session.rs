@@ -507,6 +507,31 @@ pub fn generate_random_name() -> String {
     format!("{}-{}", adj, noun)
 }
 
+/// Returns true iff `record` is safe to prune under the retention rule.
+///
+/// A record is prunable only if ALL of the following hold:
+/// - Its status is `SessionStatus::Exited` (never prune Running or Paused).
+/// - Its `started_epoch` is **at least** `retention_secs` before `now_epoch`
+///   (inclusive boundary: a session exactly `retention_secs` old qualifies).
+///
+/// `retention_secs = 0` combined with `Status: Exited` is the `--all-exited`
+/// escape hatch: every exited session qualifies (including just-exited ones).
+///
+/// Fail-closed: if `now_epoch < record.started_epoch` (clock skew or corrupt
+/// record), `saturating_sub` returns 0; when `retention_secs > 0` this yields
+/// `false` (not prunable), so a future-dated record is never pruned.
+#[must_use]
+pub fn is_prunable(record: &SessionRecord, now_epoch: u64, retention_secs: u64) -> bool {
+    if record.status != SessionStatus::Exited {
+        return false;
+    }
+    // saturating_sub returns 0 if started_epoch > now_epoch (clock skew):
+    //   - age == 0 with retention_secs > 0  → age < retention → not prunable (correct: fail closed)
+    //   - age == 0 with retention_secs == 0 → age >= retention → prunable (--all-exited case)
+    let age = now_epoch.saturating_sub(record.started_epoch);
+    age >= retention_secs
+}
+
 /// List all sessions, enriched with liveness checks.
 ///
 /// Returns sessions sorted by start time (newest first).
@@ -1242,6 +1267,128 @@ mod tests {
         // load_session uses sessions_dir() which points to ~/.nono/sessions,
         // so we can't test prefix matching here without mocking. The file I/O
         // roundtrip is tested above.
+    }
+
+    // ---- is_prunable predicate tests (Plan 19-04 CLEAN-04) ----
+
+    /// Fabricate a base `SessionRecord` for predicate tests. Callers override
+    /// `status` and `started_epoch` to pin the scenario. No filesystem / env
+    /// interaction — tests are pure-function exercises of the predicate.
+    fn fabricate_base_record() -> SessionRecord {
+        SessionRecord {
+            session_id: "test".to_string(),
+            name: None,
+            supervisor_pid: 1,
+            child_pid: 2,
+            started: "2026-01-01T00:00:00Z".to_string(),
+            started_epoch: 0,
+            status: SessionStatus::Exited,
+            attachment: SessionAttachment::Detached,
+            exit_code: Some(0),
+            command: vec!["echo".to_string()],
+            profile: None,
+            workdir: PathBuf::from("/tmp"),
+            network: "allowed".to_string(),
+            job_object_name: None,
+            rollback_session: None,
+            limits: None,
+        }
+    }
+
+    #[test]
+    fn is_prunable_exited_older_than_retention_is_true() {
+        let now = 1_800_000_000u64;
+        let record = SessionRecord {
+            status: SessionStatus::Exited,
+            started_epoch: now - (31 * 86_400), // 31 days old
+            ..fabricate_base_record()
+        };
+        assert!(is_prunable(&record, now, 30 * 86_400));
+    }
+
+    #[test]
+    fn is_prunable_at_exact_boundary() {
+        // Pins the inclusive-boundary semantic. A session whose age equals
+        // retention_secs EXACTLY is prunable. Regression guard for the doc/code
+        // alignment fix landed in plan 19-04 revision.
+        let now = 1_800_000_000u64;
+        let retention = 30 * 86_400;
+        let record = SessionRecord {
+            status: SessionStatus::Exited,
+            started_epoch: now - retention, // exactly retention_secs old
+            ..fabricate_base_record()
+        };
+        assert!(is_prunable(&record, now, retention));
+    }
+
+    #[test]
+    fn is_prunable_one_second_under_boundary_is_false() {
+        // Complementary to the boundary test: one second shy of the threshold
+        // must NOT be prunable. Together these two tests pin `>=` and exclude
+        // `>` forever.
+        let now = 1_800_000_000u64;
+        let retention = 30 * 86_400;
+        let record = SessionRecord {
+            status: SessionStatus::Exited,
+            started_epoch: now - (retention - 1), // 1 sec shy of boundary
+            ..fabricate_base_record()
+        };
+        assert!(!is_prunable(&record, now, retention));
+    }
+
+    #[test]
+    fn is_prunable_running_is_never_true_even_if_ancient() {
+        let now = 1_800_000_000u64;
+        let record = SessionRecord {
+            status: SessionStatus::Running,
+            started_epoch: now - (90 * 86_400), // 90 days
+            ..fabricate_base_record()
+        };
+        assert!(!is_prunable(&record, now, 30 * 86_400));
+    }
+
+    #[test]
+    fn is_prunable_paused_is_never_true() {
+        let now = 1_800_000_000u64;
+        let record = SessionRecord {
+            status: SessionStatus::Paused,
+            started_epoch: now - (90 * 86_400),
+            ..fabricate_base_record()
+        };
+        assert!(!is_prunable(&record, now, 30 * 86_400));
+    }
+
+    #[test]
+    fn is_prunable_exited_within_retention_is_false() {
+        let now = 1_800_000_000u64;
+        let record = SessionRecord {
+            status: SessionStatus::Exited,
+            started_epoch: now - (4 * 86_400), // 4 days — well under 30
+            ..fabricate_base_record()
+        };
+        assert!(!is_prunable(&record, now, 30 * 86_400));
+    }
+
+    #[test]
+    fn is_prunable_all_exited_escape_hatch_matches_any_exited() {
+        let now = 1_800_000_000u64;
+        let record = SessionRecord {
+            status: SessionStatus::Exited,
+            started_epoch: now - 5, // 5 seconds ago
+            ..fabricate_base_record()
+        };
+        assert!(is_prunable(&record, now, 0));
+    }
+
+    #[test]
+    fn is_prunable_future_started_epoch_fails_closed() {
+        let now = 1_800_000_000u64;
+        let record = SessionRecord {
+            status: SessionStatus::Exited,
+            started_epoch: now + 3600, // clock skew: "started in the future"
+            ..fabricate_base_record()
+        };
+        assert!(!is_prunable(&record, now, 30 * 86_400));
     }
 }
 
