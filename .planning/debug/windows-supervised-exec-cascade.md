@@ -158,3 +158,99 @@ follow_up:
     3. Is the issue specific to how a console child auto-allocates its console when the parent has DETACHED_PROCESS + restricted token? Try pre-attaching the supervisor to a `conhost.exe` via `AllocConsole` before spawning the grandchild, or pre-allocating the grandchild's console.
   - Phase 13 UAT item **P05-HV-1** (`nono run --detach -- ping -t 127.0.0.1`) remains blocked by the residual Bug #3. Other Phase 13 items that rely on detached mode (**P07-HV-3** session commands round-trip, **P11-HV-1**/**P11-HV-3** supervised capability flows) are likely affected.
   - Phase 13 UAT items that exercise the **non-detached** supervised path (P07-HV-1 wrap exit code, P09-HV-1 proxy env injection, P09-HV-2 WFP port integration) should now be unblocked by the Bug #2 fix — they did not require detached mode.
+
+## Phase 15-01 Investigation
+
+Date: 2026-04-18
+HEAD: 6f4de70 (branch `windows-squash`)
+Binary: `target/debug/nono.exe` (debug build with gates described below)
+
+### Method
+
+Two temporary `#[cfg(all(target_os = "windows", debug_assertions))]`-gated patches were applied to the current codebase to isolate which component of the failing configuration drives the 0xC0000142:
+
+1. `crates/nono-cli/src/supervised_runtime.rs` line 117 — force `pty_pair = None` unconditionally on Windows debug builds (overrides the `session.detached_start || session.interactive_pty` allocation path).
+2. `crates/nono-cli/src/exec_strategy_windows/launch.rs` line 840 — force `h_token = null` (caller's token) when `NONO_DETACHED_LAUNCH=1` is set in the outer shell.
+
+Both patches were reverted after the matrix was captured. No production code was shipped from this plan.
+
+### Refined matrix
+
+Ran from PowerShell on Windows 11 Enterprise 10.0.26200 with fresh `target/debug/nono.exe`:
+
+| Row | Token shape | PTY | Outer detached | Command | Result | Notes |
+|-----|-------------|-----|----------------|---------|--------|-------|
+| B | WRITE_RESTRICTED + session SID | None (gate 1) | Yes (`--detached`) | `nono run --detached --allow-cwd -- ping -t 127.0.0.1` | **FAIL** `0xC0000142` (STATUS_DLL_INIT_FAILED) | Disabling PTY alone does NOT unblock detached console grandchild. |
+| C | WRITE_RESTRICTED + session SID | None (gate 1, not exercised — non-detached) | No | `nono run --allow-cwd -- cmd /c "echo hello"` | **PASS** — `hello`, exit 0 | Non-detached regression clean. The no-PTY gate does not affect non-interactive path. |
+| D | null (gate 2) | None (gate 1) | `NONO_DETACHED_LAUNCH=1` set manually | `NONO_DETACHED_LAUNCH=1 nono run --detached --allow-cwd -- ping -t 127.0.0.1` | **PASS** — ping replies streamed live; grandchild initialized; no DLL-init failure | Matches the existing matrix's sole working row (null + None). |
+
+Note on Row D: setting `NONO_DETACHED_LAUNCH=1` in the outer shell does NOT detach the supervisor — it only triggers the investigation-gate null-token path inside `spawn_windows_child`. The grandchild still ran with null token + no PTY, which is the configuration under test.
+
+### Conclusion
+
+- **Row B's failure** proves direction-a (WRITE_RESTRICTED + no PTY) is NOT viable. PTY alone is not the sole blocker of 0xC0000142; the WRITE_RESTRICTED token also contributes.
+- **Row D's success** proves the combined `null + no PTY` row of the existing matrix is reproducible on current HEAD (commit `6f4de70`).
+- **Row C** is the required non-detached regression control — the no-PTY gate does not break `nono run` without `--detached`.
+
+Direction-b (gated PTY-disable + null token on detached path, with AppID-based WFP filtering as the kernel boundary) is the only viable path for Plan 15-02.
+
+### Follow-up checks (not required for decision, recorded for completeness)
+
+- Row D does not prove that the supervisor's outer double-launch path with `DETACHED_PROCESS` also works with the new token/PTY shape — Plan 15-02's smoke-gate Row 1 (`nono run --detached -- ping`) validates that end-to-end.
+- Row D attach-pipe behavior was not exercised (the supervisor was not detached). Plan 15-02 must add a pipe-based stdout capture path or document that `nono attach` on detached-windows is a stub in v2.1.
+
+## Direction Decision
+
+Date: 2026-04-18
+Chosen by: oscarmackjr-twg (confirmed at Plan 15-01 Task 1.5 checkpoint)
+
+### Chosen direction: **b**
+
+Gate PTY off on Windows when detached, null the token when `NONO_DETACHED_LAUNCH=1`, switch the detached path to AppID-based WFP filtering. The WRITE_RESTRICTED + session-SID + ConPTY shape that works in non-detached mode is abandoned on the detached path.
+
+### Evidence summary
+
+- Row B (WRITE_RESTRICTED + no PTY, detached) **failed** with `0xC0000142`. Disabling PTY alone does not unblock the console grandchild's DLL loader — the token also matters. Direction-a is eliminated.
+- Row C (WRITE_RESTRICTED + no PTY gate, non-detached) **passed**. The PTY gate does not regress the non-detached supervised path.
+- Row D (null token + no PTY, `NONO_DETACHED_LAUNCH=1`) **passed** — ping replies streamed live. The matrix's only working row is reproducible on current HEAD `6f4de70`.
+
+### Security impact
+
+Four non-negotiable properties from 15-02-PLAN.md `<security_acceptance_gate>` evaluated under direction-b:
+
+| # | Property | Verdict |
+|---|----------|---------|
+| 1 | Sandbox filesystem boundary (CapabilitySet) | **Preserved.** Capability apply is independent of token/PTY. |
+| 2 | Job Object containment | **Preserved.** Job Object is applied after `CreateProcess`, independent of the token. Grandchild still terminates when supervisor dies. |
+| 3 | Low-Integrity isolation | **Waived on detached path only.** Null token inherits the supervisor's IL. Job Object + filesystem sandbox remain primary isolation; LI was additive, not the primary security boundary. A waiver clause must appear in the 15-02 commit body. |
+| 4 | Kernel network identity | **Waived (per-session SID) / preserved (kernel identity).** Session-SID WFP (`FWPM_CONDITION_ALE_USER_ID`) is replaced by AppID-based WFP filtering (`get_app_id_blob`, existing fallback at `nono-wfp-service.rs:1364-1367`). Still kernel-enforced; still requires `nono-wfp-service` to be running. Trade-off: two detached sessions of the same binary share one AppID filter — per-session SID differentiation is lost on this path. |
+
+Non-detached (`nono run --allow-cwd`, `nono shell`) retains the full WRITE_RESTRICTED + session-SID + ConPTY configuration. The waivers are strictly scoped to the Windows-detached code path (gated by `cfg(target_os = "windows")` and either `session.detached_start` or `NONO_DETACHED_LAUNCH=1`).
+
+### Plan 15-02 action list
+
+Plan 15-02 must make exactly these changes (and no more):
+
+1. **`crates/nono-cli/src/supervised_runtime.rs` (line ~117):** Replace the unconditional PTY allocation with a platform-conditional block. On Windows, allocate a PTY only when `session.interactive_pty` is true (i.e., for `nono shell`). `session.detached_start` alone must NOT trigger PTY allocation on Windows. Non-Windows platforms keep the existing `detached_start || interactive_pty` semantics.
+
+2. **`crates/nono-cli/src/exec_strategy_windows/launch.rs` (line ~838 `spawn_windows_child`):** Before the existing `config.session_sid`-based token selection, add a check for `NONO_DETACHED_LAUNCH=1`. When present on Windows, skip `create_restricted_token_with_sid`, skip `create_low_integrity_primary_token`, and set `h_token = null_mut()` so `CreateProcessW` uses the caller's token. Detection must be `#[cfg(target_os = "windows")]`-guarded.
+
+3. **`crates/nono-cli/src/exec_strategy_windows/supervisor.rs` (line ~405 `start_logging`):** Currently returns `Ok(())` when `pty_output_read == 0`. Keep this behavior — pipe-based stdout capture for `nono attach` against a detached session is a v2.1+ enhancement. Add a log line noting "detached session on Windows: PTY output relay skipped; nono attach will not stream child output" so operators understand the scope.
+
+4. **`crates/nono-cli/src/pty_proxy_windows.rs`:** No changes in 15-02. The `open_detached_stdout_pipe` helper described in 15-02-PLAN's direction-b Action item 3 is deferred — `nono attach` streaming for detached sessions is a v2.1+ feature, not part of Phase 15's closure scope. If any `#[allow(dead_code)]` attributes in this file become reachable via the supervised_runtime.rs gate, they may be removed.
+
+5. **`crates/nono-cli/src/exec_strategy_windows/restricted_token.rs`:** No changes. The WRITE_RESTRICTED + session-SID path remains correct for non-detached runs; direction-b only skips this path on the detached gate, it does not modify the path itself.
+
+6. **Tests (both files changed):**
+    - `supervised_runtime.rs`: unit test asserting on Windows, `pty_pair` is `None` when `detached_start=true, interactive_pty=false`, and `Some` when `interactive_pty=true`.
+    - `launch.rs`: unit test (or integration test) asserting `h_token` is `null_mut` when `NONO_DETACHED_LAUNCH=1` is set and `session_sid` is `Some`. Use `EnvVarGuard` pattern to save/restore env.
+    - Existing `restricted_token` regression tests (4 tests) must continue to pass.
+
+7. **Commit body waiver clause (required for 15-02 Task 1 commit):** Include a `Security-Waiver:` trailer block documenting the two waived properties from the table above. This is the audit trail for the non-negotiable-with-waiver gate.
+
+### What 15-02 must NOT do
+
+- Do NOT modify `create_restricted_token_with_sid` or its tests — the WRITE_RESTRICTED fix from 2026-04-17 (commit `eb4730c` → follow-up) stays intact for the non-detached path.
+- Do NOT add new `#[allow(dead_code)]` attributes. If the PTY gate leaves any `pty_proxy_windows` items unused on the detached path, they may be removed instead.
+- Do NOT thread a new `is_detached` field through `ExecConfig` — use the existing `NONO_DETACHED_LAUNCH` env var (set by `startup_runtime.rs::run_detached_launch`). This avoids churn in all callers.
+- Do NOT commit the investigation patches used for this plan. They have already been reverted at the end of Task 1.
