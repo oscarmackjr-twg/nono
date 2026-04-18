@@ -867,6 +867,29 @@ impl WindowsSupervisorRuntime {
                 return Ok(-1);
             }
 
+            // Prefer a natural exit when both the deadline and the child-exit
+            // conditions fire on the same tick. `poll_exit_code` is a
+            // non-blocking `WaitForSingleObject(handle, 0)` plus
+            // `GetExitCodeProcess`, so it only reports an exit that has
+            // already happened. See WR-03.
+            if let Some(exit_code) = child.poll_exit_code()? {
+                // Signal the capability pipe thread to exit before we drop
+                // the runtime (which closes the child HANDLE the thread
+                // caches inside its `BrokerTargetProcess`). See WR-01.
+                self.terminate_requested.store(true, Ordering::SeqCst);
+                self.state = WindowsSupervisorLifecycleState::ShuttingDown;
+                self.shutdown();
+                self.state = WindowsSupervisorLifecycleState::Completed;
+                tracing::debug!(
+                    "Windows supervisor event loop completed via non-blocking poll (session: {}, transport: {}, exit_code: {}, elapsed_ms: {})",
+                    self.session_id,
+                    self.transport_name,
+                    exit_code,
+                    self.started_at.elapsed().as_millis()
+                );
+                return Ok(exit_code);
+            }
+
             // Wall-clock deadline (RESL-03 --timeout). Expected accuracy ±100ms,
             // bounded by the `wait_for_exit(100)` quantum below. If
             // `terminate_job_object` fails, the child tree still dies when
