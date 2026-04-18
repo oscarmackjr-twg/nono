@@ -52,11 +52,11 @@ Carry-forward → Phase 15: detached-console-grandchild `0xC0000142 STATUS_DLL_I
 
 **Requirements (10):** RESL-01..04, AIPC-01, ATCH-01, CLEAN-01..04. See `.planning/REQUIREMENTS.md`.
 
-- [ ] **Phase 16: Resource Limits (RESL)** — CPU %, memory cap, wall-clock timeout, process count via `JOB_OBJECT_CPU_RATE_CONTROL_ENABLE`, `JobMemoryLimit`, supervisor-timer + `JOB_OBJECT_LIMIT_JOB_TIME`, `ActiveProcessLimit`. CLI flags: `--cpu-percent`, `--memory`, `--timeout`, `--max-processes`. Cross-platform: Unix accepts flags with a "not enforced on this platform" warning pending cross-platform follow-up milestone.
+- [x] **Phase 16: Resource Limits (RESL)** — CPU %, memory cap, wall-clock timeout, process count via `JOB_OBJECT_CPU_RATE_CONTROL_ENABLE`, `JobMemoryLimit`, supervisor-timer + `TerminateJobObject` (kernel JOB_TIME deliberately NOT used since it tracks CPU not wall-clock), `ActiveProcessLimit`. CLI flags: `--cpu-percent`, `--memory`, `--timeout`, `--max-processes`. Cross-platform: Unix accepts flags with a "not enforced on this platform" warning pending cross-platform follow-up milestone. `nono inspect` surfaces active caps via a `Limits:` block. **Completed 2026-04-18.**
 
   **Depends on:** v2.0 Named Job Object infrastructure (Phase 01 / Phase 06).
 
-  **Plans:** TBD during `/gsd-plan-phase 16` (likely 2 plans: CLI + enforcement; tests).
+  **Plans:** 16-01 (CLI flags + Windows enforcement for CPU/memory/processes) + 16-02 (wall-clock timeout timer + observability). Both complete.
 
 - [ ] **Phase 17: Attach-Streaming (ATCH)** — Full ConPTY re-attach on detached Windows sessions (read + write + resize). Resolves the Phase 15 deferred item so `nono attach` against detached sessions behaves like a real terminal.
 
@@ -97,7 +97,7 @@ Carry-forward → Phase 15: detached-console-grandchild `0xC0000142 STATUS_DLL_I
 | 13. Human Verification UAT | v2.0 | 1/1 | Resolved (2nd-pass 2026-04-18 — 3 pass, 7 waived incl. 4 v2.0-known-issue) | 2026-04-18 |
 | 14. Fix Pass | v2.0 | 2/3 | Complete with carry-forward (14-02 done; 14-03 done; 14-01 escalated to Phase 15) | 2026-04-18 |
 | 15. Detached Console + ConPTY Architecture Investigation | post-v2.0 closure | 3/3 | Complete (direction-b fix; 5-row smoke gate pass; 4 UAT items promoted; carry-forward closed) | 2026-04-18 |
-| 16. Resource Limits (RESL-01..04) | v2.1 | 0/? | Not Planned (run `/gsd-plan-phase 16` to start) | - |
+| 16. Resource Limits (RESL-01..04) | v2.1 | 2/2 | Complete (RESL-01..04 shipped: CPU/memory/processes kernel-enforced, timeout via supervisor timer, `nono inspect` Limits block) | 2026-04-18 |
 | 17. Attach-Streaming (ATCH-01) | v2.1 | 0/? | Not Planned (run `/gsd-plan-phase 17` to start) | - |
 | 18. Extended IPC (AIPC-01) | v2.1 | 0/? | Not Planned (run `/gsd-plan-phase 18` to start) | - |
 | 19. Cleanup (CLEAN-01..04) | v2.1 | 0/? | Not Planned (run `/gsd-plan-phase 19` to start) | - |

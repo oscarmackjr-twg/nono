@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: Resource Limits, Extended IPC, Attach-Streaming & Cleanup
-status: defining-requirements
-stopped_at: "v2.1 milestone started 2026-04-18. Scope: RESL-01..04 (CPU/memory/timeout/process-count caps on Windows Job Objects), AIPC-01 (extended handle brokering over Phase 11 cap pipe — socket/pipe/Job/event/mutex handles), ATCH-01 (full ConPTY re-attach on detached Windows sessions — closes Phase 15 deferred item), CLEAN-01..04 (fmt drift, Windows test flakes, WIP triage, session-file housekeeping). PROJECT.md, REQUIREMENTS.md, ROADMAP.md and MILESTONES.md updated; next: /gsd-plan-phase on the first v2.1 phase."
-last_updated: "2026-04-18T15:10:00.000Z"
+status: Phase 16 complete; ready to plan Phase 17
+stopped_at: Phase 16 complete — RESL-01..04 shipped (commits d36d073, 39ee157, 238fd1d, da27080, d61aef7). Next phase 17 (ATCH-01) or 18 (AIPC-01) — independent.
+last_updated: "2026-04-18T17:30:00.000Z"
 last_activity: 2026-04-18
 progress:
-  total_phases: 15
-  completed_phases: 15
-  total_plans: 38
-  completed_plans: 38
-  percent: 100
+  total_phases: 19
+  completed_phases: 16
+  total_plans: 42
+  completed_plans: 40
+  percent: 95
 ---
 
 # Project State: nono — v2.1 (Resource Limits, Extended IPC, Attach-Streaming & Cleanup)
@@ -20,16 +20,20 @@ progress:
 
 **Core Value:** Every nono command that works on Linux/macOS should work on Windows with equivalent security guarantees, or be explicitly documented as intentionally unsupported with a clear rationale.
 
-**Current Focus:** v2.1 milestone started 2026-04-18. Requirements scoped: RESL (4 reqs), AIPC (1 req, extended), ATCH (1 req, Phase-15 follow-up), CLEAN (4 reqs). Phase structure to be drafted by `/gsd-plan-phase` for each phase.
+**Current Focus:** Phase 16 complete (RESL-01..04 shipped). Next: Phase 17 (ATCH-01) or Phase 18 (AIPC-01) — independent.
 
 ## Current Position
 
-Milestone: v2.1 — defining requirements.
+Phase: 16 (resource-limits) — COMPLETE (2/2 plans)
+Plan: 2 of 2 (16-02 SUMMARY at `.planning/phases/16-resource-limits/16-02-SUMMARY.md`)
+Milestone: v2.1 — Phase 16 done.
+
   - v1.0 Windows Alpha — shipped 2026-03-31 (tag `v1.0`).
   - v2.0 Windows Gap Closure — shipped 2026-04-18 (tag `v2.0` pending on merge). Carry-forward closed by Phase 15 the same day.
   - v2.1 — started 2026-04-18, this milestone.
 
 v2.1 phase structure (target — will be finalized by `/gsd-plan-phase`):
+
   - Phase 16: Resource Limits (RESL-01..04) — Job Object CPU/memory/timeout/process-count caps.
   - Phase 17: Attach-Streaming (ATCH-01) — full ConPTY re-attach on detached Windows sessions.
   - Phase 18: Extended IPC (AIPC-01) — broker additional handle types over Phase 11 cap pipe.
@@ -38,16 +42,17 @@ v2.1 phase structure (target — will be finalized by `/gsd-plan-phase`):
 Phases 1–15 complete on disk (see `.planning/ROADMAP.md` progress table).
 
 Next actions:
+
   - `/gsd-plan-phase 16` to draft the RESL phase plan.
   - Or `/gsd-discuss-phase 16` first if the Job Object API choices need more scoping.
   - Phase ordering is sticky-to-writer preference: RESL first (most self-contained), ATCH second (finishes Phase 15 story), AIPC third (extends Phase 11 after RESL's Job Object work lands useful abstractions), CLEAN last (catches any fmt/test drift introduced by the feature phases).
 
 Naming note: phase directories `13-v1-human-verification-uat/` and `14-v1-fix-pass/` retain v1-era naming — v2.0/v2.1 is the formal milestone sequence per PROJECT.md/REQUIREMENTS.md.
 
-Last activity: 2026-04-18 — v2.1 milestone scoped (10 requirements across 4 phases); PROJECT.md and STATE.md updated; REQUIREMENTS.md and ROADMAP.md pending in this session.
+Last activity: 2026-04-18 -- Phase 16 execution complete
 
 ```
-Progress: [░░░░░░░░░░]   0% (0/10 v2.1 requirements validated — milestone just started)
+Progress: [████░░░░░░]  40% (4/10 v2.1 requirements validated — RESL-01..04 shipped)
 ```
 
 ## Accumulated Context
@@ -115,7 +120,11 @@ Progress: [░░░░░░░░░░]   0% (0/10 v2.1 requirements validate
 
 ## Session Continuity
 
-**Current Milestone:** v2.0 Windows Gap Closure
-**Last Activity:** 2026-04-18
-**Stopped At:** Completed quick task 260417-kem (EnvVarGuard migration) — CI blocker resolved, clippy passes clean
-**Next Steps:** Phase 08 (ConPTY Shell) or Phase 10 (ETW-Based Learn Command) — both are plannable now. Phase 09 human-verification items noted in Todos above.
+**Current Milestone:** v2.1 — Resource Limits, Extended IPC, Attach-Streaming & Cleanup
+**Last Activity:** 2026-04-18 — Phase 16 (Resource Limits) complete; RESL-01..04 shipped on `windows-squash`
+**Stopped At:** Phase 16 complete. SUMMARY at `.planning/phases/16-resource-limits/16-02-SUMMARY.md`. Commits: d36d073, 39ee157, 238fd1d, da27080, d61aef7. SC-1..SC-4 smoke evidence captured live on Windows 11.
+**Next Steps:** `/gsd-plan-phase 17` (ATCH-01 Attach-Streaming) or `/gsd-plan-phase 18` (AIPC-01 Extended IPC). Both phases are independent of each other. Phase 19 (CLEAN) is recommended last so it catches any drift introduced by 17/18.
+
+**Known carry-forward into Phase 19 CLEAN:**
+- Pre-existing `cargo fmt --check` drift in 3 files unrelated to Phase 16 (`config/mod.rs`, `restricted_token.rs`, `profile/mod.rs`).
+- 5 pre-existing workspace test failures (Phase-11 era; identical on commit 070a851 long before Phase 16). Not blocking; documented in 16-02 SUMMARY.
