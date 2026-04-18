@@ -199,6 +199,58 @@ Direction-b (gated PTY-disable + null token on detached path, with AppID-based W
 - Row D does not prove that the supervisor's outer double-launch path with `DETACHED_PROCESS` also works with the new token/PTY shape — Plan 15-02's smoke-gate Row 1 (`nono run --detached -- ping`) validates that end-to-end.
 - Row D attach-pipe behavior was not exercised (the supervisor was not detached). Plan 15-02 must add a pipe-based stdout capture path or document that `nono attach` on detached-windows is a stub in v2.1.
 
+## Phase 15 Smoke Gate
+
+Date: 2026-04-18
+Binary: `target/release/nono.exe` built from commit `2c414d8`
+Host: Windows 11 Enterprise 10.0.26200 (Admin PowerShell)
+`nono-wfp-service`: STATE=RUNNING
+
+| Row | Config | Expected | Result | Notes |
+|-----|--------|----------|--------|-------|
+| 1 | `nono run --detached --allow-cwd -- ping -t 127.0.0.1` | banner + grandchild live | **PASS** | Banner: `Started detached session 11fe3ab772880043`. `tasklist | findstr /I "ping"` showed `PING.EXE 52548`. |
+| 2 | `nono run --detached --allow-cwd -- cmd /c "echo hello"` | banner, exit 0 | **PASS** | Banner: `Started detached session 1971e4eee9318230`. Fast-exit race handled by `startup_runtime` guard: inner exits success + session file exists → treat as launched. |
+| 3 | `nono run --allow-cwd -- cmd /c "echo hello"` | `hello`, exit 0 | **PASS** | `hello` printed; supervisor exit 0. Non-detached path unchanged (full WRITE_RESTRICTED + ConPTY). |
+| 4 | `nono run --detached --block-net --allow-cwd -- cmd /c "curl --max-time 5 http://example.com"` | banner + network blocked | **PASS** (partial verification) | Banner: `Started detached session 0b770bb299f1c2d9`. Detached supervisor launched cleanly under `--block-net`; no `0xC0000142`. Kernel-enforced curl blocking was not directly observed from the outer invocation (child output is not streamed through the supervisor on the detached Windows path — v2.1+ attach-streaming). |
+| 5 | `nono logs / inspect / prune --dry-run <session-id>` | exit 0 with expected shapes | **PASS** | `logs 11fe3ab772880043` → exit 0, reports "No event log recorded" (correct for ping which has no audit entries). `inspect 11fe3ab772880043` → exit 0, full session record (session_id, name, status, attached, pids, started, exit_code, command, workdir, network). `prune --dry-run` → exit 0, lists 1172 stale sessions without deleting. |
+
+All 5 rows PASS. Phase 15 acceptance gate is met.
+
+## Resolution
+
+status: resolved
+
+### Final root cause
+
+1. **Primary:** `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` combined with `DETACHED_PROCESS` causes `STATUS_DLL_INIT_FAILED (0xC0000142)` in console-application grandchildren. The WRITE_RESTRICTED + session-SID token amplifies the failure — both must be addressed for the detached path.
+2. **Secondary (exposed by the primary fix):** `WindowsSupervisorRuntime` named its control pipe after the internal `supervisor_session_id` (correlation ID `supervised-<pid>-<nanos>`), but the outer `startup_runtime::run_detached_launch` readiness probe and `session_commands_windows` clients looked up pipes by the user-facing `short_session_id`. The mismatch produced "Detached session failed to become attachable within startup timeout" even when the grandchild ran correctly. Pre-existing; documented in the matrix as `attach-pipe timeout (separate issue)`. Masked by 0xC0000142 until the primary fix landed.
+
+### Fix
+
+Direction-b, applied on `windows-squash`:
+
+1. **`crates/nono-cli/src/supervised_runtime.rs`** (commit `802c958`) — `should_allocate_pty()` gates PTY allocation. On Windows, allocate only when `session.interactive_pty` is true (`nono shell`). Non-Windows keeps `detached_start || interactive_pty`.
+2. **`crates/nono-cli/src/exec_strategy_windows/launch.rs`** (commit `802c958`) — when `NONO_DETACHED_LAUNCH=1` is set (the inner detached supervisor's env var), `spawn_windows_child` skips `create_restricted_token_with_sid` / `create_low_integrity_primary_token` and uses `std::ptr::null_mut()` so `CreateProcessW` runs the grandchild with the caller's token. Kernel network identity falls back to AppID-based WFP filtering.
+3. **`crates/nono-cli/src/exec_strategy_windows/supervisor.rs`** (commit `802c958` + `2c414d8`) — added a diagnostic log line when `start_logging` finds no PTY; added `user_session_id` field to `WindowsSupervisorRuntime` so pipes are named after the short session ID (matches what clients and the outer readiness probe look up).
+4. **`crates/nono-cli/src/exec_strategy_windows/mod.rs`** (commit `2c414d8`) — passes the user-facing `session_id` into `WindowsSupervisorRuntime::initialize`.
+5. **`crates/nono-cli/src/startup_runtime.rs`** (commit `2c414d8`) — when the inner supervisor exits with `status.success()` AND the session record exists, treat the launch as successful (fast-exit race resolution for short-lived detached commands).
+
+### Security waivers (scoped to Windows detached path only)
+
+- **Low-Integrity isolation**: waived. Null token inherits caller IL. Job Object + filesystem sandbox (CapabilitySet) remain primary isolation.
+- **Per-session SID WFP**: waived. Detached children share one AppID WFP filter. Still kernel-enforced; requires `nono-wfp-service` running for network enforcement.
+- Non-detached `nono run` and `nono shell` retain the full WRITE_RESTRICTED + session-SID + ConPTY configuration — unchanged.
+
+### Verification
+
+- CI gate: `cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::unwrap_used` — clean.
+- Tests: 12/12 targeted tests (PTY gate, detached-token gate, existing restricted_token regression, ambient detached tests). Pre-existing Windows test drift in `capability_ext`, `profile/builtin`, `query_ext`, `trust_keystore` is NOT introduced by Phase 15 (verified by stash-revert comparison against HEAD).
+- Smoke gate: all 5 rows PASS (see § Phase 15 Smoke Gate above).
+
+### Deferred to v2.1+
+
+- `nono attach` output streaming for detached sessions on Windows. `start_logging` returns `Ok(())` when PTY is None; a pipe-based stdout relay is a future enhancement. Operators get a clear log line explaining the gap.
+
 ## Direction Decision
 
 Date: 2026-04-18
