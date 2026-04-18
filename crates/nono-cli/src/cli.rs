@@ -2272,17 +2272,32 @@ mod parser_tests {
         let err_zero =
             Cli::try_parse_from(["nono", "run", "--cpu-percent", "0", "--allow", ".", "echo"]);
         assert!(err_zero.is_err());
-        let err_over =
-            Cli::try_parse_from(["nono", "run", "--cpu-percent", "101", "--allow", ".", "echo"]);
+        let err_over = Cli::try_parse_from([
+            "nono",
+            "run",
+            "--cpu-percent",
+            "101",
+            "--allow",
+            ".",
+            "echo",
+        ]);
         assert!(err_over.is_err());
-        let ok = Cli::try_parse_from(["nono", "run", "--cpu-percent", "25", "--allow", ".", "echo"]);
+        let ok =
+            Cli::try_parse_from(["nono", "run", "--cpu-percent", "25", "--allow", ".", "echo"]);
         assert!(ok.is_ok());
     }
 
     #[test]
     fn max_processes_range_enforced_by_clap() {
-        let err_zero =
-            Cli::try_parse_from(["nono", "run", "--max-processes", "0", "--allow", ".", "echo"]);
+        let err_zero = Cli::try_parse_from([
+            "nono",
+            "run",
+            "--max-processes",
+            "0",
+            "--allow",
+            ".",
+            "echo",
+        ]);
         assert!(err_zero.is_err());
         let err_over = Cli::try_parse_from([
             "nono",
