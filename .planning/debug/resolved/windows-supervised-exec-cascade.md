@@ -1,14 +1,15 @@
 ---
 slug: windows-supervised-exec-cascade
-status: partially-resolved
+status: resolved
 trigger: Windows supervised execution cascade — after fixing token UAF in spawn_windows_child (eb4730c / quick 260417-wla), two more blockers block every `nono run` on Windows
 created: 2026-04-17
-updated: 2026-04-17
+updated: 2026-04-18
 branch: windows-squash
-head: f46e2c9
-milestone: v1.0
-milestone_blocker: true
-related_phase: 13-v1-human-verification-uat
+head: 2c414d8
+milestone: v2.0
+milestone_blocker: false
+resolved_by: phase-15-plan-02
+related_phase: 15-detached-console-conpty-investigation
 related_quick: 260417-wla
 ---
 

@@ -42,7 +42,7 @@ Carry-forward → Phase 15: detached-console-grandchild `0xC0000142 STATUS_DLL_I
 
 - [ ] **Phase 15: Detached Console + ConPTY Architecture Investigation** — Deliver either (a) a working token + ConPTY configuration for sandboxed console grandchildren spawned under a `DETACHED_PROCESS` supervisor, or (b) a documented architectural pivot (e.g. gated PTY-disable in detached mode, alternate detached IPC) with explicit functional trade-offs captured. Unblocks Phase 14 closure and the 4 Phase 13 UAT items carried forward as `v2.0-known-issue`.
 
-  **Depends on:** Phase 14 paused state; `.planning/debug/windows-supervised-exec-cascade.md` test matrix; `.planning/phases/14-v1-fix-pass/14-01-SUMMARY.md` post-mortem.
+  **Depends on:** Phase 14 paused state; `.planning/debug/resolved/windows-supervised-exec-cascade.md` test matrix; `.planning/phases/14-v1-fix-pass/14-01-SUMMARY.md` post-mortem.
 
   **Scope context:** Phase 14 plan 14-01 established empirically that the ONE working detached-mode configuration is `null token + no PTY`. The three paths tried in 14-01 (TokenGroups promotion, AllocConsole, null token with PTY still live) all failed the smoke gate. Fully matching the working row requires architecture changes to PTY wiring in `crates/nono-cli/src/supervised_runtime.rs` and the ConPTY attribute setup in `spawn_windows_child`.
 

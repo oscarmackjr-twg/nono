@@ -2,7 +2,7 @@
 phase: 14-v1-fix-pass
 plan: 01
 completed: 2026-04-18T02:15:00Z
-status: escalated-out-of-scope
+status: resolved-by-phase-15-plan-02
 ---
 
 ## Outcome
@@ -190,3 +190,18 @@ Binary rebuilt at `target/release/nono.exe` after commit `005f6bc`. User to re-r
 Expected per row: no `0xC0000142`, no `0xC0000022`, target process live in `tasklist` (rows 1, 4), stdout observable (rows 2, 3), row 4's child exits non-zero with a curl failure in stderr (MUST still drop — AppID filter is now the kernel-level boundary).
 
 If Pass 2 also fails: per the plan, escalate — the bug is neither console-init nor restricting-SID and is out of scope for this plan.
+
+## Resolution
+
+Resolved by Phase 15 plan 15-02 (fix commits `802c958` + `2c414d8`).
+Direction-b was implemented: gated PTY-disable on the Windows detached
+path + null token when `NONO_DETACHED_LAUNCH=1` + AppID-based WFP
+filtering (replacing per-session SID WFP on the detached path only).
+
+Phase 14 roadmap success criterion #1 (detached console-child initializes)
+is now **MET**. Phase 13 UAT items P05-HV-1, P07-HV-3, P11-HV-1, P11-HV-3
+promoted to `pass` in `13-UAT.md` by Phase 15-03 (commit `eda3d6f`).
+
+See `.planning/debug/resolved/windows-supervised-exec-cascade.md` for
+the full investigation trail, root-cause pin, Phase 15-01 Investigation
+matrix, and Phase 15 Smoke Gate evidence.
