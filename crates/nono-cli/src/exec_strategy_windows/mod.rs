@@ -63,10 +63,11 @@ use windows_sys::Win32::Security::{
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectCpuRateControlInformation,
     JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
-    JOBOBJECT_CPU_RATE_CONTROL_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-    JOB_OBJECT_CPU_RATE_CONTROL_ENABLE, JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
-    JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION,
-    JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    TerminateJobObject, JOBOBJECT_CPU_RATE_CONTROL_INFORMATION,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_CPU_RATE_CONTROL_ENABLE,
+    JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
+    JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION, JOB_OBJECT_LIMIT_JOB_MEMORY,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 use windows_sys::Win32::System::Services::{
     OpenSCManagerW, OpenServiceW, QueryServiceStatusEx, SC_MANAGER_CONNECT, SC_STATUS_PROCESS_INFO,
@@ -621,7 +622,35 @@ pub fn execute_supervised(
         ));
     };
 
-    let mut runtime = WindowsSupervisorRuntime::initialize(supervisor, pty_pair, session_id)?;
+    // Compute the --timeout wall-clock deadline BEFORE any spawn work so a
+    // u64::MAX overflow fails fast. None when --timeout is absent.
+    let timeout_deadline =
+        supervisor::compute_deadline(limits.timeout, std::time::Instant::now())?;
+
+    // Plan 16-02 Step 5 reorders this block so `containment` is created BEFORE
+    // `WindowsSupervisorRuntime::initialize`. The runtime borrows
+    // `containment.job` for the `--timeout` expiry path; `ProcessContainment`
+    // owns the close-on-drop and must outlive the runtime. Rust drop order is
+    // reverse-of-declaration: with `containment` declared first, the runtime
+    // drops first (its `Drop` does not touch `containment_job`), then
+    // `containment` drops last and calls `CloseHandle` exactly once.
+    let prepared = prepare_live_windows_launch(config, session_id)?;
+    let launch_program = prepared.launch_program.as_path();
+
+    let cmd_args = prepare_runtime_hardened_args(
+        launch_program,
+        &config.command[1..],
+        config.interactive_shell,
+    );
+    let containment = create_process_containment(session_id)?;
+
+    let mut runtime = WindowsSupervisorRuntime::initialize(
+        supervisor,
+        pty_pair,
+        session_id,
+        timeout_deadline,
+        containment.job,
+    )?;
     tracing::debug!(
         "Windows supervised approval backend: {}",
         supervisor.approval_backend.as_ref().backend_name()
@@ -631,8 +660,8 @@ pub fn execute_supervised(
     let supported = supervisor.support.supported_feature_labels();
     if !unsupported.is_empty() {
         return Err(NonoError::UnsupportedPlatform(format!(
-            "Windows supervised execution initialized the control channel 
-             (session: {}, transport: {}), but these supervised features are not available yet: {}. 
+            "Windows supervised execution initialized the control channel
+             (session: {}, transport: {}), but these supervised features are not available yet: {}.
              Details: {}. Supported Windows supervised features currently: {}.",
             supervisor.session_id,
             runtime.transport_name(),
@@ -646,15 +675,6 @@ pub fn execute_supervised(
         )));
     }
 
-    let prepared = prepare_live_windows_launch(config, session_id)?;
-    let launch_program = prepared.launch_program.as_path();
-
-    let cmd_args = prepare_runtime_hardened_args(
-        launch_program,
-        &config.command[1..],
-        config.interactive_shell,
-    );
-    let containment = create_process_containment(session_id)?;
     runtime.state = WindowsSupervisorLifecycleState::LaunchingChild;
     tracing::debug!(
         "Windows supervised execution starting event loop (session: {}, transport: {}, features: {})",

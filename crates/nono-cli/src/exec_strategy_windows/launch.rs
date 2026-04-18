@@ -119,6 +119,40 @@ pub(super) fn terminate_suspended_process(process: HANDLE, reason: &str) {
     tracing::debug!("terminated suspended Windows child after containment failure: {reason}");
 }
 
+/// Exit code embedded in the Job Object when the supervisor terminates the
+/// tree for a `--timeout` wall-clock expiry. Equals `STATUS_TIMEOUT` /
+/// `WAIT_TIMEOUT` (`0x00000102` = 258 decimal). Users see this as the
+/// supervisor's exit code when the `--timeout` deadline fires.
+pub(super) const STATUS_TIMEOUT_EXIT_CODE: u32 = 0x0000_0102;
+
+/// Terminate every process in the given Job Object with the supplied exit code.
+/// Used by the supervisor to honor `--timeout` (RESL-03) and potentially by any
+/// future supervisor-initiated kill paths.
+///
+/// Returns `Err(NonoError::CommandExecution(...))` when the FFI call fails.
+/// The Job Object's `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` flag (set by
+/// `create_process_containment`) remains the safety-net if this FFI call
+/// misfires — when `ProcessContainment` drops, the kernel still tears the
+/// tree down. See `.planning/phases/16-resource-limits/16-CONTEXT.md`
+/// § Failure Modes.
+pub(super) fn terminate_job_object(job: HANDLE, exit_code: u32) -> Result<()> {
+    let ok = unsafe {
+        // SAFETY: `job` is a live Job Object handle borrowed from
+        // `ProcessContainment`. `TerminateJobObject` requires
+        // JOB_OBJECT_TERMINATE access, which the handle returned by
+        // `CreateJobObjectW` has by default.
+        TerminateJobObject(job, exit_code)
+    };
+    if ok == 0 {
+        return Err(NonoError::CommandExecution(std::io::Error::other(format!(
+            "TerminateJobObject failed (exit_code={}, GetLastError={})",
+            exit_code,
+            unsafe { GetLastError() }
+        ))));
+    }
+    Ok(())
+}
+
 pub(super) fn resume_contained_process(process: HANDLE, thread: HANDLE) -> Result<()> {
     let resume_result = unsafe {
         // SAFETY: `thread` is the live primary thread handle returned by
