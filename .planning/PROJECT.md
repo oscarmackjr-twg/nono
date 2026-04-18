@@ -50,13 +50,13 @@ Windows security must be as structurally impossible and feature-complete as Unix
 - ✔ **LEARN-01** — `nono learn` on Windows via ETW — v2.0 Phase 10
 - ✔ **TRUST-01** *(stretch)* — runtime capability expansion over named pipe — v2.0 Phase 11 (live supervised UAT promoted to pass by Phase 15 direction-b fix)
 - ✔ **DETACHED-FIX-01** — detached-supervisor + ConPTY + restricted-token architecture fix (direction-b: gated PTY-disable + null-token + AppID WFP on the Windows detached path). Unblocks 4 Phase 13 UAT items (P05-HV-1, P07-HV-3, P11-HV-1, P11-HV-3) — all promoted to `pass`. v2.1 Phase 15 (the Phase 15 carrier moved into the v2.1 milestone bucket on scoping day 2026-04-18).
+- ✔ **RESL-01** — CPU percentage cap on Windows Job Object (`--cpu-percent`) via `JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP`. Validated in Phase 16: Resource Limits.
+- ✔ **RESL-02** — Memory cap on Windows Job Object (`--memory`) via `JobMemoryLimit` with `KILL_ON_JOB_CLOSE` preserved. Validated in Phase 16: Resource Limits.
+- ✔ **RESL-03** — Wall-clock timeout (`--timeout`) via supervisor-side `Instant` deadline + `TerminateJobObject` (kernel `JOB_TIME` deliberately not used since it tracks CPU not wall-clock). Validated in Phase 16: Resource Limits.
+- ✔ **RESL-04** — Process count cap (`--max-processes`) via `ActiveProcessLimit`. Validated in Phase 16: Resource Limits. `nono inspect` surfaces all four caps via the new `Limits:` block.
 
 ### Active (v2.1)
 
-- [ ] **RESL-01** — CPU percentage cap on Windows Job Object (`--cpu-percent`); `JOB_OBJECT_CPU_RATE_CONTROL_ENABLE` via CpuRate/MinMaxRate.
-- [ ] **RESL-02** — Memory cap on Windows Job Object (`--memory`); `JOBOBJECT_EXTENDED_LIMIT_INFORMATION.ProcessMemoryLimit` / `JobMemoryLimit`.
-- [ ] **RESL-03** — Wall-clock timeout (`--timeout`); `JOB_OBJECT_LIMIT_JOB_TIME` or supervisor-side timer fallback.
-- [ ] **RESL-04** — Process count cap (`--max-processes`); `JOB_OBJECT_LIMIT_ACTIVE_PROCESS`.
 - [ ] **AIPC-01** — extended handle brokering on the Phase 11 capability pipe: socket handles, named-pipe handles, Job Object handles, event handles, mutex handles. Each with the correct `DuplicateHandle` inheritance/security semantics and access-mask validation.
 - [ ] **ATCH-01** — full ConPTY re-attach on Windows detached sessions (read + write + resize). Closes the Phase 15 deferred item; lets `nono attach` behave like a real terminal against detached sessions.
 - [ ] **CLEAN-01** — `cargo fmt --all` the 3 pre-existing drifted files from commit `6749494` (EnvVarGuard migration); restore CI `fmt --check` to clean.
@@ -113,4 +113,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-18 — v2.1 milestone started (Resource Limits + Extended IPC + Attach-Streaming + Cleanup). v2.0 and Phase 15 shipped; carry-forward closed.*
+*Last updated: 2026-04-18 — Phase 16 complete (RESL-01..04 shipped: Job Object CPU/memory/process caps + supervisor wall-clock timer + `nono inspect` Limits block). v2.1 active phases remaining: AIPC-01, ATCH-01, CLEAN-01..04.*
