@@ -74,7 +74,7 @@ wave, any order is acceptable.
 ### Wave 1 — No dependencies (run first)
 
 #### 1. P05-HV-1: Detach/Attach lifecycle
-- command: `nono run --detach -- ping -t 127.0.0.1`
+- command: `nono run --detached -- ping -t 127.0.0.1`
 - expected: Exits within ~2 seconds with "Started detached session" banner.
   Record the session ID from output.
 - then: `nono attach <session-id-from-above>`
@@ -161,13 +161,19 @@ wave, any order is acceptable.
   exit-code result but worth noting for future UX polish.
 
 #### 6. P09-HV-1: Proxy env var injection
-- prereq: Admin confirmed, WFP service (`nono-wfp-service`) running, a network
-  profile with proxy credentials configured. If proxy config is not available,
-  use a minimal test: start a TCP listener on any port (e.g.,
-  `python -m http.server 8888`) and configure nono to use it as the proxy
-  endpoint.
-- command: `nono run --proxy-only -- cmd.exe /c set` (or PowerShell:
-  `nono run --proxy-only -- powershell -c "Get-ChildItem Env:"`)
+- prereq: Admin confirmed (run PowerShell "as Administrator"); WFP service
+  registered and running via `nono setup --install-wfp-service` followed by
+  `nono setup --start-wfp-service` (verify with `nono setup --check-only` that
+  the WFP readiness line reads `ready`, not `missing service`); a network
+  profile that defines the credential services you want to inject. For a
+  minimal reproducer, start a local HTTP listener to act as the upstream
+  proxy endpoint (e.g. `python -m http.server 8888`).
+- command: `nono run --network-profile example-agent --credential github --upstream-proxy localhost:8888 -- cmd.exe /c set`
+  (or PowerShell:
+  `nono run --network-profile example-agent --credential github --upstream-proxy localhost:8888 -- powershell -c "Get-ChildItem Env:"`).
+  Replace `example-agent` with whichever profile you've installed via
+  `nono setup --profiles` and `github` with a credential service configured
+  in that profile.
 - expected: Child environment output contains
   `HTTPS_PROXY=http://localhost:<port>` and `NONO_PROXY_TOKEN=<token>`.
 - result: **blocked**
