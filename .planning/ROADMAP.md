@@ -6,7 +6,7 @@ This roadmap tracks the path to full Windows/Unix parity for `nono`. The v2.0 mi
 
 - ✅ **v1.0 Windows Alpha** — Phases 1–4 (shipped 2026-03-31; tag `v1.0`)
 - ✅ **v2.0 Windows Gap Closure** — Phases 5–14 (shipped 2026-04-18 with v2.0-known-issue carry-forward; tag `v2.0`)
-- 🚧 **Next (unversioned; candidate v2.1)** — Phase 15 (detached console + ConPTY investigation)
+- ✅ **Candidate v2.1** — Phase 15 (detached console + ConPTY investigation) — completed 2026-04-18; v2.0 carry-forward closed
 
 ## Phases
 
@@ -38,15 +38,15 @@ Carry-forward → Phase 15: detached-console-grandchild `0xC0000142 STATUS_DLL_I
 
 </details>
 
-### 🚧 Next — candidate v2.1
+### ✅ Candidate v2.1 (completed 2026-04-18)
 
-- [ ] **Phase 15: Detached Console + ConPTY Architecture Investigation** — Deliver either (a) a working token + ConPTY configuration for sandboxed console grandchildren spawned under a `DETACHED_PROCESS` supervisor, or (b) a documented architectural pivot (e.g. gated PTY-disable in detached mode, alternate detached IPC) with explicit functional trade-offs captured. Unblocks Phase 14 closure and the 4 Phase 13 UAT items carried forward as `v2.0-known-issue`.
+- [x] **Phase 15: Detached Console + ConPTY Architecture Investigation** — Delivered direction-b architectural pivot: gated PTY-disable on Windows detached path + null token when `NONO_DETACHED_LAUNCH=1` + AppID-based WFP filtering (replacing per-session SID WFP on the detached path only). 5-row smoke gate passes end-to-end. All 4 Phase 13 UAT items (P05-HV-1, P07-HV-3, P11-HV-1, P11-HV-3) promoted to `pass`. Phase 14 carry-forward closed. Plans: 3/3 complete.
 
-  **Depends on:** Phase 14 paused state; `.planning/debug/resolved/windows-supervised-exec-cascade.md` test matrix; `.planning/phases/14-v1-fix-pass/14-01-SUMMARY.md` post-mortem.
+  **Fix commits:** `802c958` (direction-b core fix), `2c414d8` (user-session-id pipe naming + fast-exit race), `0de3e77`/`eda3d6f`/`bfd3f94`/`034b4d3` (bookkeeping, UAT promotions, CHANGELOG, SUMMARY).
 
-  **Scope context:** Phase 14 plan 14-01 established empirically that the ONE working detached-mode configuration is `null token + no PTY`. The three paths tried in 14-01 (TokenGroups promotion, AllocConsole, null token with PTY still live) all failed the smoke gate. Fully matching the working row requires architecture changes to PTY wiring in `crates/nono-cli/src/supervised_runtime.rs` and the ConPTY attribute setup in `spawn_windows_child`.
+  **Security scope:** Waivers (Low-IL isolation + per-session-SID WFP) are restricted to the Windows detached path only. Non-detached `nono run` and `nono shell` retain the full WRITE_RESTRICTED + session-SID + ConPTY configuration. Documented in `802c958` commit body with `Security-Waiver:` trailers.
 
-  **Plans:** TBD during `/gsd-plan-phase 15` (likely 1–2 plans: investigation + fix).
+  **Deferred to v2.1+:** `nono attach` output streaming for detached Windows sessions. Operators who need live stdout on detached Windows can use non-detached mode; `nono logs` provides after-the-fact visibility.
 
 ## Progress Table
 
@@ -66,4 +66,4 @@ Carry-forward → Phase 15: detached-console-grandchild `0xC0000142 STATUS_DLL_I
 | 12. Milestone Bookkeeping Cleanup | v2.0 | 3/3 | Complete | 2026-04-11 |
 | 13. Human Verification UAT | v2.0 | 1/1 | Resolved (2nd-pass 2026-04-18 — 3 pass, 7 waived incl. 4 v2.0-known-issue) | 2026-04-18 |
 | 14. Fix Pass | v2.0 | 2/3 | Complete with carry-forward (14-02 done; 14-03 done; 14-01 escalated to Phase 15) | 2026-04-18 |
-| 15. Detached Console + ConPTY Architecture Investigation | v2.1 (candidate) | 0/0 | Not Planned (run `/gsd-plan-phase 15` to start) | - |
+| 15. Detached Console + ConPTY Architecture Investigation | v2.1 (candidate) | 3/3 | Complete (direction-b fix; 5-row smoke gate pass; 4 UAT items promoted; carry-forward closed) | 2026-04-18 |

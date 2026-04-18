@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Windows Gap Closure
 status: shipped
-stopped_at: "v2.0 Windows Gap Closure archived 2026-04-18. Internal planning drifted to calling this milestone 'v1.0 Windows Parity' — the formal name per PROJECT.md/REQUIREMENTS.md is v2.0 (v1.0 was the 2026-03-31 Windows Alpha, already tagged). Archive files at .planning/milestones/v2.0-*.md. Phase 15 is the first v2.1-candidate phase (detached console + ConPTY investigation); not yet planned."
-last_updated: "2026-04-18T03:00:00.000Z"
+stopped_at: "Phase 15 (Detached Console + ConPTY Architecture Investigation) COMPLETE 2026-04-18. Direction-b architectural pivot implemented: gated PTY-disable + null-token + AppID WFP on the Windows detached path. 5-row smoke gate PASS on commit 2c414d8. Four Phase 13 UAT items (P05-HV-1, P07-HV-3, P11-HV-1, P11-HV-3) promoted from waived to pass. v2.0 carry-forward closed. Phase 14 status promoted from escalated to resolved-by-phase-15-plan-02."
+last_updated: "2026-04-18T14:50:00.000Z"
 last_activity: 2026-04-18
 progress:
   total_phases: 15
-  completed_phases: 14
-  total_plans: 35
-  completed_plans: 33
-  percent: 94
+  completed_phases: 15
+  total_plans: 38
+  completed_plans: 38
+  percent: 100
 ---
 
 # Project State: nono - Windows Gap Closure
@@ -20,33 +20,33 @@ progress:
 
 **Core Value:** Every nono command that works on Linux/macOS should work on Windows with equivalent security guarantees, or be explicitly documented as intentionally unsupported with a clear rationale.
 
-**Current Focus:** v2.0 Windows Gap Closure SHIPPED 2026-04-18. Archive files at `.planning/milestones/v2.0-*.md`. Phase 15 (candidate v2.1) scoped in ROADMAP; not yet planned.
+**Current Focus:** v2.0 Windows Gap Closure SHIPPED 2026-04-18. Phase 15 (candidate v2.1) COMPLETE 2026-04-18 — v2.0 known-issue carry-forward closed. Next: start a formal v2.1 milestone or continue with ad-hoc phases as needed.
 
 ## Current Position
 
-Milestone: v2.0 Windows Gap Closure — SHIPPED 2026-04-18 (with documented known-issue carry-forward).
+Milestone: v2.0 Windows Gap Closure — SHIPPED 2026-04-18 (carry-forward now closed by Phase 15).
   - v1.0 Windows Alpha — shipped 2026-03-31 (tag `v1.0`).
   - v2.0 Windows Gap Closure — shipped 2026-04-18 (tag `v2.0` to be created in the milestone-close workflow).
 
-Phase 14 (v2.0 Fix Pass) — COMPLETE with carry-forward 2026-04-18
-  - 14-01: ESCALATED to Phase 15 (code reverted 2026-04-18; both Direction 3 AllocConsole and Direction 2 null-token failed the user smoke gate)
-  - 14-02: DONE (setup.rs wrap-availability sentence — commit 8e200f8)
-  - 14-03: DONE (runbook typo fixes + 2nd-pass UAT + upstream VERIFICATION.md promotion — commits 647e0a5, 14a9ef0, 6500bb1, 952f8e1)
+Phase 15 (Detached Console + ConPTY Architecture Investigation) — COMPLETE 2026-04-18
+  - 15-01: DONE (investigation matrix, direction-b chosen — commits `0a0c794`, `e17bf97`)
+  - 15-02: DONE (direction-b fix + smoke-gate PASS — commits `802c958`, `2c414d8`, `0de3e77`)
+  - 15-03: DONE (UAT promotions, debug doc moved to resolved/, CHANGELOG, 14-01 status — commits `eda3d6f`, `bfd3f94`, `034b4d3`)
 
-Phase 13 (v2.0 Human Verification UAT) — RESOLVED 2026-04-18. All 10 items terminal: 3 pass, 7 waived (4 v2.0-known-issue, 1 no-test-fixture, 2 pre-existing).
+Phase 14 (v2.0 Fix Pass) — CLOSED 2026-04-18 (plan 14-01 resolved by Phase 15-02; 14-02 and 14-03 already complete).
 
-Phase 15 (Detached Console + ConPTY Architecture Investigation) — NOT PLANNED. First v2.1 candidate phase.
+Phase 13 (v2.0 Human Verification UAT) — RESOLVED 2026-04-18. All 10 items terminal: **7 pass** (4 promoted from waived by Phase 15), 3 waived (1 no-test-fixture, 2 pre-existing).
 
 Next actions:
-  - `/gsd-plan-phase 15` to scope the detached + ConPTY investigation as the first phase of v2.1.
-  - Or `/gsd-new-milestone` to formally start v2.1.
+  - `/gsd-new-milestone` to formally start v2.1 (or tag `v2.1` if closing as a patch release).
+  - Follow-up cleanup tasks (chore-scope, not blocking): pre-existing fmt drift in 3 files from commit `6749494`; 5 pre-existing Windows test flakes (`capability_ext`, `profile::builtin`, `query_ext`, `trust_keystore`). Both are pre-Phase-15 and verified not introduced by this phase.
 
 Naming note: the phase directories `13-v1-human-verification-uat/` and `14-v1-fix-pass/` and in-phase references to `v1.0-known-issue` are internal naming drift — the formal milestone is v2.0 per PROJECT.md and REQUIREMENTS.md.
 
-Last activity: 2026-04-18 -- v2.0 milestone archived; ROADMAP, PROJECT, MILESTONES, STATE updated; archive files written.
+Last activity: 2026-04-18 — Phase 15 closed; 4 UAT items promoted; `0xC0000142` detached-console-grandchild bug fixed end-to-end.
 
 ```
-Progress: [██████████] 100% (31/31 plans complete on disk)
+Progress: [██████████] 100% (38/38 plans complete on disk, across v1.0 + v2.0 + Phase 15)
 ```
 
 ## Accumulated Context
