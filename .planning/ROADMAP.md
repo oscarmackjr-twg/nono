@@ -17,7 +17,8 @@ This roadmap outlines the path to functional parity between the Windows implemen
 - [x] **Phase 11: Runtime Capability Expansion** - (Stretch) Enable sandboxed child to request additional capabilities at runtime. (completed 2026-04-11, human verification pending)
 - [x] **Phase 12: Milestone Bookkeeping Cleanup** - Close planning-trail tech debt from v1.0 audit (checkbox sweep, retro VERIFICATION.md for 04/10, ROADMAP reconciliation, minor code nits). (completed 2026-04-11)
 - [ ] **Phase 13: v1.0 Human Verification UAT** - Execute the 10 live-host human-verification items deferred across phases 05, 07, 09, 11 in one Windows session.
-- [ ] **Phase 14: v1.0 Fix Pass** - Close three blocking gaps surfaced by Phase 13 UAT (detached console-child DLL init failure, setup help-text drift, P09 runbook correction) so v1.0 can be archived.
+- [ ] **Phase 14: v1.0 Fix Pass** - Close three blocking gaps surfaced by Phase 13 UAT (detached console-child DLL init failure, setup help-text drift, P09 runbook correction) so v1.0 can be archived. **PAUSED 2026-04-18** after 14-01 escalated (see Phase 15).
+- [ ] **Phase 15: Detached Console + ConPTY Architecture Investigation** - Investigate why `null token + ConPTY` in a `DETACHED_PROCESS` supervisor still fails DLL init with `0xC0000142`, and deliver either (a) a working architecture that keeps PTY in detached mode, or (b) a gated PTY-disable path for detached mode with explicit stdio trade-offs. Unblocks Phase 14 closure and the 4 Phase 13 UAT items still `blocked`.
 
 ## Phase Details
 
@@ -200,6 +201,19 @@ Plans:
 - [x] 14-02-PLAN.md — Fix `setup --check-only` help-text drift in `crates/nono-cli/src/setup.rs`: add the canonical wrap-availability sentence; remove the stale "remain intentionally unavailable" Windows branch.
 - [ ] 14-03-PLAN.md — Correct Phase 13 runbook (`13-UAT.md` P09-HV-1 command + P05-HV-1 flag typo); then re-run the 5 blocked items + P07-HV-2 on an admin host with `nono-wfp-service` registered; then run Phase 13 Task 3 (upstream VERIFICATION.md promotion).
 
+### Phase 15: Detached Console + ConPTY Architecture Investigation
+**Goal**: Deliver either (a) a working token + ConPTY configuration for sandboxed console grandchildren spawned under a `DETACHED_PROCESS` supervisor, or (b) a documented architectural pivot (e.g. gated PTY-disable in detached mode, alternate detached IPC) with explicit functional trade-offs captured. Unblocks Phase 14 closure and Phase 13 UAT items `P05-HV-1`, `P07-HV-3`, `P11-HV-1`, `P11-HV-3`.
+**Depends on**: Phase 14 paused state; `.planning/debug/windows-supervised-exec-cascade.md` test matrix; `.planning/phases/14-v1-fix-pass/14-01-SUMMARY.md` post-mortem (Direction 1/2/3 failures).
+**Scope context**: Phase 14 plan 14-01 established empirically that the ONE working detached-mode configuration from the debug matrix is `null token + no PTY`. The three paths tried in 14-01 (Direction 1 TokenGroups promotion, Direction 3 AllocConsole, Direction 2 null token with PTY still live) all failed. Fully matching the working row requires architecture changes to PTY wiring in `crates/nono-cli/src/supervised_runtime.rs` and the ConPTY attribute setup in `spawn_windows_child` that are too invasive for a tactical plan — hence this dedicated investigation phase.
+**Success Criteria** (what must be TRUE):
+  1. A working configuration for detached console grandchildren is identified AND committed, verified by the Phase 14 4-row smoke-gate matrix reproduced in this phase. The configuration must preserve: sandbox filesystem boundary, Job Object containment, Low-Integrity isolation, and some kernel-level network identity (session-SID WFP preferred; AppID WFP acceptable with explicit trade-off note).
+  2. If the investigation concludes that NO configuration satisfies (1) without disabling PTY in detached mode, Phase 15 instead delivers: a launch.rs / supervised_runtime.rs change that makes PTY allocation conditional on `!detached_mode`, AND a redirected-stdio path for detached supervisors (pipe-based stdout capture for `nono attach`), AND a commit-body waiver that documents the loss of interactive-terminal semantics for detached children.
+  3. Phase 14's 4-row smoke-gate matrix passes under the chosen configuration (Pass-3 effectively).
+  4. `make ci` stays green.
+  5. The debug doc `.planning/debug/windows-supervised-exec-cascade.md` is updated with the final resolution and moved to `.planning/debug/resolved/`.
+**Gap Closure**: Closes plan 14-01's escalation. After this phase lands, Phase 14 resumes with 14-03 and completes.
+**Plans**: TBD during `/gsd-plan-phase 15` (likely 1-2 plans: investigation + fix).
+
 ## Progress Table
 
 | Phase | Plans Complete | Status | Completed |
@@ -217,4 +231,5 @@ Plans:
 | 11. Runtime Capability Expansion | 2/2 | Complete | 2026-04-11 |
 | 12. Milestone Bookkeeping Cleanup | 3/3 | Complete   | 2026-04-11 |
 | 13. v1.0 Human Verification UAT | 0/1 | In Progress (partial — 2 pass, 1 fail, 5 blocked, 2 waived) | - |
-| 14. v1.0 Fix Pass | 1/3 | In Progress (14-02 done; 14-01 escalated out of scope — deferred to follow-up phase; 14-03 awaiting UAT re-run) | - |
+| 14. v1.0 Fix Pass | 1/3 | PAUSED 2026-04-18 (14-02 done; 14-01 escalated to Phase 15; 14-03 resumes after Phase 15 lands) | - |
+| 15. Detached Console + ConPTY Architecture Investigation | 0/0 | Not Planned (run `/gsd-plan-phase 15` to start) | - |

@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: Human Verification UAT
-status: executing
-stopped_at: Completed 12-03-PLAN.md verification — CI gate FAILS on pre-existing clippy errors (not Phase 12 regression); follow-up plan required before Phase 13
-last_updated: "2026-04-12T22:10:06.056Z"
-last_activity: 2026-04-12
+status: paused
+stopped_at: "Phase 14 paused 2026-04-18 after plan 14-01 escalated out of scope. 14-02 committed (setup.rs wrap-availability); 14-01 code reverted after Direction 3 (AllocConsole) + Direction 2 (null token) both failed the user smoke gate. Phase 15 created for the PTY + detached-supervisor architecture investigation that unblocks 14-01."
+last_updated: "2026-04-18T02:20:00.000Z"
+last_activity: 2026-04-18
 progress:
-  total_phases: 14
+  total_phases: 13
   completed_phases: 11
-  total_plans: 35
+  total_plans: 32
   completed_plans: 31
-  percent: 89
+  percent: 97
 ---
 
 # Project State: nono - Windows Gap Closure
@@ -20,14 +20,20 @@ progress:
 
 **Core Value:** Every nono command that works on Linux/macOS should work on Windows with equivalent security guarantees, or be explicitly documented as intentionally unsupported with a clear rationale.
 
-**Current Focus:** Phase 13 — v1-human-verification-uat
+**Current Focus:** Phase 15 planning (investigation) — Phase 14 paused pending Phase 15 resolution.
 
 ## Current Position
 
-Phase: 13 (v1-human-verification-uat) — EXECUTING
-Plan: 1 of 1
-Status: Executing Phase 13
-Last activity: 2026-04-17 -- Phase 13 UAT partial pass (2/10) + Phase 14 (v1.0 Fix Pass) added to close 3 blocking gaps
+Phase: 14 (v1-fix-pass) — PAUSED 2026-04-18
+Plans in Phase 14:
+  - 14-01: ESCALATED to Phase 15 (code reverted; both Direction 3 AllocConsole and Direction 2 null-token failed the user smoke gate)
+  - 14-02: DONE (setup.rs wrap-availability sentence landed at commit 8e200f8)
+  - 14-03: PENDING (waiting on Phase 15 so the 4 UAT items blocked by 14-01 become runnable)
+
+Phase 15 (Detached Console + ConPTY Architecture Investigation) — NOT PLANNED.
+Next action: `/gsd-plan-phase 15` to scope the investigation, or make the v1.0 shipping-as-known-issue decision first.
+
+Last activity: 2026-04-18 -- Phase 14 paused; Phase 15 created as the follow-up investigation.
 
 ```
 Progress: [██████████] 100% (31/31 plans complete on disk)
@@ -99,6 +105,6 @@ Progress: [██████████] 100% (31/31 plans complete on disk)
 ## Session Continuity
 
 **Current Milestone:** v2.0 Windows Gap Closure
-**Last Activity:** 2026-04-17
+**Last Activity:** 2026-04-18
 **Stopped At:** Completed quick task 260417-kem (EnvVarGuard migration) — CI blocker resolved, clippy passes clean
 **Next Steps:** Phase 08 (ConPTY Shell) or Phase 10 (ETW-Based Learn Command) — both are plannable now. Phase 09 human-verification items noted in Todos above.
