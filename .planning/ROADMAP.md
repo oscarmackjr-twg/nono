@@ -1,12 +1,13 @@
-# Roadmap: nono Windows Gap Closure
+# Roadmap: nono Windows Parity & Quality
 
-This roadmap tracks the path to full Windows/Unix parity for `nono`. The v2.0 milestone shipped 2026-04-18; Phase 15 is the first follow-on phase for the one carry-forward known issue.
+This roadmap tracks the path to full Windows/Unix parity and ongoing quality-of-life work for `nono`.
 
 ## Milestones
 
 - ✅ **v1.0 Windows Alpha** — Phases 1–4 (shipped 2026-03-31; tag `v1.0`)
-- ✅ **v2.0 Windows Gap Closure** — Phases 5–14 (shipped 2026-04-18 with v2.0-known-issue carry-forward; tag `v2.0`)
-- ✅ **Candidate v2.1** — Phase 15 (detached console + ConPTY investigation) — completed 2026-04-18; v2.0 carry-forward closed
+- ✅ **v2.0 Windows Gap Closure** — Phases 5–14 (shipped 2026-04-18; tag `v2.0` pending merge)
+- ✅ **Phase 15 closure** — completed 2026-04-18; closed the v2.0 known-issue carry-forward
+- 🚧 **v2.1 Resource Limits, Extended IPC, Attach-Streaming & Cleanup** — Phases 16–19 (scoped 2026-04-18)
 
 ## Phases
 
@@ -38,15 +39,44 @@ Carry-forward → Phase 15: detached-console-grandchild `0xC0000142 STATUS_DLL_I
 
 </details>
 
-### ✅ Candidate v2.1 (completed 2026-04-18)
+<details>
+<summary>✅ Phase 15 closure (2026-04-18)</summary>
 
-- [x] **Phase 15: Detached Console + ConPTY Architecture Investigation** — Delivered direction-b architectural pivot: gated PTY-disable on Windows detached path + null token when `NONO_DETACHED_LAUNCH=1` + AppID-based WFP filtering (replacing per-session SID WFP on the detached path only). 5-row smoke gate passes end-to-end. All 4 Phase 13 UAT items (P05-HV-1, P07-HV-3, P11-HV-1, P11-HV-3) promoted to `pass`. Phase 14 carry-forward closed. Plans: 3/3 complete.
+- [x] **Phase 15: Detached Console + ConPTY Architecture Investigation** — Delivered direction-b architectural pivot: gated PTY-disable + null-token + AppID WFP on the Windows detached path. 5-row smoke gate pass; 4 Phase 13 UAT items promoted to `pass`; Phase 14 carry-forward closed. Fix commits `802c958` + `2c414d8`; bookkeeping `0de3e77`, `eda3d6f`, `bfd3f94`, `034b4d3`, `83e3db0`. Security waivers scoped strictly to the detached path. Attach-streaming deferred to v2.1 ATCH-01.
 
-  **Fix commits:** `802c958` (direction-b core fix), `2c414d8` (user-session-id pipe naming + fast-exit race), `0de3e77`/`eda3d6f`/`bfd3f94`/`034b4d3` (bookkeeping, UAT promotions, CHANGELOG, SUMMARY).
+</details>
 
-  **Security scope:** Waivers (Low-IL isolation + per-session-SID WFP) are restricted to the Windows detached path only. Non-detached `nono run` and `nono shell` retain the full WRITE_RESTRICTED + session-SID + ConPTY configuration. Documented in `802c958` commit body with `Security-Waiver:` trailers.
+### 🚧 v2.1 Resource Limits, Extended IPC, Attach-Streaming & Cleanup (scoped 2026-04-18)
 
-  **Deferred to v2.1+:** `nono attach` output streaming for detached Windows sessions. Operators who need live stdout on detached Windows can use non-detached mode; `nono logs` provides after-the-fact visibility.
+**Goal:** Deliver Job Object resource limits (CPU / memory / timeout / process-count), extend the Phase 11 capability pipe to broker additional handle types, finish the Phase 15 attach-streaming gap with full ConPTY re-attach, and clean up accumulated v2.0 WIP.
+
+**Requirements (10):** RESL-01..04, AIPC-01, ATCH-01, CLEAN-01..04. See `.planning/REQUIREMENTS.md`.
+
+- [ ] **Phase 16: Resource Limits (RESL)** — CPU %, memory cap, wall-clock timeout, process count via `JOB_OBJECT_CPU_RATE_CONTROL_ENABLE`, `JobMemoryLimit`, supervisor-timer + `JOB_OBJECT_LIMIT_JOB_TIME`, `ActiveProcessLimit`. CLI flags: `--cpu-percent`, `--memory`, `--timeout`, `--max-processes`. Cross-platform: Unix accepts flags with a "not enforced on this platform" warning pending cross-platform follow-up milestone.
+
+  **Depends on:** v2.0 Named Job Object infrastructure (Phase 01 / Phase 06).
+
+  **Plans:** TBD during `/gsd-plan-phase 16` (likely 2 plans: CLI + enforcement; tests).
+
+- [ ] **Phase 17: Attach-Streaming (ATCH)** — Full ConPTY re-attach on detached Windows sessions (read + write + resize). Resolves the Phase 15 deferred item so `nono attach` against detached sessions behaves like a real terminal.
+
+  **Depends on:** Phase 15 attach-pipe naming fix (commit `2c414d8`).
+
+  **Open question:** Can ConPTY attach to an already-running process without breaking the loader? If not, fall back to bidirectional anonymous pipe (no resize). Investigate in plan-phase.
+
+  **Plans:** TBD during `/gsd-plan-phase 17` (likely 2 plans: investigation + implementation + smoke gate).
+
+- [ ] **Phase 18: Extended IPC (AIPC)** — Broker socket, named-pipe, Job Object, event, and mutex handles over the Phase 11 capability pipe. Each handle type validated server-side against access-mask allowlist.
+
+  **Depends on:** Phase 11 capability pipe protocol, Phase 16 (Job Object handle brokering benefits from RESL work landing first).
+
+  **Plans:** TBD during `/gsd-plan-phase 18` (likely 3 plans: protocol extension + handle-type-specific brokers + security tests).
+
+- [ ] **Phase 19: Cleanup (CLEAN)** — `cargo fmt --all` for drifted files from commit `6749494`; diagnose 5 pre-existing Windows test flakes; triage disk-resident WIP (10-*, 11-*, 12-*, quick tasks, INTEGRATION-REPORT); prune 1172 stale session files + document retention policy.
+
+  **Depends on:** Nothing; can run in parallel with the feature phases. Recommended to run last so it catches any drift introduced by the feature phases too.
+
+  **Plans:** TBD during `/gsd-plan-phase 19` (likely 4 plans, one per CLEAN requirement; can parallelize).
 
 ## Progress Table
 
@@ -66,4 +96,8 @@ Carry-forward → Phase 15: detached-console-grandchild `0xC0000142 STATUS_DLL_I
 | 12. Milestone Bookkeeping Cleanup | v2.0 | 3/3 | Complete | 2026-04-11 |
 | 13. Human Verification UAT | v2.0 | 1/1 | Resolved (2nd-pass 2026-04-18 — 3 pass, 7 waived incl. 4 v2.0-known-issue) | 2026-04-18 |
 | 14. Fix Pass | v2.0 | 2/3 | Complete with carry-forward (14-02 done; 14-03 done; 14-01 escalated to Phase 15) | 2026-04-18 |
-| 15. Detached Console + ConPTY Architecture Investigation | v2.1 (candidate) | 3/3 | Complete (direction-b fix; 5-row smoke gate pass; 4 UAT items promoted; carry-forward closed) | 2026-04-18 |
+| 15. Detached Console + ConPTY Architecture Investigation | post-v2.0 closure | 3/3 | Complete (direction-b fix; 5-row smoke gate pass; 4 UAT items promoted; carry-forward closed) | 2026-04-18 |
+| 16. Resource Limits (RESL-01..04) | v2.1 | 0/? | Not Planned (run `/gsd-plan-phase 16` to start) | - |
+| 17. Attach-Streaming (ATCH-01) | v2.1 | 0/? | Not Planned (run `/gsd-plan-phase 17` to start) | - |
+| 18. Extended IPC (AIPC-01) | v2.1 | 0/? | Not Planned (run `/gsd-plan-phase 18` to start) | - |
+| 19. Cleanup (CLEAN-01..04) | v2.1 | 0/? | Not Planned (run `/gsd-plan-phase 19` to start) | - |

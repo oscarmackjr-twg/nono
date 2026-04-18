@@ -1,10 +1,10 @@
 ---
 gsd_state_version: 1.0
-milestone: v2.0
-milestone_name: Windows Gap Closure
-status: shipped
-stopped_at: "Phase 15 (Detached Console + ConPTY Architecture Investigation) COMPLETE 2026-04-18. Direction-b architectural pivot implemented: gated PTY-disable + null-token + AppID WFP on the Windows detached path. 5-row smoke gate PASS on commit 2c414d8. Four Phase 13 UAT items (P05-HV-1, P07-HV-3, P11-HV-1, P11-HV-3) promoted from waived to pass. v2.0 carry-forward closed. Phase 14 status promoted from escalated to resolved-by-phase-15-plan-02."
-last_updated: "2026-04-18T14:50:00.000Z"
+milestone: v2.1
+milestone_name: Resource Limits, Extended IPC, Attach-Streaming & Cleanup
+status: defining-requirements
+stopped_at: "v2.1 milestone started 2026-04-18. Scope: RESL-01..04 (CPU/memory/timeout/process-count caps on Windows Job Objects), AIPC-01 (extended handle brokering over Phase 11 cap pipe — socket/pipe/Job/event/mutex handles), ATCH-01 (full ConPTY re-attach on detached Windows sessions — closes Phase 15 deferred item), CLEAN-01..04 (fmt drift, Windows test flakes, WIP triage, session-file housekeeping). PROJECT.md, REQUIREMENTS.md, ROADMAP.md and MILESTONES.md updated; next: /gsd-plan-phase on the first v2.1 phase."
+last_updated: "2026-04-18T15:10:00.000Z"
 last_activity: 2026-04-18
 progress:
   total_phases: 15
@@ -14,39 +14,40 @@ progress:
   percent: 100
 ---
 
-# Project State: nono - Windows Gap Closure
+# Project State: nono — v2.1 (Resource Limits, Extended IPC, Attach-Streaming & Cleanup)
 
 ## Project Reference
 
 **Core Value:** Every nono command that works on Linux/macOS should work on Windows with equivalent security guarantees, or be explicitly documented as intentionally unsupported with a clear rationale.
 
-**Current Focus:** v2.0 Windows Gap Closure SHIPPED 2026-04-18. Phase 15 (candidate v2.1) COMPLETE 2026-04-18 — v2.0 known-issue carry-forward closed. Next: start a formal v2.1 milestone or continue with ad-hoc phases as needed.
+**Current Focus:** v2.1 milestone started 2026-04-18. Requirements scoped: RESL (4 reqs), AIPC (1 req, extended), ATCH (1 req, Phase-15 follow-up), CLEAN (4 reqs). Phase structure to be drafted by `/gsd-plan-phase` for each phase.
 
 ## Current Position
 
-Milestone: v2.0 Windows Gap Closure — SHIPPED 2026-04-18 (carry-forward now closed by Phase 15).
+Milestone: v2.1 — defining requirements.
   - v1.0 Windows Alpha — shipped 2026-03-31 (tag `v1.0`).
-  - v2.0 Windows Gap Closure — shipped 2026-04-18 (tag `v2.0` to be created in the milestone-close workflow).
+  - v2.0 Windows Gap Closure — shipped 2026-04-18 (tag `v2.0` pending on merge). Carry-forward closed by Phase 15 the same day.
+  - v2.1 — started 2026-04-18, this milestone.
 
-Phase 15 (Detached Console + ConPTY Architecture Investigation) — COMPLETE 2026-04-18
-  - 15-01: DONE (investigation matrix, direction-b chosen — commits `0a0c794`, `e17bf97`)
-  - 15-02: DONE (direction-b fix + smoke-gate PASS — commits `802c958`, `2c414d8`, `0de3e77`)
-  - 15-03: DONE (UAT promotions, debug doc moved to resolved/, CHANGELOG, 14-01 status — commits `eda3d6f`, `bfd3f94`, `034b4d3`)
+v2.1 phase structure (target — will be finalized by `/gsd-plan-phase`):
+  - Phase 16: Resource Limits (RESL-01..04) — Job Object CPU/memory/timeout/process-count caps.
+  - Phase 17: Attach-Streaming (ATCH-01) — full ConPTY re-attach on detached Windows sessions.
+  - Phase 18: Extended IPC (AIPC-01) — broker additional handle types over Phase 11 cap pipe.
+  - Phase 19: Cleanup (CLEAN-01..04) — fmt drift, Windows test flakes, WIP triage, session-file housekeeping.
 
-Phase 14 (v2.0 Fix Pass) — CLOSED 2026-04-18 (plan 14-01 resolved by Phase 15-02; 14-02 and 14-03 already complete).
-
-Phase 13 (v2.0 Human Verification UAT) — RESOLVED 2026-04-18. All 10 items terminal: **7 pass** (4 promoted from waived by Phase 15), 3 waived (1 no-test-fixture, 2 pre-existing).
+Phases 1–15 complete on disk (see `.planning/ROADMAP.md` progress table).
 
 Next actions:
-  - `/gsd-new-milestone` to formally start v2.1 (or tag `v2.1` if closing as a patch release).
-  - Follow-up cleanup tasks (chore-scope, not blocking): pre-existing fmt drift in 3 files from commit `6749494`; 5 pre-existing Windows test flakes (`capability_ext`, `profile::builtin`, `query_ext`, `trust_keystore`). Both are pre-Phase-15 and verified not introduced by this phase.
+  - `/gsd-plan-phase 16` to draft the RESL phase plan.
+  - Or `/gsd-discuss-phase 16` first if the Job Object API choices need more scoping.
+  - Phase ordering is sticky-to-writer preference: RESL first (most self-contained), ATCH second (finishes Phase 15 story), AIPC third (extends Phase 11 after RESL's Job Object work lands useful abstractions), CLEAN last (catches any fmt/test drift introduced by the feature phases).
 
-Naming note: the phase directories `13-v1-human-verification-uat/` and `14-v1-fix-pass/` and in-phase references to `v1.0-known-issue` are internal naming drift — the formal milestone is v2.0 per PROJECT.md and REQUIREMENTS.md.
+Naming note: phase directories `13-v1-human-verification-uat/` and `14-v1-fix-pass/` retain v1-era naming — v2.0/v2.1 is the formal milestone sequence per PROJECT.md/REQUIREMENTS.md.
 
-Last activity: 2026-04-18 — Phase 15 closed; 4 UAT items promoted; `0xC0000142` detached-console-grandchild bug fixed end-to-end.
+Last activity: 2026-04-18 — v2.1 milestone scoped (10 requirements across 4 phases); PROJECT.md and STATE.md updated; REQUIREMENTS.md and ROADMAP.md pending in this session.
 
 ```
-Progress: [██████████] 100% (38/38 plans complete on disk, across v1.0 + v2.0 + Phase 15)
+Progress: [░░░░░░░░░░]   0% (0/10 v2.1 requirements validated — milestone just started)
 ```
 
 ## Accumulated Context

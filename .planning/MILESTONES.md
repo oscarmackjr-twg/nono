@@ -1,5 +1,31 @@
 # Milestones
 
+## v2.1 — Resource Limits, Extended IPC, Attach-Streaming & Cleanup (in progress)
+
+**Status:** 🚧 ACTIVE (scoped 2026-04-18)
+**Started:** 2026-04-18
+**Branch:** `windows-squash` (continuing from v2.0 + Phase 15)
+
+**Goal:** Deliver Job Object resource limits (CPU / memory / timeout / process-count), extend the Phase 11 capability pipe to broker additional handle types, finish the Phase 15 attach-streaming gap with full ConPTY re-attach on detached Windows sessions, and clean up accumulated v2.0 WIP.
+
+**Requirements (10):**
+- RESL-01..04 — CPU %, memory, wall-clock timeout, process count caps (Phase 16)
+- AIPC-01 — extended handle brokering: socket / pipe / Job Object / event / mutex (Phase 18)
+- ATCH-01 — full ConPTY re-attach on detached Windows sessions (Phase 17)
+- CLEAN-01..04 — fmt drift, Windows test flakes, WIP triage, session-file housekeeping (Phase 19)
+
+See `.planning/REQUIREMENTS.md` for full acceptance criteria.
+
+**Phase structure (target; may split during planning):**
+- Phase 16: Resource Limits (RESL-01..04)
+- Phase 17: Attach-Streaming (ATCH-01)
+- Phase 18: Extended IPC (AIPC-01)
+- Phase 19: Cleanup (CLEAN-01..04)
+
+**Carried-forward from v2.0:** None. Phase 15 closed the detached-console-grandchild carry-forward; v2.1 starts clean.
+
+---
+
 ## v2.0 — Windows Gap Closure (a.k.a. "Windows Parity")
 
 **Status:** ✅ SHIPPED 2026-04-18 (with v2.0-known-issue carry-forward to Phase 15)

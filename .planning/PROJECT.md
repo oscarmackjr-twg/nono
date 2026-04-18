@@ -1,13 +1,18 @@
-# nono - Windows Gap Closure
+# nono - Windows Parity & Quality
 
-## Current State (post-v2.0)
+## Current Milestone: v2.1 — Resource Limits, Extended IPC, Attach-Streaming & Cleanup
 
-**Shipped:** v2.0 Windows Gap Closure (2026-04-18, with one documented known-issue carry-forward). All 7 feature gaps closed in code; live-UAT carry-forward is the detached-supervisor + ConPTY + restricted-token `0xC0000142` interaction on sandboxed console grandchildren. See `.planning/milestones/v2.0-ROADMAP.md`.
+**Goal:** Deliver Job Object resource limits (CPU / memory / timeout / process-count), extend the Phase 11 capability pipe to broker additional handle types, finish the Phase 15 attach-streaming gap with full ConPTY re-attach on detached Windows sessions, and clean up accumulated v2.0 WIP.
 
-**Active (candidate v2.1):** Phase 15 — detached console + ConPTY architecture investigation. Unblocks the 4 v2.0-known-issue UAT items (P05-HV-1, P07-HV-3, P11-HV-1, P11-HV-3).
+**Target features:**
+- Resource limits on Windows Job Objects (CPU %, memory cap, wall-clock timeout, process count)
+- Extended IPC handle brokering (socket / pipe / Job Object / event / mutex handles)
+- Full ConPTY re-attach on detached Windows sessions (read + write + resize) — closes Phase 15's deferred attach-streaming
+- Cleanup workstream: fmt drift, Windows test flakes, WIP triage, session-file housekeeping
 
 ## Previously Shipped
 
+- v2.0 Windows Gap Closure (2026-04-18, tag pending on merge; closed 2026-04-18 with Phase 15) — 7 Windows feature gaps closed (`nono wrap`, session commands, ConPTY shell, port-level WFP, proxy credential injection, ETW `learn`, runtime capability expansion stretch). Phase 15 closed the detached-console-grandchild `0xC0000142` carry-forward via direction-b fix (gated PTY-disable + null-token + AppID WFP on detached path only).
 - v1.0 Windows Alpha (2026-03-31, tag `v1.0`) — signed release artifacts, WFP service packaging, supervisor parity, snapshot/rollback, MSI packaging.
 
 ---
@@ -43,13 +48,21 @@ Windows security must be as structurally impossible and feature-complete as Unix
 - ✔ **PORT-01** — port-level WFP allowlists (`--allow-port`, bind/connect) — v2.0 Phase 09
 - ✔ **PROXY-01** — proxy credential injection via `--network-profile` / `--credential` / `--upstream-proxy` (runbook corrected in Phase 14-03) — v2.0 Phase 09; live UAT waived as `no-test-fixture`
 - ✔ **LEARN-01** — `nono learn` on Windows via ETW — v2.0 Phase 10
-- ✔ **TRUST-01** *(stretch)* — runtime capability expansion over named pipe — v2.0 Phase 11 (live supervised UAT waived as v2.0-known-issue)
+- ✔ **TRUST-01** *(stretch)* — runtime capability expansion over named pipe — v2.0 Phase 11 (live supervised UAT promoted to pass by Phase 15 direction-b fix)
+- ✔ **DETACHED-FIX-01** — detached-supervisor + ConPTY + restricted-token architecture fix (direction-b: gated PTY-disable + null-token + AppID WFP on the Windows detached path). Unblocks 4 Phase 13 UAT items (P05-HV-1, P07-HV-3, P11-HV-1, P11-HV-3) — all promoted to `pass`. v2.1 Phase 15 (the Phase 15 carrier moved into the v2.1 milestone bucket on scoping day 2026-04-18).
 
-### Active (v2.1 candidate)
+### Active (v2.1)
 
-- [ ] Detached-supervisor + ConPTY + restricted-token architecture fix so sandboxed console grandchildren stop failing DLL init with `STATUS_DLL_INIT_FAILED (0xC0000142)` — Phase 15. Unblocks 4 v2.0-known-issue UAT items.
-- [ ] **RESL-01/02** — CPU and memory limits on Windows Job Objects (deferred from v2.0).
-- [ ] **AIPC-01** — secure handle brokering via Named Pipe IPC (deferred from v2.0).
+- [ ] **RESL-01** — CPU percentage cap on Windows Job Object (`--cpu-percent`); `JOB_OBJECT_CPU_RATE_CONTROL_ENABLE` via CpuRate/MinMaxRate.
+- [ ] **RESL-02** — Memory cap on Windows Job Object (`--memory`); `JOBOBJECT_EXTENDED_LIMIT_INFORMATION.ProcessMemoryLimit` / `JobMemoryLimit`.
+- [ ] **RESL-03** — Wall-clock timeout (`--timeout`); `JOB_OBJECT_LIMIT_JOB_TIME` or supervisor-side timer fallback.
+- [ ] **RESL-04** — Process count cap (`--max-processes`); `JOB_OBJECT_LIMIT_ACTIVE_PROCESS`.
+- [ ] **AIPC-01** — extended handle brokering on the Phase 11 capability pipe: socket handles, named-pipe handles, Job Object handles, event handles, mutex handles. Each with the correct `DuplicateHandle` inheritance/security semantics and access-mask validation.
+- [ ] **ATCH-01** — full ConPTY re-attach on Windows detached sessions (read + write + resize). Closes the Phase 15 deferred item; lets `nono attach` behave like a real terminal against detached sessions.
+- [ ] **CLEAN-01** — `cargo fmt --all` the 3 pre-existing drifted files from commit `6749494` (EnvVarGuard migration); restore CI `fmt --check` to clean.
+- [ ] **CLEAN-02** — diagnose and fix 5 pre-existing Windows test flakes in `capability_ext`, `profile::builtin`, `query_ext`, `trust_keystore`. Likely env-var isolation bugs.
+- [ ] **CLEAN-03** — triage disk-resident WIP: `10-RESEARCH.md`/`10-UAT.md`, `11-01/02-PLAN.md` modifications, `12-02-PLAN.md`, `.planning/quick/260410-nlt-*`, `.planning/quick/260412-ajy-*`, `.planning/v1.0-INTEGRATION-REPORT.md`, stray root files (`host.nono_binary.commit`, `query`). Commit alive work, remove dead artifacts.
+- [ ] **CLEAN-04** — session-file housekeeping: prune the 1172 stale session records accumulated during v2.0 testing; document the retention policy so this doesn't re-accumulate.
 
 ### Out of Scope
 
@@ -79,7 +92,8 @@ Windows security must be as structurally impossible and feature-complete as Unix
 | Intentional `shell`/`wrap` omission | Lack of credible enforcement model on Windows; avoiding security over-claims. | ↶ Reversed in v2.0 — both now shipped with Job Object + WFP + ConPTY enforcement |
 | Named Job Objects | Agent lifecycle management with atomic stop/list. | ✔ Good — v1.0 foundation |
 | WRITE_RESTRICTED token | Narrow the restricting-SID access-check gate to writes only so DLL loads and console init aren't blocked. | ✔ Good — fixes Bug #2 (`STATUS_ACCESS_DENIED`); residual Bug #3 on detached console grandchildren is the v2.0-known-issue |
-| Ship v2.0 with detached-console-grandchild bug as a documented known issue | Three fix directions attempted in Phase 14 plan 14-01 all failed the user smoke gate; real fix requires PTY + detached-supervisor architecture work which is its own investigation phase. Non-detached mode fully functional. | ⚠️ Revisit — close in Phase 15 (candidate v2.1) |
+| Ship v2.0 with detached-console-grandchild bug as a documented known issue | Three fix directions attempted in Phase 14 plan 14-01 all failed the user smoke gate; real fix requires PTY + detached-supervisor architecture work which is its own investigation phase. Non-detached mode fully functional. | ✔ Resolved by Phase 15 (direction-b: gated PTY-disable + null-token + AppID WFP) on 2026-04-18 |
+| Direction-b scoped waivers for detached Windows path (Phase 15) | The only empirically-working configuration is null token + no PTY. Non-detached keeps WRITE_RESTRICTED + session-SID + ConPTY unchanged. Low-IL isolation waived on detached path (Job Object + filesystem sandbox remain primary); per-session-SID WFP replaced by AppID WFP on detached path (still kernel-enforced; requires nono-wfp-service). | ✔ Good — waivers documented in commit `802c958` body; scope strictly detached-only |
 
 ## Evolution
 
@@ -99,4 +113,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-18 — Milestone v2.0 Windows Gap Closure shipped (with detached-console-grandchild known-issue carry-forward to Phase 15)*
+*Last updated: 2026-04-18 — v2.1 milestone started (Resource Limits + Extended IPC + Attach-Streaming + Cleanup). v2.0 and Phase 15 shipped; carry-forward closed.*
