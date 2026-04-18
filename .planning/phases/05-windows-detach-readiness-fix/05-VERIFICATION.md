@@ -110,3 +110,12 @@ which are exercised by unit + integration tests.
 See `13-UAT.md` P05-HV-1 for the waiver rationale and
 `.planning/phases/15-detached-console-conpty-investigation/README.md` for
 the follow-up investigation.
+
+**Phase 15 resolution (2026-04-18):** STATUS_DLL_INIT_FAILED (0xC0000142)
+in detached console grandchildren resolved by Phase 15-02 (fix commits
+`802c958` gated PTY + null-token, `2c414d8` user-session-id pipe naming
++ fast-exit race). Smoke-gate Row 1 confirmed: `nono run --detached --
+allow-cwd -- ping -t 127.0.0.1` prints `Started detached session
+11fe3ab772880043`, grandchild visible in `tasklist`. UAT item P05-HV-1
+promoted to `pass` in `13-UAT.md`. Debug session archived at
+`.planning/debug/resolved/windows-supervised-exec-cascade.md`.

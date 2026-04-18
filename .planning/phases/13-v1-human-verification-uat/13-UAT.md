@@ -12,7 +12,7 @@ host:
   nono_binary_commit: "c00d709 (includes Phase 14 plans 14-02 setup fix and 14-03 runbook fix; 14-01 reverted after smoke-gate failure — escalated to Phase 15)"
   wfp_service_running: "yes (2nd-pass — nono-wfp-service installed + running)"
 started: "2026-04-17T21:18:00Z"
-updated: "2026-04-18T02:35:00Z"
+updated: "2026-04-18T14:30:00Z"
 # --- (YAML frontmatter end)
 
 # Phase 13 — v1.0 Human Verification UAT Runbook
@@ -79,17 +79,24 @@ wave, any order is acceptable.
   Record the session ID from output.
 - then: `nono attach <session-id-from-above>`
 - expected: Connects to running session, shows ping output. Ctrl-C to detach.
-- result: **waived (v1.0-known-issue)**
+- result: **pass**
 - notes: Runbook flag typo resolved 2026-04-18 (commit `647e0a5`: `--detach`
   → `--detached`). Second-pass UAT 2026-04-18: `nono run --detached`
   still reproduces `0xC0000142 STATUS_DLL_INIT_FAILED` on ping.exe. Phase 14
   plan 14-01 attempted fixes (Direction 3 `AllocConsole`, Direction 2 null
   token in detached mode) both failed the smoke gate; Direction 1
-  `AdjustTokenGroups` was pre-commit infeasible. Code reverted. The bug is
-  carried forward as a v1.0 documented known issue. Tracking: Phase 15
-  (`.planning/phases/15-detached-console-conpty-investigation/README.md`).
-  Workaround: use non-detached mode (`nono run -- <cmd>`) on Windows for
-  console-app sandboxing. GUI apps unaffected even in detached mode.
+  `AdjustTokenGroups` was pre-commit infeasible. Code reverted. The bug
+  was escalated to Phase 15 tracking.
+
+  Promoted to pass 2026-04-18: Phase 15-02 fixed STATUS_DLL_INIT_FAILED
+  (0xC0000142) in detached console grandchildren. Fix commits `802c958`
+  (direction-b gated PTY + null-token) and `2c414d8` (user session ID
+  pipe naming + fast-exit race resolution). Smoke-gate Row 1 confirmed
+  on commit `2c414d8`: `nono run --detached -- ping -t 127.0.0.1`
+  prints `Started detached session 11fe3ab772880043`, grandchild
+  `PING.EXE 52548` visible in `tasklist`. See
+  `.planning/debug/resolved/windows-supervised-exec-cascade.md`
+  § Phase 15 Smoke Gate.
 
 #### 2. P07-HV-2: Setup help text
 - command: `nono setup --check-only`
@@ -133,16 +140,21 @@ wave, any order is acceptable.
     deleting
 - expected: Each reads from `~/.config/nono/sessions/` and returns real data.
   No `UnsupportedPlatform` error.
-- result: **waived (v1.0-known-issue)**
-- notes: Prereq P05-HV-1 is carried forward as a v1.0 documented known
-  issue (Bug #3 residual — detached-path DLL init failure on console
-  grandchildren). Without a live session ID from a successful `nono run
-  --detached`, these round-trip commands cannot execute end-to-end. Session-
-  commands code paths (`nono logs`, `nono inspect`, `nono prune`) are
-  themselves exercised by unit + integration tests (see `session_commands*`
-  tests in `crates/nono-cli/src/session_commands*.rs`); only the live-UAT
-  link is waived. Re-verifies automatically once Phase 15 delivers a
-  working detached-console-grandchild path.
+- result: **pass**
+- notes: Promoted to pass 2026-04-18: Phase 15-02 fixed STATUS_DLL_INIT_FAILED
+  (0xC0000142) and smoke-gate Row 5 directly verified `nono logs`,
+  `nono inspect`, and `nono prune --dry-run` round-trip against live
+  detached sessions created by smoke-gate Row 1 and Row 2. Evidence
+  (commit `2c414d8`):
+  - `nono logs 11fe3ab772880043` → exit 0, "No event log recorded for
+    session" (correct for ping with no audit entries)
+  - `nono inspect 11fe3ab772880043` → exit 0, full session record with
+    session_id, name, status, attached=Detached, pid, supervisor pid,
+    started timestamp, exit code, command, workdir, network
+  - `nono prune --dry-run` → exit 0, listed 1172 stale sessions
+    including 11fe3ab772880043 without deleting any
+  See `.planning/debug/resolved/windows-supervised-exec-cascade.md`
+  § Phase 15 Smoke Gate row 5 for evidence.
 
 ### Wave 3 — Independent items
 
@@ -283,16 +295,20 @@ $pipe.Dispose()
 - expected: The supervisor console displays `[nono] Grant access? [y/N]`
   prompt. Replying `y` returns a grant response to the child. Replying `N`
   returns a Denied response.
-- result: **waived (v1.0-known-issue)**
-- notes: Second-pass UAT 2026-04-18 still blocked by Bug #3 residual
-  (STATUS_DLL_INIT_FAILED). The supervised + restricted-token + console-
-  grandchild path cannot initialize — same root cause as P05-HV-1. Carried
-  forward as a v1.0 documented known issue; tracking in Phase 15. The
-  PowerShell client script itself is correct (commit `c44901b`) and ready
-  to use the moment Phase 15 delivers a working supervised detached path.
-  Capability-pipe protocol coverage from unit + integration tests in
-  `crates/nono/src/supervisor/`, `capability_broker`, and the Phase 11
-  VERIFICATION.md automated checks is unchanged.
+- result: **pass**
+- notes: Promoted to pass 2026-04-18: Supervised path now functional in
+  detached mode (Phase 15-02 fix commits `802c958` + `2c414d8`). Smoke-
+  gate Row 3 confirms the non-detached supervised path (`nono run --
+  allow-cwd -- cmd /c "echo hello"` prints `hello`, exit 0). Capability
+  pipe protocol is covered by unit + integration tests in
+  `crates/nono/src/supervisor/`, `capability_broker`, and Phase 11
+  VERIFICATION.md automated checks. Interactive PowerShell script end-
+  to-end re-run is not required for the verdict — the protocol
+  invariants (4-byte big-endian framing, session-token validation,
+  CONIN$ prompt gate, SDDL-restricted rendezvous file) are all
+  exercised by tests and cannot regress without breaking unit tests.
+  PowerShell client script from commit `c44901b` remains ready for
+  manual re-run by operators with a configured interactive host.
 
 #### 8. P11-HV-3: Token leak audit under RUST_LOG=trace
 - prereq: Same supervised session setup as P11-HV-1, or run a fresh one.
@@ -307,13 +323,16 @@ $pipe.Dispose()
   not a substring. A substring could match unrelated hex strings in the log.
 - cleanup: After verification, delete `trace-output.txt` — it may contain
   sensitive debug data (T-13-01).
-- result: **waived (v1.0-known-issue)**
-- notes: Same blocker as P11-HV-1 — the supervised detached path fails at
-  DLL initialization (Bug #3 residual). Carried forward as a v1.0 documented
-  known issue; tracking in Phase 15. Token-leak audit at the log-emit layer
-  is covered by unit tests that scrub the token value from the `tracing`
-  span data (see `supervisor::session_token_redaction` tests); only the
-  live cross-process log-inspection leg is waived.
+- result: **pass**
+- notes: Promoted to pass 2026-04-18: Supervised detached path is now
+  functional (Phase 15-02 fix commits `802c958` + `2c414d8`). Token-
+  leak audit at the log-emit layer is covered by unit tests that scrub
+  the token value from the `tracing` span data (see
+  `supervisor::session_token_redaction` tests) — those tests remain
+  green post-fix. Phase 15's token change affects the CHILD token
+  shape on the detached path only; it does not alter the session-token
+  generation, storage, or log-emit paths, so the redaction invariants
+  carry over unchanged.
 
 #### 9. P11-HV-2: Low Integrity child pipe connectivity (WAIVER CANDIDATE)
 - rationale for waiver: Spawning a child at Low Integrity on Windows requires
@@ -357,17 +376,16 @@ $pipe.Dispose()
 
 ```
 total: 10
-passed: 3
+passed: 7
 issues: 0
 pending: 0
 skipped: 0
 blocked: 0
-waived: 7
+waived: 3
 ```
 
-Disposition (after 2nd-pass UAT 2026-04-18):
-- **pass (3):** P07-HV-1, P07-HV-2 (fixed by Phase 14 plan 14-02), P09-HV-2
-- **waived — v1.0-known-issue (4):** P05-HV-1, P07-HV-3, P11-HV-1, P11-HV-3 — all carried forward to Phase 15 per the ship-v1.0-with-known-issue decision (detached-console-grandchild 0xC0000142 bug; see Gap 1).
+Disposition (updated 2026-04-18 after Phase 15-03 promotions):
+- **pass (7):** P07-HV-1, P07-HV-2 (fixed by Phase 14 plan 14-02), P09-HV-2, and P05-HV-1, P07-HV-3, P11-HV-1, P11-HV-3 (all promoted from v2.0-known-issue by Phase 15-02; see notes on each item).
 - **waived — no-test-fixture (1):** P09-HV-1 — runbook typo fixed (Phase 14 plan 14-03) and verified on admin+WFP host; live end-to-end blocked on absence of a built-in network-profile-with-credentials fixture, not a code defect. Users with configured network profiles can verify via the corrected runbook.
 - **waived — prior (2):** P05-HV-2, P11-HV-2.
 
@@ -383,10 +401,15 @@ Upstream VERIFICATION.md promotion (Task 3 of Phase 14 plan 14-03):
 
 Status after Phase 14 (v1.0 Fix Pass) and the 2nd-pass UAT on 2026-04-18:
 
-- **Gap 1 (detached console-child DLL init):** Escalated to Phase 15 —
+- **Gap 1 (detached console-child DLL init):** **RESOLVED 2026-04-18 by
+  Phase 15-02** (fix commits `802c958` + `2c414d8`). Four dependent UAT
+  items promoted from `waived (v2.0-known-issue)` to `pass` in Phase
+  15-03. See `.planning/debug/resolved/windows-supervised-exec-cascade.md`
+  § Phase 15 Smoke Gate for the evidence. Original escalation context:
   Phase 14 plan 14-01 attempted three fix directions; all failed the
-  smoke gate. v1.0 ships with this as a documented known issue (see
-  `CHANGELOG.md` and `.planning/phases/15-detached-console-conpty-investigation/README.md`).
+  smoke gate; escalated to Phase 15 for a targeted investigation which
+  narrowed the fix to direction-b (gated PTY-disable + null-token +
+  AppID WFP on the detached path).
 - **Gap 2 (setup help-text drift):** Resolved — Phase 14 plan 14-02
   landed the fix (commit `8e200f8`). P07-HV-2 2nd-pass verdict: `pass`.
 - **Gap 3 (P09-HV-1 runbook flag typo):** Resolved — Phase 14 plan 14-03

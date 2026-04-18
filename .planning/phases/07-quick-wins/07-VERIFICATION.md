@@ -162,4 +162,12 @@ itself v1.0-known-issue (see 05-VERIFICATION.md addendum). Session-
 commands code paths are exercised by unit + integration tests; only the
 live-UAT link is waived. Tracking: Phase 15.
 
+**Phase 15 resolution (2026-04-18):** STATUS_DLL_INIT_FAILED (0xC0000142)
+resolved by Phase 15-02 (fix commits `802c958` + `2c414d8`), which
+unblocks the P05-HV-1 prereq and directly exercises `nono logs`,
+`nono inspect`, `nono prune --dry-run` against live detached sessions
+in smoke-gate Row 5. UAT item P07-HV-3 promoted to `pass` in
+`13-UAT.md`. Debug session archived at
+`.planning/debug/resolved/windows-supervised-exec-cascade.md`.
+
 Overall phase status remains `passed`.

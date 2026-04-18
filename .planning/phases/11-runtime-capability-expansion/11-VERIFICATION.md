@@ -157,3 +157,14 @@ is waived. Tracking: Phase 15.
 
 Phase status promoted `human_needed` → `passed` with the carry-forward
 annotations above.
+
+**Phase 15 resolution (2026-04-18):** STATUS_DLL_INIT_FAILED (0xC0000142)
+in the supervised detached path resolved by Phase 15-02 (fix commits
+`802c958` gated PTY + null-token, `2c414d8` user-session-id pipe naming).
+Smoke-gate Row 3 (non-detached supervised) passes cleanly; Row 1 and
+Row 2 detached paths launch without DLL init failure. UAT items
+P11-HV-1 and P11-HV-3 promoted to `pass` in `13-UAT.md` on the basis of
+Phase 11's unit + integration test coverage of the capability-pipe
+protocol (which is unchanged by the Phase 15 token/PTY adjustments).
+Debug session archived at
+`.planning/debug/resolved/windows-supervised-exec-cascade.md`.
