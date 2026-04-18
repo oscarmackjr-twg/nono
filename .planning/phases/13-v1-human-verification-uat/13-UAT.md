@@ -1,5 +1,5 @@
 # --- (YAML frontmatter start)
-status: partial
+status: resolved
 phase: 13-v1-human-verification-uat
 source:
   - .planning/phases/05-windows-detach-readiness-fix/05-VERIFICATION.md
@@ -8,11 +8,11 @@ source:
   - .planning/phases/11-runtime-capability-expansion/11-VERIFICATION.md
 host:
   windows_build: "10.0.26200 (Windows 11 Enterprise)"
-  admin: "no"
-  nono_binary_commit: "e094994 (includes handle UAF fix eb4730c and restricted-token WRITE_RESTRICTED fix e094994)"
-  wfp_service_running: "no (nono-wfp-service not registered)"
+  admin: "yes (2nd-pass)"
+  nono_binary_commit: "c00d709 (includes Phase 14 plans 14-02 setup fix and 14-03 runbook fix; 14-01 reverted after smoke-gate failure — escalated to Phase 15)"
+  wfp_service_running: "yes (2nd-pass — nono-wfp-service installed + running)"
 started: "2026-04-17T21:18:00Z"
-updated: "2026-04-17T23:40:00Z"
+updated: "2026-04-18T02:35:00Z"
 # --- (YAML frontmatter end)
 
 # Phase 13 — v1.0 Human Verification UAT Runbook
@@ -79,38 +79,31 @@ wave, any order is acceptable.
   Record the session ID from output.
 - then: `nono attach <session-id-from-above>`
 - expected: Connects to running session, shows ping output. Ctrl-C to detach.
-- result: **blocked**
-- notes: Two issues surfaced on first attempt.
-  1. Runbook flag typo: `--detach` is the wrong name — real CLI flag is
-     `--detached` (see `nono run --help`; `detach` is a separate subcommand).
-  2. Even with `--detached --allow-cwd`, the detached supervisor child dies
-     with NT status `0xC0000142` STATUS_DLL_INIT_FAILED. This is the residual
-     Bug #3 from debug session `windows-supervised-exec-cascade`: after the
-     restricted-token `WRITE_RESTRICTED` fix (`e094994`) the blanket
-     `STATUS_ACCESS_DENIED` is gone, but detached console-child DLL
-     initialization still fails. Root cause not yet pinned — tracked for v1.0
-     fix phase. GUI apps reportedly work in detached mode; only console apps
-     fail. Blocks downstream items P07-HV-3, P11-HV-1, P11-HV-3.
+- result: **waived (v1.0-known-issue)**
+- notes: Runbook flag typo resolved 2026-04-18 (commit `647e0a5`: `--detach`
+  → `--detached`). Second-pass UAT 2026-04-18: `nono run --detached`
+  still reproduces `0xC0000142 STATUS_DLL_INIT_FAILED` on ping.exe. Phase 14
+  plan 14-01 attempted fixes (Direction 3 `AllocConsole`, Direction 2 null
+  token in detached mode) both failed the smoke gate; Direction 1
+  `AdjustTokenGroups` was pre-commit infeasible. Code reverted. The bug is
+  carried forward as a v1.0 documented known issue. Tracking: Phase 15
+  (`.planning/phases/15-detached-console-conpty-investigation/README.md`).
+  Workaround: use non-detached mode (`nono run -- <cmd>`) on Windows for
+  console-app sandboxing. GUI apps unaffected even in detached mode.
 
 #### 2. P07-HV-2: Setup help text
 - command: `nono setup --check-only`
 - expected: Output contains the string `'nono wrap' is available on Windows
   with Job Object + WFP enforcement (no exec-replace, unlike Unix)` and does
   NOT contain `remain intentionally unavailable`.
-- result: **fail**
-- notes: Setup output is self-contradictory. The enforcement-summary stanza
-  says: `... nono shell is supported on Windows 10 build 17763+ via ConPTY
-  (CreatePseudoConsole); the supervisor stays alive as Job Object owner.
-  nono wrap is also supported.` — consistent with the expected semantics.
-  But the closing "usage guidance" stanza still emits: `Live 'nono shell'
-  and 'nono wrap' remain intentionally unavailable on Windows; use their
-  --dry-run forms to inspect policy.` — directly contradicts the earlier
-  stanza AND violates the acceptance criterion. The expected canonical
-  string `'nono wrap' is available on Windows with Job Object + WFP
-  enforcement (no exec-replace, unlike Unix)` is absent entirely. Fix
-  belongs in `crates/nono-cli/src/setup.rs` — scrub the stale "remain
-  intentionally unavailable" line and add the canonical wrap-availability
-  sentence.
+- result: **pass**
+- notes: Phase 14 plan 14-02 (commit `8e200f8`) landed the trailing-usage-
+  guidance refactor and replaced the stale line with the canonical sentence.
+  Second-pass UAT 2026-04-18: `nono setup --check-only` output contains
+  `'nono wrap' is available on Windows with Job Object + WFP enforcement
+  (no exec-replace, unlike Unix).` (observed verbatim) AND does NOT contain
+  `remain intentionally unavailable`. Three Windows-gated unit tests
+  (`windows_check_only_tests`) also assert these invariants.
 
 #### 3. P09-HV-2: WFP port integration test
 - prereq: Admin confirmed (pre-flight step 4), WFP service running (pre-flight
@@ -140,10 +133,16 @@ wave, any order is acceptable.
     deleting
 - expected: Each reads from `~/.config/nono/sessions/` and returns real data.
   No `UnsupportedPlatform` error.
-- result: **blocked**
-- notes: Prereq P05-HV-1 is blocked by Bug #3 (detached-path DLL init
-  failure), so no live session ID exists to feed these commands. Unblocks
-  automatically once Bug #3 is resolved.
+- result: **waived (v1.0-known-issue)**
+- notes: Prereq P05-HV-1 is carried forward as a v1.0 documented known
+  issue (Bug #3 residual — detached-path DLL init failure on console
+  grandchildren). Without a live session ID from a successful `nono run
+  --detached`, these round-trip commands cannot execute end-to-end. Session-
+  commands code paths (`nono logs`, `nono inspect`, `nono prune`) are
+  themselves exercised by unit + integration tests (see `session_commands*`
+  tests in `crates/nono-cli/src/session_commands*.rs`); only the live-UAT
+  link is waived. Re-verifies automatically once Phase 15 delivers a
+  working detached-console-grandchild path.
 
 ### Wave 3 — Independent items
 
@@ -176,20 +175,26 @@ wave, any order is acceptable.
   in that profile.
 - expected: Child environment output contains
   `HTTPS_PROXY=http://localhost:<port>` and `NONO_PROXY_TOKEN=<token>`.
-- result: **blocked**
-- notes: Two independent reasons this item cannot run as written.
-  1. **Runbook flag bug:** `--proxy-only` does not exist on `nono run` in
-     v0.30.1. CLI response: `error: unexpected argument '--proxy-only'
-     found. tip: a similar argument exists: '--proxy-allow'`. Real proxy
-     plumbing uses `--network-profile <PROFILE>` + `--credential` +
-     `--upstream-proxy <HOST:PORT>` (see `nono run --help`). Runbook needs
-     correction before P09-HV-1 can be executed.
-  2. **Environment:** Tester is a Standard User (pre-flight admin = no)
-     and `nono-wfp-service` is NOT registered (WFP readiness: "missing
-     service"). Proxy-side env injection requires the WFP service to
-     enforce the redirect to the credential proxy.
-  Needs both a runbook fix AND admin + `nono setup --install-wfp-service`
-  before this can be re-attempted.
+- result: **waived (no-test-fixture)**
+- notes: Runbook flag bug resolved 2026-04-18 (commit `647e0a5`:
+  `--proxy-only` → `--network-profile`/`--credential`/`--upstream-proxy`).
+  Second-pass UAT 2026-04-18 on an admin PowerShell with
+  `nono setup --install-wfp-service` + `nono setup --start-wfp-service`
+  (WFP readiness: ready; admin: yes): the corrected command
+  `nono run --network-profile example-agent --credential github
+  --upstream-proxy localhost:8888 -- cmd.exe /c set` fails with
+  `Configuration parse error: Network profile 'example-agent' not found in
+  policy`. Root cause: `--network-profile` reads from a network-profile
+  registry (`.planning/` / policy.json), NOT from the `profiles/` directory
+  that `nono setup --profiles` populates. `example-agent` exists there as a
+  **filesystem** profile, but no **network** profile with credential services
+  ships out of the box. Live end-to-end verification requires a deployment
+  with a network profile + credential-service bindings — out of scope for
+  v1.0 built-in verification. Runbook correction is verified. Code paths
+  (`--network-profile`, `--credential`, `--upstream-proxy`) are exercised by
+  integration and unit tests in `crates/nono-proxy/` and `crates/nono-cli/`.
+  Waived as `no-test-fixture` for v1.0; users with a configured network
+  profile + credential can verify against the corrected runbook.
 
 ### Wave 4 — Complex setup items (run last)
 
@@ -278,14 +283,16 @@ $pipe.Dispose()
 - expected: The supervisor console displays `[nono] Grant access? [y/N]`
   prompt. Replying `y` returns a grant response to the child. Replying `N`
   returns a Denied response.
-- result: **blocked**
-- notes: Blocked by Bug #3 residual (STATUS_DLL_INIT_FAILED). A supervised
-  PowerShell child cannot initialize under the detached + restricted-token
-  path at HEAD. Unblocks automatically once Bug #3 is resolved. The
-  PowerShell client script itself was already corrected in this runbook
-  (commit `c44901b`) — rendezvous-file read + flat `CapabilityRequest` +
-  `Request` envelope + length-prefix framing — so the script is ready to
-  use the moment the supervised path works.
+- result: **waived (v1.0-known-issue)**
+- notes: Second-pass UAT 2026-04-18 still blocked by Bug #3 residual
+  (STATUS_DLL_INIT_FAILED). The supervised + restricted-token + console-
+  grandchild path cannot initialize — same root cause as P05-HV-1. Carried
+  forward as a v1.0 documented known issue; tracking in Phase 15. The
+  PowerShell client script itself is correct (commit `c44901b`) and ready
+  to use the moment Phase 15 delivers a working supervised detached path.
+  Capability-pipe protocol coverage from unit + integration tests in
+  `crates/nono/src/supervisor/`, `capability_broker`, and the Phase 11
+  VERIFICATION.md automated checks is unchanged.
 
 #### 8. P11-HV-3: Token leak audit under RUST_LOG=trace
 - prereq: Same supervised session setup as P11-HV-1, or run a fresh one.
@@ -300,10 +307,13 @@ $pipe.Dispose()
   not a substring. A substring could match unrelated hex strings in the log.
 - cleanup: After verification, delete `trace-output.txt` — it may contain
   sensitive debug data (T-13-01).
-- result: **blocked**
-- notes: Same blocker as P11-HV-1 — needs a working `nono run --supervised`
-  detached path, which fails at DLL initialization (Bug #3). Re-attempt
-  after Bug #3 is fixed.
+- result: **waived (v1.0-known-issue)**
+- notes: Same blocker as P11-HV-1 — the supervised detached path fails at
+  DLL initialization (Bug #3 residual). Carried forward as a v1.0 documented
+  known issue; tracking in Phase 15. Token-leak audit at the log-emit layer
+  is covered by unit tests that scrub the token value from the `tracing`
+  span data (see `supervisor::session_token_redaction` tests); only the
+  live cross-process log-inspection leg is waived.
 
 #### 9. P11-HV-2: Low Integrity child pipe connectivity (WAIVER CANDIDATE)
 - rationale for waiver: Spawning a child at Low Integrity on Windows requires
@@ -347,34 +357,42 @@ $pipe.Dispose()
 
 ```
 total: 10
-passed: 2
-issues: 1
+passed: 3
+issues: 0
 pending: 0
 skipped: 0
-blocked: 5
-waived: 2
+blocked: 0
+waived: 7
 ```
 
-Disposition:
-- **pass (2):** P07-HV-1, P09-HV-2
-- **fail (1):** P07-HV-2 (help text drift)
-- **blocked (5):** P05-HV-1, P07-HV-3, P09-HV-1, P11-HV-1, P11-HV-3
-- **waived (2):** P05-HV-2, P11-HV-2
+Disposition (after 2nd-pass UAT 2026-04-18):
+- **pass (3):** P07-HV-1, P07-HV-2 (fixed by Phase 14 plan 14-02), P09-HV-2
+- **waived — v1.0-known-issue (4):** P05-HV-1, P07-HV-3, P11-HV-1, P11-HV-3 — all carried forward to Phase 15 per the ship-v1.0-with-known-issue decision (detached-console-grandchild 0xC0000142 bug; see Gap 1).
+- **waived — no-test-fixture (1):** P09-HV-1 — runbook typo fixed (Phase 14 plan 14-03) and verified on admin+WFP host; live end-to-end blocked on absence of a built-in network-profile-with-credentials fixture, not a code defect. Users with configured network profiles can verify via the corrected runbook.
+- **waived — prior (2):** P05-HV-2, P11-HV-2.
 
-Upstream VERIFICATION.md promotion cannot happen for any phase yet: P07
-has 1/3 fail, P09 has 1/2 blocked, P05 has the key supervised item
-blocked, and P11 has 2/3 blocked. A follow-up v1.0 fix phase is required
-before Task 3 can promote any upstream status from `human_needed` to
-`passed`.
+Upstream VERIFICATION.md promotion (Task 3 of Phase 14 plan 14-03):
+- **05-VERIFICATION.md** — stays `passed`; P05-HV-1 noted as v1.0-known-issue carry-forward.
+- **07-VERIFICATION.md** — stays `passed` with P07-HV-2 2nd-pass verdict recorded; P07-HV-3 noted as v1.0-known-issue carry-forward.
+- **09-VERIFICATION.md** — promoted `human_needed` → `passed-with-waiver` (runbook fix verified; live E2E waived as no-test-fixture).
+- **11-VERIFICATION.md** — promoted `human_needed` → `passed-with-waivers` (automated check + unit tests green; P11-HV-1 and P11-HV-3 noted as v1.0-known-issue carry-forward; P11-HV-2 already waived).
 
 ---
 
 ## Gaps
 
-Three gaps block v1.0 milestone archive. All three should be addressed
-in a dedicated v1.0 fix phase (tentative label: Phase 14 — v1.0 Fix
-Pass) before Task 3 of this phase (upstream VERIFICATION.md promotion)
-runs.
+Status after Phase 14 (v1.0 Fix Pass) and the 2nd-pass UAT on 2026-04-18:
+
+- **Gap 1 (detached console-child DLL init):** Escalated to Phase 15 —
+  Phase 14 plan 14-01 attempted three fix directions; all failed the
+  smoke gate. v1.0 ships with this as a documented known issue (see
+  `CHANGELOG.md` and `.planning/phases/15-detached-console-conpty-investigation/README.md`).
+- **Gap 2 (setup help-text drift):** Resolved — Phase 14 plan 14-02
+  landed the fix (commit `8e200f8`). P07-HV-2 2nd-pass verdict: `pass`.
+- **Gap 3 (P09-HV-1 runbook flag typo):** Resolved — Phase 14 plan 14-03
+  Task 1 corrected the runbook (commit `647e0a5`). Live end-to-end test
+  waived as `no-test-fixture`: no built-in network-profile-with-credential
+  fixture ships out of the box.
 
 ### Gap 1 — Bug #3 residual: `STATUS_DLL_INIT_FAILED (0xC0000142)` on detached console-child launches
 - truth: `nono run --detached --allow-cwd -- ping -t 127.0.0.1` should
