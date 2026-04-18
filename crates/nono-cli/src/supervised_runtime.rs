@@ -1,5 +1,6 @@
 use crate::launch_runtime::{
-    ProxyLaunchOptions, RollbackLaunchOptions, SessionLaunchOptions, TrustLaunchOptions,
+    ProxyLaunchOptions, ResourceLimits, RollbackLaunchOptions, SessionLaunchOptions,
+    TrustLaunchOptions,
 };
 #[cfg(not(target_os = "windows"))]
 use crate::protected_paths;
@@ -30,6 +31,12 @@ pub(crate) struct SupervisedRuntimeContext<'a> {
     pub(crate) proxy: &'a ProxyLaunchOptions,
     pub(crate) proxy_handle: Option<&'a nono_proxy::server::ProxyHandle>,
     pub(crate) silent: bool,
+    /// Resource limits (CPU / memory / timeout / process-count) populated from
+    /// `ExecutionFlags.resource_limits`. On Windows, Task 2 of Plan 16-01 will
+    /// consume these via `apply_resource_limits`; Plan 16-02 Task 1 uses the
+    /// `timeout` field for the supervisor-side wall-clock timer. On Unix this
+    /// is read only by `warn_unix_resource_limits` at run start.
+    pub(crate) resource_limits: &'a ResourceLimits,
 }
 
 fn build_supervisor_session_id(audit_state: Option<&AuditState>) -> String {
@@ -158,7 +165,13 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
         proxy,
         proxy_handle,
         silent,
+        resource_limits,
     } = ctx;
+
+    // Emit per-flag "not enforced on this platform" warnings on Unix before any
+    // spawn work. On Windows this is a no-op — Task 2 of Plan 16-01 applies the
+    // kernel limits via `apply_resource_limits` inside `spawn_windows_child`.
+    exec_strategy::warn_unix_resource_limits(resource_limits, silent);
 
     output::print_applying_sandbox(silent);
 

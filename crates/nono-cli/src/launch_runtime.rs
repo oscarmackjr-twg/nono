@@ -89,6 +89,51 @@ pub(crate) struct ProxyLaunchOptions {
     pub(crate) allow_launch_services_active: bool,
 }
 
+/// Optional resource caps applied to the sandboxed agent tree's Job Object.
+/// All fields are `None` by default; `Some(_)` opts into enforcement on that dimension.
+///
+/// **Windows:** CPU, memory, and process-count limits are applied via
+/// `SetInformationJobObject` **before `ResumeThread`** (see
+/// `exec_strategy_windows::launch::apply_resource_limits`). The timeout is
+/// enforced by a supervisor-side wall-clock timer that calls `TerminateJobObject`
+/// on expiry.
+///
+/// **Linux / macOS:** Each `Some(_)` field emits a per-flag "not enforced on this
+/// platform" warning (see `exec_strategy::warn_unix_resource_limits`). The native
+/// cgroup/rlimit backends are a follow-up cross-platform milestone.
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
+pub(crate) struct ResourceLimits {
+    /// CPU percentage cap (1..=100). `JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | HARD_CAP`.
+    pub(crate) cpu_percent: Option<u16>,
+    /// Job-wide memory cap in bytes. `JOB_OBJECT_LIMIT_JOB_MEMORY`.
+    pub(crate) memory_bytes: Option<u64>,
+    /// Wall-clock timeout. Enforced via supervisor timer + `TerminateJobObject`.
+    pub(crate) timeout: Option<std::time::Duration>,
+    /// Active-process count cap (1..=65535). `JOB_OBJECT_LIMIT_ACTIVE_PROCESS`.
+    pub(crate) max_processes: Option<u32>,
+}
+
+impl ResourceLimits {
+    /// Extract the four resource-limit fields from [`RunArgs`] into a [`ResourceLimits`].
+    pub(crate) fn from_run_args(run_args: &RunArgs) -> Self {
+        Self {
+            cpu_percent: run_args.cpu_percent,
+            memory_bytes: run_args.memory,
+            timeout: run_args.timeout,
+            max_processes: run_args.max_processes,
+        }
+    }
+
+    /// Returns true when no resource limit is set. Used by `apply_resource_limits`
+    /// to short-circuit the no-op path.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.cpu_percent.is_none()
+            && self.memory_bytes.is_none()
+            && self.timeout.is_none()
+            && self.max_processes.is_none()
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct ExecutionFlags {
     pub(crate) strategy: exec_strategy::ExecStrategy,
@@ -104,6 +149,7 @@ pub(crate) struct ExecutionFlags {
     pub(crate) rollback: RollbackLaunchOptions,
     pub(crate) trust: TrustLaunchOptions,
     pub(crate) proxy: ProxyLaunchOptions,
+    pub(crate) resource_limits: ResourceLimits,
 }
 
 impl ExecutionFlags {
@@ -127,6 +173,7 @@ impl ExecutionFlags {
                 ..TrustLaunchOptions::default()
             },
             proxy: ProxyLaunchOptions::default(),
+            resource_limits: ResourceLimits::default(),
         })
     }
 }
@@ -138,6 +185,11 @@ pub(crate) fn prepare_run_launch_plan(
     silent: bool,
 ) -> Result<LaunchPlan> {
     let detach_sequence = load_configured_detach_sequence()?;
+    // Capture resource-limit fields BEFORE `run_args.sandbox` moves out of `run_args`
+    // below — `RunArgs` is partially consumed by moving `sandbox`, and the resource-
+    // limit fields are still owned by `run_args` at this point. `ResourceLimits`
+    // takes `&RunArgs` so the borrow ends before the moves below.
+    let resource_limits = ResourceLimits::from_run_args(&run_args);
     let args = run_args.sandbox;
     let no_diagnostics = run_args.no_diagnostics;
     let rollback = run_args.rollback;
@@ -241,6 +293,7 @@ pub(crate) fn prepare_run_launch_plan(
             },
             trust,
             proxy,
+            resource_limits,
         },
     })
 }

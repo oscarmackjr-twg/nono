@@ -9,6 +9,30 @@
 #[path = "../exec_strategy/env_sanitization.rs"]
 mod env_sanitization;
 
+/// Windows no-op stub of the Unix warning collector. On Windows, resource
+/// limits are kernel-enforced by `apply_resource_limits` inside
+/// `spawn_windows_child`, so there's nothing to warn about.
+///
+/// Always returns an empty `Vec`. The signature matches the Unix version in
+/// `exec_strategy.rs` so cross-platform callers can invoke
+/// `exec_strategy::collect_unix_resource_limit_warnings` without `#[cfg]` gating.
+pub(crate) fn collect_unix_resource_limit_warnings(
+    _limits: &crate::launch_runtime::ResourceLimits,
+    _silent: bool,
+) -> Vec<String> {
+    Vec::new()
+}
+
+/// Windows no-op stub of the Unix warning emitter. On Windows this is a
+/// compile-time no-op — resource limits are kernel-enforced in
+/// `apply_resource_limits`.
+pub(crate) fn warn_unix_resource_limits(
+    _limits: &crate::launch_runtime::ResourceLimits,
+    _silent: bool,
+) {
+    // No-op on Windows.
+}
+
 use crate::pty_proxy;
 use crate::rollback_runtime::{
     finalize_supervised_exit, AuditState, RollbackExitContext, RollbackRuntimeState,

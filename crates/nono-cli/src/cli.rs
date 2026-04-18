@@ -9,6 +9,77 @@ use std::path::PathBuf;
 
 const STYLES: Styles = Styles::plain().header(Style::new().bold());
 
+/// Parse a byte-size value of the form `512M` / `1G` / `256K` / raw bytes `268435456`.
+/// Suffix is case-insensitive; multipliers are 1024-based (K=1024, M=1024^2, G=1024^3, T=1024^4).
+/// Rejects `0`, negative, empty, unrecognized suffixes, and values that overflow u64.
+pub(crate) fn parse_byte_size(s: &str) -> std::result::Result<u64, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("memory size cannot be empty".to_string());
+    }
+    let (num_str, multiplier): (&str, u64) = match s.chars().last() {
+        Some(c) if c.is_ascii_alphabetic() => {
+            let mult: u64 = match c.to_ascii_uppercase() {
+                'K' => 1024,
+                'M' => 1024 * 1024,
+                'G' => 1024 * 1024 * 1024,
+                'T' => 1024u64.pow(4),
+                other => {
+                    return Err(format!(
+                        "unrecognized memory suffix '{other}'; expected K/M/G/T"
+                    ))
+                }
+            };
+            (&s[..s.len() - 1], mult)
+        }
+        _ => (s, 1),
+    };
+    let n: u64 = num_str
+        .parse()
+        .map_err(|_| format!("invalid memory value '{s}'"))?;
+    if n == 0 {
+        return Err("memory value must be > 0".to_string());
+    }
+    n.checked_mul(multiplier)
+        .ok_or_else(|| format!("memory value '{s}' overflows u64"))
+}
+
+/// Parse a duration of the form `30s` / `5m` / `1h` / `1d` / raw seconds `300`.
+/// Rejects `0`, negative, empty, unrecognized suffixes, and overflow past u64 seconds.
+pub(crate) fn parse_duration(s: &str) -> std::result::Result<std::time::Duration, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("timeout cannot be empty".to_string());
+    }
+    let (num_str, multiplier): (&str, u64) = match s.chars().last() {
+        Some(c) if c.is_ascii_alphabetic() => {
+            let mult: u64 = match c.to_ascii_lowercase() {
+                's' => 1,
+                'm' => 60,
+                'h' => 3600,
+                'd' => 86_400,
+                other => {
+                    return Err(format!(
+                        "unrecognized duration suffix '{other}'; expected s/m/h/d"
+                    ))
+                }
+            };
+            (&s[..s.len() - 1], mult)
+        }
+        _ => (s, 1),
+    };
+    let n: u64 = num_str
+        .parse()
+        .map_err(|_| format!("invalid duration '{s}'"))?;
+    if n == 0 {
+        return Err("timeout must be > 0".to_string());
+    }
+    let secs = n
+        .checked_mul(multiplier)
+        .ok_or_else(|| format!("duration '{s}' overflows u64 seconds"))?;
+    Ok(std::time::Duration::from_secs(secs))
+}
+
 #[cfg(target_os = "windows")]
 const CLI_ABOUT: &str = "A capability-based shell for running untrusted AI agents and processes with OS-enforced isolation.\nUnsupported flows fail closed instead of implying full sandbox parity.";
 
@@ -1368,6 +1439,55 @@ pub struct RunArgs {
     #[arg(long, env = "NONO_CAPABILITY_ELEVATION", help_heading = "OPTIONS")]
     pub capability_elevation: bool,
 
+    // ── Resource Limits ──────────────────────────────────────────────
+    /// Cap the sandboxed agent tree's CPU to this percentage of one logical core.
+    /// Kernel-enforced on Windows via `JOB_OBJECT_CPU_RATE_CONTROL_ENABLE` with hard-cap.
+    /// Range: 1..=100. On Linux/macOS: accepted with a "not enforced on this platform"
+    /// warning pending a cross-platform follow-up. See REQUIREMENTS.md § RESL-01.
+    #[arg(
+        long,
+        value_name = "PERCENT",
+        value_parser = clap::value_parser!(u16).range(1..=100),
+        help_heading = "RESOURCE LIMITS"
+    )]
+    pub cpu_percent: Option<u16>,
+
+    /// Cap the sandboxed agent tree's total memory. Accepts `512M`, `1G`, `256K`,
+    /// or raw bytes. Kernel-enforced job-wide on Windows via `JobMemoryLimit`.
+    /// On Linux/macOS: accepted with a warning pending cross-platform follow-up.
+    /// See REQUIREMENTS.md § RESL-02.
+    #[arg(
+        long,
+        value_name = "SIZE",
+        value_parser = parse_byte_size,
+        help_heading = "RESOURCE LIMITS"
+    )]
+    pub memory: Option<u64>,
+
+    /// Kill the sandboxed agent tree after this wall-clock duration.
+    /// Accepts `30s`, `5m`, `1h`, `1d`, or raw seconds. Enforced by supervisor-side
+    /// timer + `TerminateJobObject` on Windows (see REQUIREMENTS.md § RESL-03).
+    /// On Linux/macOS: accepted with a warning pending cross-platform follow-up.
+    #[arg(
+        long,
+        value_name = "DURATION",
+        value_parser = parse_duration,
+        help_heading = "RESOURCE LIMITS"
+    )]
+    pub timeout: Option<std::time::Duration>,
+
+    /// Cap the number of active processes in the sandboxed agent tree.
+    /// Kernel-enforced on Windows via `ActiveProcessLimit`. Range: 1..=65535.
+    /// On Linux/macOS: accepted with a warning pending cross-platform follow-up.
+    /// See REQUIREMENTS.md § RESL-04.
+    #[arg(
+        long,
+        value_name = "N",
+        value_parser = clap::value_parser!(u32).range(1..=65535),
+        help_heading = "RESOURCE LIMITS"
+    )]
+    pub max_processes: Option<u32>,
+
     /// Command to run inside the sandbox
     #[arg(required = true, hide = true)]
     pub command: Vec<String>,
@@ -2090,6 +2210,107 @@ pub struct TrustExportKeyArgs {
     /// Print help
     #[arg(long, short = 'h', action = clap::ArgAction::Help, help_heading = "OPTIONS")]
     pub help: Option<bool>,
+}
+
+#[cfg(test)]
+mod parser_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn parse_byte_size_accepts_kmgt_suffixes() {
+        assert_eq!(parse_byte_size("256K"), Ok(256 * 1024));
+        assert_eq!(parse_byte_size("512M"), Ok(512 * 1024 * 1024));
+        assert_eq!(parse_byte_size("1G"), Ok(1u64 << 30));
+        assert_eq!(parse_byte_size("2T"), Ok(2u64 * 1024u64.pow(4)));
+        assert_eq!(parse_byte_size("1g"), Ok(1u64 << 30));
+    }
+
+    #[test]
+    fn parse_byte_size_accepts_raw_bytes() {
+        assert_eq!(parse_byte_size("268435456"), Ok(268_435_456));
+    }
+
+    #[test]
+    fn parse_byte_size_rejects_invalid() {
+        assert!(parse_byte_size("0").is_err());
+        assert!(parse_byte_size("-1").is_err());
+        assert!(parse_byte_size("").is_err());
+        assert!(parse_byte_size("foo").is_err());
+        assert!(parse_byte_size("1X").is_err());
+    }
+
+    #[test]
+    fn parse_byte_size_rejects_overflow() {
+        let huge = format!("{}T", u64::MAX);
+        assert!(parse_byte_size(&huge).is_err());
+    }
+
+    #[test]
+    fn parse_duration_accepts_suffixes() {
+        assert_eq!(parse_duration("30s"), Ok(Duration::from_secs(30)));
+        assert_eq!(parse_duration("5m"), Ok(Duration::from_secs(300)));
+        assert_eq!(parse_duration("1h"), Ok(Duration::from_secs(3600)));
+        assert_eq!(parse_duration("1d"), Ok(Duration::from_secs(86_400)));
+    }
+
+    #[test]
+    fn parse_duration_accepts_raw_seconds() {
+        assert_eq!(parse_duration("300"), Ok(Duration::from_secs(300)));
+    }
+
+    #[test]
+    fn parse_duration_rejects_invalid() {
+        assert!(parse_duration("0").is_err());
+        assert!(parse_duration("-1").is_err());
+        assert!(parse_duration("").is_err());
+        assert!(parse_duration("5x").is_err());
+    }
+
+    #[test]
+    fn cpu_percent_range_enforced_by_clap() {
+        let err_zero =
+            Cli::try_parse_from(["nono", "run", "--cpu-percent", "0", "--allow", ".", "echo"]);
+        assert!(err_zero.is_err());
+        let err_over =
+            Cli::try_parse_from(["nono", "run", "--cpu-percent", "101", "--allow", ".", "echo"]);
+        assert!(err_over.is_err());
+        let ok = Cli::try_parse_from(["nono", "run", "--cpu-percent", "25", "--allow", ".", "echo"]);
+        assert!(ok.is_ok());
+    }
+
+    #[test]
+    fn max_processes_range_enforced_by_clap() {
+        let err_zero =
+            Cli::try_parse_from(["nono", "run", "--max-processes", "0", "--allow", ".", "echo"]);
+        assert!(err_zero.is_err());
+        let err_over = Cli::try_parse_from([
+            "nono",
+            "run",
+            "--max-processes",
+            "65536",
+            "--allow",
+            ".",
+            "echo",
+        ]);
+        assert!(err_over.is_err());
+        let ok = Cli::try_parse_from([
+            "nono",
+            "run",
+            "--max-processes",
+            "10",
+            "--allow",
+            ".",
+            "echo",
+        ]);
+        assert!(ok.is_ok());
+    }
+
+    #[test]
+    fn memory_zero_rejected_by_parser() {
+        let err = Cli::try_parse_from(["nono", "run", "--memory", "0", "--allow", ".", "echo"]);
+        assert!(err.is_err());
+    }
 }
 
 #[cfg(test)]

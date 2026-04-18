@@ -318,6 +318,11 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
         cap_pipe_rendezvous_path: Some(windows_cap_pipe_path.clone()),
     };
 
+    // Emit per-flag warnings for Unix builds when the Direct strategy is about
+    // to run. Supervised strategy emits its own warnings inside
+    // `execute_supervised_runtime`. Both call sites are no-ops on Windows.
+    exec_strategy::warn_unix_resource_limits(&flags.resource_limits, flags.silent);
+
     match strategy {
         exec_strategy::ExecStrategy::Direct => {
             #[cfg(target_os = "windows")]
@@ -349,6 +354,7 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
                 proxy,
                 proxy_handle: proxy_handle.as_ref(),
                 silent: flags.silent,
+                resource_limits: &flags.resource_limits,
             })?;
 
             cleanup_capability_state_file(&cap_file_path);
