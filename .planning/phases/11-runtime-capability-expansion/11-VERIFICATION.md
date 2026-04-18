@@ -1,8 +1,8 @@
 ---
 phase: 11-runtime-capability-expansion
 verified: 2026-04-11T00:00:00Z
-status: human_needed
-score: 4/4 success criteria structurally verified
+status: passed
+score: 4/4 success criteria structurally verified; P11-HV-1/HV-3 waived v1.0-known-issue, P11-HV-2 waived
 overrides_applied: 0
 re_verification:
   previous_status: none
@@ -128,3 +128,32 @@ One notable documentation gap outside the code contract: `.planning/ROADMAP.md:1
 
 _Verified: 2026-04-11_
 _Verifier: Claude (gsd-verifier)_
+
+---
+
+## v1.0 UAT 2nd-pass addendum — 2026-04-18
+
+**P11-HV-1 (end-to-end supervised run + capability request prompt):**
+carried forward as `v1.0-known-issue`. 2nd-pass UAT 2026-04-18 still
+reproduces `STATUS_DLL_INIT_FAILED (0xC0000142)` on the supervised +
+restricted-token + console-grandchild path. Same root cause as P05-HV-1
+(see 05-VERIFICATION.md addendum). The PowerShell client script is
+correct (commit `c44901b`). Capability-pipe protocol coverage from the
+Phase 11 automated checks (`SupervisorSocket::bind_low_integrity`
+roundtrip, capability-broker unit tests, `test_approval_denied_sequence`,
+etc.) is unchanged. Only the live-console interactive prompt leg is
+waived. Tracking: Phase 15.
+
+**P11-HV-2 (Low Integrity child pipe connectivity):** remains `waived`
+per existing 1st-pass rationale. The SDDL
+`D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)S:(ML;;NW;;;LW)` is verified by
+code inspection; cross-boundary LI spawn is outside UAT scope.
+
+**P11-HV-3 (token leak audit under RUST_LOG=trace):** carried forward as
+`v1.0-known-issue`. Same blocker as P11-HV-1 (needs a working supervised
+detached path). Token-redaction coverage at the `tracing` span layer is
+exercised by unit tests; only the live cross-process log-inspection leg
+is waived. Tracking: Phase 15.
+
+Phase status promoted `human_needed` → `passed` with the carry-forward
+annotations above.

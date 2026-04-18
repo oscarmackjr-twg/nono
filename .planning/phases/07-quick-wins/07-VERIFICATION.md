@@ -138,3 +138,28 @@ The only items left for human verification are behavioral end-to-end checks that
 
 _Verified: 2026-04-08T14:00:00Z_
 _Verifier: Claude (gsd-verifier)_
+
+---
+
+## v1.0 UAT 2nd-pass addendum — 2026-04-18
+
+**P07-HV-1 (wrap exit code propagation):** `pass` — recorded in 1st-pass
+(2026-04-17). `$LASTEXITCODE = 42` in PowerShell after
+`nono wrap -- cmd.exe /c exit 42`. No panic.
+
+**P07-HV-2 (setup help text):** `fail` → `pass`. Phase 14 plan 14-02
+(commit `8e200f8`) landed the trailing-usage-guidance refactor in
+`crates/nono-cli/src/setup.rs`. 2nd-pass UAT 2026-04-18:
+`nono setup --check-only` output contains
+`'nono wrap' is available on Windows with Job Object + WFP enforcement
+(no exec-replace, unlike Unix).` verbatim AND does NOT contain
+`remain intentionally unavailable`. Three Windows-gated unit tests
+(`windows_check_only_tests`) also assert these invariants.
+
+**P07-HV-3 (session commands round-trip):** carried forward as
+`v1.0-known-issue`. Prereq is P05-HV-1 (live detached session), which is
+itself v1.0-known-issue (see 05-VERIFICATION.md addendum). Session-
+commands code paths are exercised by unit + integration tests; only the
+live-UAT link is waived. Tracking: Phase 15.
+
+Overall phase status remains `passed`.

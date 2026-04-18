@@ -91,3 +91,22 @@ No gaps. All 5 must-have truths are verified, both key links are wired, both req
 
 _Verified: 2026-04-05T21:00:00Z_
 _Verifier: Claude (gsd-verifier)_
+
+---
+
+## v1.0 UAT 2nd-pass addendum — 2026-04-18
+
+**P05-HV-1 (Detach/Attach lifecycle):** carried forward as
+`v1.0-known-issue`. The `nono run --detached` path fails DLL init for
+sandboxed **console** grandchildren with `STATUS_DLL_INIT_FAILED
+(0xC0000142)`. Phase 14 plan 14-01 attempted three fix directions; all
+failed the smoke gate. Root cause requires PTY + detached-supervisor
+architecture work, tracked in Phase 15. GUI apps in detached mode
+unaffected. Non-detached (`nono run -- <cmd>`) fully functional. Overall
+phase status remains `passed` — the known issue is scoped to the live
+UAT leg of P05-HV-1, not to the underlying detach/attach code paths
+which are exercised by unit + integration tests.
+
+See `13-UAT.md` P05-HV-1 for the waiver rationale and
+`.planning/phases/15-detached-console-conpty-investigation/README.md` for
+the follow-up investigation.

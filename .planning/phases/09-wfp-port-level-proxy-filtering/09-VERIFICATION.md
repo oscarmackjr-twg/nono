@@ -1,8 +1,8 @@
 ---
 phase: 09-wfp-port-level-proxy-filtering
 verified: 2026-04-10T15:00:00Z
-status: human_needed
-score: 6/7 must-haves verified
+status: passed
+score: 6/7 must-haves verified; P09-HV-1 waived no-fixture, P09-HV-2 passed 2026-04-17
 overrides_applied: 0
 re_verification:
   previous_status: gaps_found
@@ -120,3 +120,27 @@ No automated-CI gaps remain. Both blockers from the initial verification (stale 
 
 _Verified: 2026-04-10T15:00:00Z_
 _Verifier: Claude (gsd-verifier)_
+
+---
+
+## v1.0 UAT 2nd-pass addendum — 2026-04-18
+
+**P09-HV-1 (proxy env var injection):** runbook flag typo fixed by
+Phase 14 plan 14-03 Task 1 (commit `647e0a5`): `--proxy-only` →
+`--network-profile` / `--credential` / `--upstream-proxy`. 2nd-pass UAT
+on admin PowerShell with `nono-wfp-service` installed + running: the
+corrected command path reaches the network-profile lookup and fails
+with `Configuration parse error: Network profile 'example-agent' not
+found in policy`. Root cause is that `--network-profile` reads from a
+network-profile registry distinct from the filesystem-profile directory
+that `nono setup --profiles` populates; no built-in network profile with
+credential services ships out of the box. Waived as `no-test-fixture` —
+code paths for `--network-profile`, `--credential`, and `--upstream-proxy`
+are exercised by integration tests in `crates/nono-proxy/` and unit tests
+in `crates/nono-cli/`; users with a configured network profile +
+credential can verify live against the corrected runbook.
+
+**P09-HV-2 (WFP port integration test):** `pass` — recorded in 1st-pass
+(2026-04-17). `wfp_port_permit_allows_real_tcp_connection` test passes.
+
+Phase status promoted `human_needed` → `passed`.
