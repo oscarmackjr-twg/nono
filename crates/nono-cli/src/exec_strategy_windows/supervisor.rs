@@ -184,7 +184,15 @@ fn create_secure_pipe(name: &str) -> Result<HANDLE> {
 }
 
 pub(super) struct WindowsSupervisorRuntime {
+    /// Supervisor correlation ID for logging/audit (format: `supervised-<pid>-<nanos>`
+    /// or the rollback audit UUID). Never used to name user-visible artifacts.
     session_id: String,
+    /// User-facing session ID written to the session JSON file and used to name
+    /// the Job Object and the attach pipe. `nono attach`, `nono terminate`, and the
+    /// detached-launch readiness probe all look up the pipe by this ID, so all
+    /// pipe names created by the supervisor MUST use `user_session_id` — not
+    /// `session_id` — to remain addressable.
+    user_session_id: String,
     requested_features: Vec<String>,
     transport_name: String,
     _parent_control: nono::SupervisorSocket,
@@ -219,6 +227,7 @@ impl WindowsSupervisorRuntime {
     pub(super) fn initialize(
         supervisor: &SupervisorConfig<'_>,
         pty: Option<crate::pty_proxy::PtyPair>,
+        user_session_id: Option<&str>,
     ) -> Result<Self> {
         let started_at = Instant::now();
         let (parent_control, child_control) = initialize_supervisor_control_channel()?;
@@ -226,8 +235,19 @@ impl WindowsSupervisorRuntime {
         let terminate_requested = Arc::new(AtomicBool::new(false));
         let active_attachment = Arc::new(Mutex::new(None));
 
+        let supervisor_session_id = supervisor.session_id.to_string();
+        // Pipe names must be addressable by the user-facing session ID so
+        // `nono attach`/`nono terminate` and the detached-launch readiness probe
+        // can find them. Fall back to the supervisor correlation ID only when
+        // no user session ID was wired (e.g., embedded callers without
+        // session tracking).
+        let user_session_id = user_session_id
+            .map(str::to_string)
+            .unwrap_or_else(|| supervisor_session_id.clone());
+
         let mut runtime = Self {
-            session_id: supervisor.session_id.to_string(),
+            session_id: supervisor_session_id,
+            user_session_id,
             requested_features: supervisor
                 .requested_features
                 .iter()
@@ -490,12 +510,16 @@ impl WindowsSupervisorRuntime {
     }
 
     fn start_control_pipe_server(&self) -> Result<()> {
-        let session_id = self.session_id.clone();
+        // The supervisor correlation ID is used for audit/log messages only; the
+        // user-facing session ID names the control pipe and is the ID clients
+        // (`nono attach`, `nono terminate`, detached-launch readiness probe)
+        // use to locate this supervisor.
+        let user_session_id = self.user_session_id.clone();
         let terminate_requested = self.terminate_requested.clone();
         let active_attachment = self.active_attachment.clone();
 
         std::thread::spawn(move || {
-            let pipe_name = format!("\\\\.\\pipe\\nono-session-{}", session_id);
+            let pipe_name = format!("\\\\.\\pipe\\nono-session-{}", user_session_id);
             let h_pipe = match create_secure_pipe(&pipe_name) {
                 Ok(h) => h,
                 Err(e) => {
@@ -503,7 +527,6 @@ impl WindowsSupervisorRuntime {
                     return;
                 }
             };
-
             loop {
                 let connected = unsafe { ConnectNamedPipe(h_pipe, std::ptr::null_mut()) };
                 if connected != 0
@@ -528,17 +551,24 @@ impl WindowsSupervisorRuntime {
                                         nono::supervisor::SupervisorMessage::Terminate {
                                             session_id: msg_session_id,
                                         } => {
-                                            if msg_session_id == session_id {
-                                                tracing::info!("Terminate requested via control pipe for session {}", session_id);
-                                                terminate_requested.store(true, Ordering::SeqCst);
+                                            if msg_session_id == user_session_id {
+                                                tracing::info!(
+                                                    "Terminate requested via control pipe for session {}",
+                                                    user_session_id
+                                                );
+                                                terminate_requested
+                                                    .store(true, Ordering::SeqCst);
                                                 break;
                                             }
                                         }
                                         nono::supervisor::SupervisorMessage::Detach {
                                             session_id: msg_session_id,
                                         } => {
-                                            if msg_session_id == session_id {
-                                                tracing::info!("Detach requested via control pipe for session {}", session_id);
+                                            if msg_session_id == user_session_id {
+                                                tracing::info!(
+                                                    "Detach requested via control pipe for session {}",
+                                                    user_session_id
+                                                );
                                                 let mut lock = active_attachment
                                                     .lock()
                                                     .unwrap_or_else(|p| p.into_inner());
@@ -557,7 +587,6 @@ impl WindowsSupervisorRuntime {
                     }
 
                     unsafe { DisconnectNamedPipe(h_pipe) };
-                    // If we're terminating, exit the loop
                     if terminate_requested.load(Ordering::SeqCst) {
                         break;
                     }

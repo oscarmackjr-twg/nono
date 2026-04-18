@@ -588,7 +588,7 @@ pub fn execute_supervised(
         ));
     };
 
-    let mut runtime = WindowsSupervisorRuntime::initialize(supervisor, pty_pair)?;
+    let mut runtime = WindowsSupervisorRuntime::initialize(supervisor, pty_pair, session_id)?;
     tracing::debug!(
         "Windows supervised approval backend: {}",
         supervisor.approval_backend.as_ref().backend_name()

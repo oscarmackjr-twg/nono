@@ -106,6 +106,17 @@ pub(crate) fn run_detached_launch(args: RunArgs, silent: bool) -> Result<()> {
         if let Some(status) = launched.try_wait().map_err(|e| {
             NonoError::SandboxInit(format!("Failed to monitor detached launch: {e}"))
         })? {
+            // If the detached supervisor exited cleanly and a session record was
+            // written, the sandboxed child ran to completion inside the probe
+            // window (typical for fast-exiting commands like `cmd /c echo`).
+            // Treat this as a successful detached launch — the attach pipe is
+            // necessarily gone (supervisor died), but there is no actual failure
+            // to report.
+            if status.success() && session_path.exists() {
+                cleanup_startup_log(&startup_log_path);
+                print_detached_launch_banner(&session_id, args.name.as_deref(), silent);
+                return Ok(());
+            }
             let detail = read_startup_log_summary(&startup_log_path);
             cleanup_startup_log(&startup_log_path);
             return Err(NonoError::SandboxInit(format!(
