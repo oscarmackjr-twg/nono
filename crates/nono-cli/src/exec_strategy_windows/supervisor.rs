@@ -1,11 +1,18 @@
 use super::*;
+use nono::supervisor::policy;
+use nono::supervisor::socket::{broker_event_to_process, broker_mutex_to_process};
+use nono::supervisor::{HandleKind, HandleTarget};
 use std::io::{Read, Write};
 use std::mem::ManuallyDrop;
+use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::FromRawHandle;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use windows_sys::Win32::Foundation::{GetLastError, LocalFree, BOOL, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, GetLastError, LocalFree, BOOL, HANDLE, INVALID_HANDLE_VALUE,
+};
+use windows_sys::Win32::System::Threading::{CreateEventW, CreateMutexW};
 use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
 use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX};
@@ -388,6 +395,7 @@ impl WindowsSupervisorRuntime {
         let terminate_requested = self.terminate_requested.clone();
         let child_process_for_broker = self.child_process_for_broker.clone();
         let session_id = self.session_id.clone();
+        let user_session_id = self.user_session_id.clone();
         let backend = self.approval_backend.clone();
 
         std::thread::spawn(move || {
@@ -453,6 +461,7 @@ impl WindowsSupervisorRuntime {
                             &mut seen_request_ids,
                             &mut local_audit,
                             &session_token,
+                            &user_session_id,
                         ) {
                             tracing::warn!(
                                 session_id = %session_id,
@@ -1185,6 +1194,159 @@ fn audit_entry_with_redacted_token(
     }
 }
 
+/// Resolve the per-handle-type access-mask allowlist (D-05 hard-coded
+/// defaults). Plan 18-03 layers profile widening on top via a
+/// `resolved_aipc_allowlist` field on `WindowsSupervisorRuntime`; for
+/// Plan 18-01 the helper returns the hard-coded default only.
+fn resolved_mask_for_kind(kind: HandleKind) -> u32 {
+    match kind {
+        HandleKind::File => 0,      // mask not used for File (uses AccessMode)
+        HandleKind::Socket => 0,    // role-based, not mask-based (Plan 18-02)
+        HandleKind::Pipe => 0,      // direction-based (Plan 18-02)
+        HandleKind::JobObject => policy::JOB_OBJECT_DEFAULT_MASK,
+        HandleKind::Event => policy::EVENT_DEFAULT_MASK,
+        HandleKind::Mutex => policy::MUTEX_DEFAULT_MASK,
+    }
+}
+
+/// Server-side validation of a leaf name supplied by the child for an AIPC
+/// kernel-object request (Event/Mutex/Pipe/Job Object). Per CONTEXT.md
+/// `<specifics>` line 168, the server canonicalizes the namespace prefix
+/// (`Local\nono-aipc-<user_session_id>-<sanitized_name>`) so cross-session
+/// interference is structurally impossible. This validator rejects any leaf
+/// name that could subvert the prefix or the OS-level namespace.
+fn validate_aipc_object_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.len() > 64 {
+        return Err(NonoError::SandboxInit(format!(
+            "AIPC object name must be 1..=64 bytes (got {})",
+            name.len()
+        )));
+    }
+    for ch in name.chars() {
+        if ch == '\\' || ch == '/' || ch == ':' || ch == '\0' || ch.is_control() {
+            return Err(NonoError::SandboxInit(format!(
+                "AIPC object name contains forbidden char {ch:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Handle a HandleKind::Event request: validate target shape + mask, create
+/// the kernel-object name in the canonical `Local\nono-aipc-<user_session_id>-<name>`
+/// namespace using `user_session_id` (Phase 17 latent-bug carry-forward —
+/// MUST NOT use `self.session_id`), open it with `CreateEventW`, and broker
+/// it into the child via `broker_event_to_process` with the validated mask.
+///
+/// Per CONTEXT.md D-10: the supervisor closes its source handle as the
+/// `OwnedHandle`-style `event` HANDLE goes out of scope at function return,
+/// AFTER the broker has duplicated it into the child.
+fn handle_event_request(
+    request: &nono::CapabilityRequest,
+    target_process: nono::BrokerTargetProcess,
+    user_session_id: &str,
+) -> Result<Option<nono::supervisor::ResourceGrant>> {
+    let raw_name = match request.target.as_ref() {
+        Some(HandleTarget::EventName { name }) => name,
+        _ => {
+            return Err(NonoError::SandboxInit(
+                "AIPC Event request: target shape does not match kind Event".to_string(),
+            ))
+        }
+    };
+    validate_aipc_object_name(raw_name)?;
+    let resolved = resolved_mask_for_kind(HandleKind::Event);
+    if !policy::mask_is_allowed(HandleKind::Event, request.access_mask, resolved) {
+        return Err(NonoError::SandboxInit(format!(
+            "access mask 0x{:08x} not in allowlist for Event (resolved: 0x{:08x})",
+            request.access_mask, resolved
+        )));
+    }
+    // Phase 17 latent-bug carry-forward: namespace prefix MUST use
+    // `user_session_id` (the user-facing 16-hex), NOT `self.session_id` (the
+    // supervisor correlation `supervised-PID-NANOS`). Three pre-existing bugs
+    // of exactly this shape were fixed in Phase 17 commit 7db6595.
+    let canonical = format!("Local\\nono-aipc-{}-{}", user_session_id, raw_name);
+    let wide: Vec<u16> = std::ffi::OsStr::new(&canonical)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: `wide.as_ptr()` is a null-terminated UTF-16 string in
+    // stack-owned storage that outlives the FFI call. `CreateEventW`
+    // parameters: NULL attrs (no inheritance), manual-reset = 0, initial
+    // state = 0. Returned HANDLE is owned by the supervisor and must be
+    // closed (handled below at function exit, after broker duplication).
+    let event: HANDLE = unsafe { CreateEventW(std::ptr::null_mut(), 0, 0, wide.as_ptr()) };
+    if event.is_null() {
+        return Err(NonoError::SandboxInit(format!(
+            "CreateEventW(\"{canonical}\") failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    let grant = broker_event_to_process(event, target_process, request.access_mask);
+    // D-10: supervisor closes its source handle. The grant either succeeded
+    // (child owns the duplicate) or failed (no duplicate exists). Either way
+    // the supervisor's source handle MUST close.
+    // SAFETY: `event` is a live HANDLE returned by CreateEventW above and
+    // has not been wrapped or freed elsewhere.
+    unsafe {
+        CloseHandle(event);
+    }
+    grant.map(Some)
+}
+
+/// Handle a HandleKind::Mutex request — same shape as `handle_event_request`
+/// with `CreateMutexW` + `broker_mutex_to_process` and the Mutex default
+/// mask. See `handle_event_request` for the Phase 17 carry-forward and D-10
+/// lifetime documentation.
+fn handle_mutex_request(
+    request: &nono::CapabilityRequest,
+    target_process: nono::BrokerTargetProcess,
+    user_session_id: &str,
+) -> Result<Option<nono::supervisor::ResourceGrant>> {
+    let raw_name = match request.target.as_ref() {
+        Some(HandleTarget::MutexName { name }) => name,
+        _ => {
+            return Err(NonoError::SandboxInit(
+                "AIPC Mutex request: target shape does not match kind Mutex".to_string(),
+            ))
+        }
+    };
+    validate_aipc_object_name(raw_name)?;
+    let resolved = resolved_mask_for_kind(HandleKind::Mutex);
+    if !policy::mask_is_allowed(HandleKind::Mutex, request.access_mask, resolved) {
+        return Err(NonoError::SandboxInit(format!(
+            "access mask 0x{:08x} not in allowlist for Mutex (resolved: 0x{:08x})",
+            request.access_mask, resolved
+        )));
+    }
+    // Phase 17 latent-bug carry-forward: namespace prefix MUST use
+    // `user_session_id`, NOT `self.session_id`.
+    let canonical = format!("Local\\nono-aipc-{}-{}", user_session_id, raw_name);
+    let wide: Vec<u16> = std::ffi::OsStr::new(&canonical)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: `wide.as_ptr()` is a null-terminated UTF-16 string in
+    // stack-owned storage that outlives the FFI call. `CreateMutexW`
+    // parameters: NULL attrs (no inheritance), initial owner = 0. Returned
+    // HANDLE is owned by the supervisor and must be closed (below).
+    let mutex: HANDLE = unsafe { CreateMutexW(std::ptr::null_mut(), 0, wide.as_ptr()) };
+    if mutex.is_null() {
+        return Err(NonoError::SandboxInit(format!(
+            "CreateMutexW(\"{canonical}\") failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    let grant = broker_mutex_to_process(mutex, target_process, request.access_mask);
+    // SAFETY: `mutex` is a live HANDLE returned by CreateMutexW above and
+    // has not been wrapped or freed elsewhere.
+    unsafe {
+        CloseHandle(mutex);
+    }
+    grant.map(Some)
+}
+
 /// Dispatch a single supervisor message from a sandboxed child.
 ///
 /// The `expected_session_token` parameter is the 32-byte hex token generated
@@ -1192,6 +1354,13 @@ fn audit_entry_with_redacted_token(
 /// the inbound `CapabilityRequest.session_token` BEFORE the approval backend
 /// is consulted. The token is NEVER logged and is redacted before any
 /// `AuditEntry` is constructed.
+// Note: 8 parameters is intentional — packing the dispatcher state into a
+// struct would obscure the per-call ownership semantics of the borrowed
+// `seen_request_ids` and `audit_log` mut refs vs the shared session
+// token + user_session_id strings. Phase 18 adds `user_session_id` to the
+// existing 7-arg signature for the namespace-prefix construction in the
+// Event/Mutex broker arms (D-21 carry-forward).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn handle_windows_supervisor_message(
     sock: &mut nono::SupervisorSocket,
     msg: nono::supervisor::SupervisorMessage,
@@ -1200,6 +1369,7 @@ pub(super) fn handle_windows_supervisor_message(
     seen_request_ids: &mut HashSet<String>,
     audit_log: &mut Vec<AuditEntry>,
     expected_session_token: &str,
+    user_session_id: &str,
 ) -> Result<()> {
     match msg {
         nono::supervisor::SupervisorMessage::Request(request) => {
@@ -1244,6 +1414,74 @@ pub(super) fn handle_windows_supervisor_message(
                 });
             }
 
+            // Constant-time discriminator validation — Phase 18 D-03.
+            //
+            // Even though the discriminator carries no secret, we use the
+            // same `subtle::ConstantTimeEq` primitive that validates the
+            // session token (Phase 11 D-01) so the audit chain is
+            // structurally identical for both untrusted bytes. Cost: ~6ns
+            // per request. Benefit: a future security review never has to
+            // wonder "is this hot path branchy?".
+            let kind_byte = [request.kind.discriminator_byte()];
+            let known_kinds: &[u8] = &[0, 1, 2, 3, 4, 5];
+            let kind_ok = known_kinds.iter().any(|&k| {
+                use subtle::ConstantTimeEq;
+                bool::from([k].ct_eq(&kind_byte))
+            });
+            if !kind_ok {
+                let decision = nono::ApprovalDecision::Denied {
+                    reason: "unknown handle type".to_string(),
+                };
+                audit_log.push(audit_entry_with_redacted_token(
+                    &request,
+                    &decision,
+                    approval_backend.backend_name(),
+                    started_at,
+                ));
+                return sock.send_response(&nono::supervisor::SupervisorResponse::Decision {
+                    request_id: request.request_id,
+                    decision,
+                    grant: None,
+                });
+            }
+
+            // Server-side per-kind mask validation (D-07). For HandleKind::File
+            // the mask is unused (Phase 11 path uses AccessMode); for the
+            // not-yet-wired Socket/Pipe arms the resolved mask is 0 so any
+            // non-zero requested mask is denied — that's intentional and
+            // gets fleshed out in Plans 18-02/18-03.
+            //
+            // For Event and Mutex this is the load-bearing pre-broker check.
+            // We perform it BEFORE the backend dispatch so an out-of-allowlist
+            // request never reaches the user's approval prompt.
+            if matches!(
+                request.kind,
+                HandleKind::Event | HandleKind::Mutex | HandleKind::JobObject
+            ) {
+                let resolved = resolved_mask_for_kind(request.kind);
+                if !policy::mask_is_allowed(request.kind, request.access_mask, resolved) {
+                    let decision = nono::ApprovalDecision::Denied {
+                        reason: format!(
+                            "access mask 0x{:08x} not in allowlist for {:?} (resolved: 0x{:08x})",
+                            request.access_mask, request.kind, resolved
+                        ),
+                    };
+                    audit_log.push(audit_entry_with_redacted_token(
+                        &request,
+                        &decision,
+                        approval_backend.backend_name(),
+                        started_at,
+                    ));
+                    return sock.send_response(
+                        &nono::supervisor::SupervisorResponse::Decision {
+                            request_id: request.request_id,
+                            decision,
+                            grant: None,
+                        },
+                    );
+                }
+            }
+
             let decision = approval_backend
                 .request_capability(&request)
                 .unwrap_or_else(|e| nono::ApprovalDecision::Denied {
@@ -1251,14 +1489,64 @@ pub(super) fn handle_windows_supervisor_message(
                 });
 
             let grant = if decision.is_granted() {
-                #[allow(deprecated)]
-                let path = &request.path;
-                let file = open_windows_supervisor_path(path, &request.access)?;
-                Some(nono::supervisor::socket::broker_file_handle_to_process(
-                    &file,
-                    target_process,
-                    request.access,
-                )?)
+                let result: Result<Option<nono::supervisor::ResourceGrant>> = match request.kind {
+                    HandleKind::File => {
+                        // Phase 11 path — preserved unchanged. Uses
+                        // request.path + request.access.
+                        #[allow(deprecated)]
+                        let path = &request.path;
+                        match open_windows_supervisor_path(path, &request.access) {
+                            Ok(file) => nono::supervisor::socket::broker_file_handle_to_process(
+                                &file,
+                                target_process,
+                                request.access,
+                            )
+                            .map(Some),
+                            Err(e) => Err(e),
+                        }
+                    }
+                    HandleKind::Event => {
+                        handle_event_request(&request, target_process, user_session_id)
+                    }
+                    HandleKind::Mutex => {
+                        handle_mutex_request(&request, target_process, user_session_id)
+                    }
+                    HandleKind::Socket | HandleKind::Pipe | HandleKind::JobObject => {
+                        // Plans 18-02 (Socket/Pipe) and 18-03 (JobObject) wire
+                        // these arms. For now return a structured Denied so
+                        // the dispatcher is total over all HandleKind variants.
+                        let kind_name = format!("{:?}", request.kind);
+                        let decision = nono::ApprovalDecision::Denied {
+                            reason: format!(
+                                "{kind_name} brokering not yet implemented in this build"
+                            ),
+                        };
+                        audit_log.push(audit_entry_with_redacted_token(
+                            &request,
+                            &decision,
+                            approval_backend.backend_name(),
+                            started_at,
+                        ));
+                        return sock.send_response(
+                            &nono::supervisor::SupervisorResponse::Decision {
+                                request_id: request.request_id,
+                                decision,
+                                grant: None,
+                            },
+                        );
+                    }
+                };
+                match result {
+                    Ok(g) => g,
+                    Err(e) => {
+                        tracing::warn!(
+                            "AIPC broker failure for kind {:?}: {}",
+                            request.kind,
+                            e
+                        );
+                        None
+                    }
+                }
             } else {
                 None
             };
@@ -1336,6 +1624,39 @@ mod capability_handler_tests {
         }
     }
 
+    /// Phase 18 AIPC-01 mock backend that always GRANTS and counts
+    /// invocations. Used by the broker-path tests so the dispatcher
+    /// reaches the per-kind broker arm (Event/Mutex).
+    struct CountingGrantBackend {
+        calls: AtomicUsize,
+    }
+
+    impl CountingGrantBackend {
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(AtomicOrdering::SeqCst)
+        }
+    }
+
+    impl ApprovalBackend for CountingGrantBackend {
+        fn request_capability(
+            &self,
+            _request: &nono::CapabilityRequest,
+        ) -> Result<nono::ApprovalDecision> {
+            self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+            Ok(nono::ApprovalDecision::Granted)
+        }
+
+        fn backend_name(&self) -> &str {
+            "counting-grant"
+        }
+    }
+
     #[allow(deprecated)]
     fn make_request(session_token: &str) -> nono::CapabilityRequest {
         nono::CapabilityRequest {
@@ -1349,6 +1670,31 @@ mod capability_handler_tests {
             kind: nono::supervisor::types::HandleKind::File,
             target: None,
             access_mask: 0,
+        }
+    }
+
+    /// Phase 18 AIPC-01 helper: like `make_request` but with overridable
+    /// `kind`, `target`, and `access_mask` so the new dispatcher tests can
+    /// build requests of every HandleKind shape.
+    #[allow(deprecated)]
+    fn make_request_aipc(
+        session_token: &str,
+        request_id: &str,
+        kind: nono::supervisor::HandleKind,
+        target: Option<nono::supervisor::HandleTarget>,
+        access_mask: u32,
+    ) -> nono::CapabilityRequest {
+        nono::CapabilityRequest {
+            request_id: request_id.to_string(),
+            path: std::path::PathBuf::from(r"C:\tmp\does-not-matter"),
+            access: nono::AccessMode::Read,
+            reason: Some("aipc unit test".to_string()),
+            child_pid: std::process::id(),
+            session_id: "sess-test".to_string(),
+            session_token: session_token.to_string(),
+            kind,
+            target,
+            access_mask,
         }
     }
 
@@ -1372,6 +1718,7 @@ mod capability_handler_tests {
             &mut seen,
             &mut audit_log,
             "expected-token",
+            "testaipc12345678",
         )
         .expect("handle");
 
@@ -1411,6 +1758,7 @@ mod capability_handler_tests {
             &mut seen,
             &mut audit_log,
             "right",
+            "testaipc12345678",
         )
         .expect("handle");
 
@@ -1437,6 +1785,7 @@ mod capability_handler_tests {
             &mut seen,
             &mut audit_log,
             "the-token",
+            "testaipc12345678",
         )
         .expect("handle");
 
@@ -1470,6 +1819,7 @@ mod capability_handler_tests {
             &mut seen,
             &mut audit_log,
             sensitive_token,
+            "testaipc12345678",
         )
         .expect("handle");
 
@@ -1500,6 +1850,7 @@ mod capability_handler_tests {
             &mut seen,
             &mut audit_log,
             "the-token",
+            "testaipc12345678",
         )
         .expect("first handle");
 
@@ -1512,6 +1863,7 @@ mod capability_handler_tests {
             &mut seen,
             &mut audit_log,
             "the-token",
+            "testaipc12345678",
         )
         .expect("second handle");
 
@@ -1553,6 +1905,7 @@ mod capability_handler_tests {
             &mut seen,
             &mut audit_log,
             sensitive,
+            "testaipc12345678",
         )
         .expect("handle");
 
@@ -1589,6 +1942,7 @@ mod capability_handler_tests {
             &mut seen,
             &mut audit_log,
             "right",
+            "testaipc12345678",
         )
         .expect("handle");
 
@@ -1604,6 +1958,350 @@ mod capability_handler_tests {
         );
 
         let _ = child.recv_response().expect("drain");
+    }
+
+    // Phase 18 AIPC-01 Task 5 — dispatcher tests for the new HandleKind
+    // variants (discriminator validation, per-type mask validation, and
+    // per-type broker dispatch).
+
+    /// Close any HANDLE the supervisor brokered into the test process so the
+    /// integration tests don't leak kernel objects.
+    fn close_grant_handle_if_any(grant: &Option<nono::supervisor::ResourceGrant>) {
+        if let Some(g) = grant {
+            if let Some(raw) = g.raw_handle {
+                if raw != 0 {
+                    // SAFETY: `raw` was returned by DuplicateHandle into the
+                    // current process via BrokerTargetProcess::current(). It
+                    // is a valid HANDLE we own at test-process scope.
+                    unsafe {
+                        windows_sys::Win32::Foundation::CloseHandle(raw as usize as HANDLE);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn handle_brokers_event_with_default_mask() {
+        let backend = CountingGrantBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        let token = "testtoken12345678";
+        let req = make_request_aipc(
+            token,
+            "evt-grant-001",
+            HandleKind::Event,
+            Some(HandleTarget::EventName {
+                name: "test-shutdown".to_string(),
+            }),
+            policy::EVENT_DEFAULT_MASK,
+        );
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(req),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            token,
+            "testaipc12345678",
+        )
+        .expect("dispatch");
+
+        let response = child.recv_response().expect("response");
+        match response {
+            nono::supervisor::SupervisorResponse::Decision {
+                decision, grant, ..
+            } => {
+                assert!(
+                    decision.is_granted(),
+                    "expected Granted decision, got {decision:?}"
+                );
+                assert!(grant.is_some(), "Granted decision must carry a grant");
+                let g = grant.as_ref().unwrap();
+                assert_eq!(
+                    g.resource_kind,
+                    nono::supervisor::GrantedResourceKind::Event
+                );
+                close_grant_handle_if_any(&grant);
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+
+        assert_eq!(backend.calls(), 1, "backend consulted once for granted Event");
+        assert_eq!(audit_log.len(), 1);
+        assert_eq!(audit_log[0].request.kind, HandleKind::Event);
+        assert!(matches!(
+            audit_log[0].decision,
+            nono::ApprovalDecision::Granted
+        ));
+    }
+
+    #[test]
+    fn handle_denies_event_with_mask_outside_allowlist() {
+        let backend = CountingGrantBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        let token = "testtoken12345678";
+        let req = make_request_aipc(
+            token,
+            "evt-deny-001",
+            HandleKind::Event,
+            Some(HandleTarget::EventName {
+                name: "evt-overreach".to_string(),
+            }),
+            policy::EVENT_ALL_ACCESS, // overreaches the EVENT_DEFAULT_MASK
+        );
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(req),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            token,
+            "testaipc12345678",
+        )
+        .expect("dispatch");
+
+        // Backend MUST NOT be consulted — mask check happens BEFORE backend.
+        assert_eq!(backend.calls(), 0, "backend must not be consulted on out-of-allowlist mask");
+        assert_eq!(audit_log.len(), 1);
+        assert!(audit_log[0].decision.is_denied());
+        if let nono::ApprovalDecision::Denied { reason } = &audit_log[0].decision {
+            assert!(reason.contains("access mask"), "unexpected reason: {reason}");
+            assert!(reason.contains("allowlist"), "unexpected reason: {reason}");
+        } else {
+            panic!("expected Denied");
+        }
+        let _ = child.recv_response().expect("drain");
+    }
+
+    #[test]
+    fn handle_brokers_mutex_with_default_mask() {
+        let backend = CountingGrantBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        let token = "testtoken12345678";
+        let req = make_request_aipc(
+            token,
+            "mtx-grant-001",
+            HandleKind::Mutex,
+            Some(HandleTarget::MutexName {
+                name: "test-logfile".to_string(),
+            }),
+            policy::MUTEX_DEFAULT_MASK,
+        );
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(req),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            token,
+            "testaipc12345678",
+        )
+        .expect("dispatch");
+
+        let response = child.recv_response().expect("response");
+        match response {
+            nono::supervisor::SupervisorResponse::Decision {
+                decision, grant, ..
+            } => {
+                assert!(decision.is_granted(), "got {decision:?}");
+                assert!(grant.is_some());
+                let g = grant.as_ref().unwrap();
+                assert_eq!(
+                    g.resource_kind,
+                    nono::supervisor::GrantedResourceKind::Mutex
+                );
+                close_grant_handle_if_any(&grant);
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+        assert_eq!(backend.calls(), 1);
+        assert_eq!(audit_log.len(), 1);
+        assert_eq!(audit_log[0].request.kind, HandleKind::Mutex);
+    }
+
+    #[test]
+    fn handle_denies_mutex_with_mask_outside_allowlist() {
+        let backend = CountingGrantBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        let token = "testtoken12345678";
+        let req = make_request_aipc(
+            token,
+            "mtx-deny-001",
+            HandleKind::Mutex,
+            Some(HandleTarget::MutexName {
+                name: "mtx-overreach".to_string(),
+            }),
+            policy::MUTEX_ALL_ACCESS,
+        );
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(req),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            token,
+            "testaipc12345678",
+        )
+        .expect("dispatch");
+        assert_eq!(backend.calls(), 0);
+        assert_eq!(audit_log.len(), 1);
+        assert!(audit_log[0].decision.is_denied());
+        if let nono::ApprovalDecision::Denied { reason } = &audit_log[0].decision {
+            assert!(reason.contains("access mask"), "unexpected reason: {reason}");
+            assert!(reason.contains("allowlist"), "unexpected reason: {reason}");
+        } else {
+            panic!("expected Denied");
+        }
+        let _ = child.recv_response().expect("drain");
+    }
+
+    #[test]
+    fn handle_denies_unknown_discriminator() {
+        let backend = CountingGrantBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        let token = "testtoken12345678";
+        let mut req = make_request_aipc(
+            token,
+            "unk-disc-001",
+            HandleKind::File,
+            None,
+            0,
+        );
+        // SAFETY: HandleKind is #[repr(u8)] with explicit discriminators 0..=5.
+        // Setting the underlying byte to 99 produces an invalid variant; the
+        // discriminator-validation step is the test target. The struct field
+        // itself is plain old data and we own the unique mutable reference.
+        unsafe {
+            let kind_ptr = std::ptr::addr_of_mut!(req.kind) as *mut u8;
+            *kind_ptr = 99u8;
+        }
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(req),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            token,
+            "testaipc12345678",
+        )
+        .expect("dispatch");
+
+        // Backend NOT invoked — discriminator check happens BEFORE backend.
+        assert_eq!(backend.calls(), 0);
+        assert_eq!(audit_log.len(), 1);
+        if let nono::ApprovalDecision::Denied { reason } = &audit_log[0].decision {
+            assert_eq!(reason, "unknown handle type");
+        } else {
+            panic!("expected Denied");
+        }
+        let _ = child.recv_response().expect("drain");
+    }
+
+    #[test]
+    fn handle_redacts_token_for_event_kind() {
+        let backend = CountingGrantBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        let sensitive = "evt-secret-tok-do-not-log";
+        let req = make_request_aipc(
+            sensitive,
+            "evt-redact-001",
+            HandleKind::Event,
+            Some(HandleTarget::EventName {
+                name: "redact-event".to_string(),
+            }),
+            policy::EVENT_DEFAULT_MASK,
+        );
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(req),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            sensitive,
+            "testaipc12345678",
+        )
+        .expect("dispatch");
+
+        assert_eq!(audit_log.len(), 1);
+        assert_eq!(audit_log[0].request.session_token, "");
+        let json = serde_json::to_string(&audit_log[0]).expect("serialize");
+        assert!(
+            !json.contains(sensitive),
+            "audit JSON must not contain the raw event-kind session token: {json}"
+        );
+
+        // Drain + close any handle to avoid kernel-object leak.
+        let resp = child.recv_response().expect("drain");
+        if let nono::supervisor::SupervisorResponse::Decision { grant, .. } = resp {
+            close_grant_handle_if_any(&grant);
+        }
+    }
+
+    #[test]
+    fn handle_redacts_token_for_mutex_kind() {
+        let backend = CountingGrantBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        let sensitive = "mtx-secret-tok-do-not-log";
+        let req = make_request_aipc(
+            sensitive,
+            "mtx-redact-001",
+            HandleKind::Mutex,
+            Some(HandleTarget::MutexName {
+                name: "redact-mutex".to_string(),
+            }),
+            policy::MUTEX_DEFAULT_MASK,
+        );
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(req),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            sensitive,
+            "testaipc12345678",
+        )
+        .expect("dispatch");
+
+        assert_eq!(audit_log.len(), 1);
+        assert_eq!(audit_log[0].request.session_token, "");
+        let json = serde_json::to_string(&audit_log[0]).expect("serialize");
+        assert!(
+            !json.contains(sensitive),
+            "audit JSON must not contain the raw mutex-kind session token: {json}"
+        );
+
+        let resp = child.recv_response().expect("drain");
+        if let nono::supervisor::SupervisorResponse::Decision { grant, .. } = resp {
+            close_grant_handle_if_any(&grant);
+        }
     }
 }
 
