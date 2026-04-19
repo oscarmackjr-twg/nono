@@ -106,10 +106,7 @@ fn auto_prune_if_needed() {
             // Same defense-in-depth as run_prune: refuse symlinks.
             if let Ok(md) = std::fs::symlink_metadata(&session_file) {
                 if md.file_type().is_symlink() {
-                    debug!(
-                        "auto-prune skipping symlink: {}",
-                        session_file.display()
-                    );
+                    debug!("auto-prune skipping symlink: {}", session_file.display());
                     continue;
                 }
             }
@@ -533,10 +530,7 @@ pub fn run_prune(args: &PruneArgs) -> Result<()> {
             // Refuse to follow a symlink: symlink_metadata does NOT follow.
             if let Ok(md) = std::fs::symlink_metadata(&session_file) {
                 if md.file_type().is_symlink() {
-                    debug!(
-                        "Refusing to prune {}: is a symlink",
-                        session_file.display()
-                    );
+                    debug!("Refusing to prune {}: is a symlink", session_file.display());
                     continue;
                 }
             }
