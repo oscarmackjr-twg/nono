@@ -18,6 +18,37 @@ fn reject_if_sandboxed(command: &str) -> Result<()> {
     Ok(())
 }
 
+/// Translate the `io::Error` returned by `OpenOptions::open` on the attach
+/// data pipe into a `NonoError`.
+///
+/// `ERROR_PIPE_BUSY` (231) is the kernel signal that another client already
+/// holds the single-instance pipe (`nMaxInstances=1` at supervisor.rs:165).
+/// Wrap it in a friendly `NonoError::Setup` per Phase 17 D-08 with the
+/// session id and a hint to run `nono detach <id>` first. Everything else
+/// falls through to the existing "Failed to connect" wording so users still
+/// see the underlying io::Error message.
+///
+/// Kept as a free function (not a method) so unit tests can call it without
+/// constructing a `SessionRecord`. Returns `NonoError::Setup` (not
+/// `NonoError::AttachBusy`) per CONTEXT.md D-21 — the `AttachBusy` variant
+/// stays generic; the session-id-bearing message lives at the call site.
+pub(crate) fn translate_attach_open_error(
+    err: &std::io::Error,
+    session_id: &str,
+) -> NonoError {
+    use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
+    if err.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) {
+        NonoError::Setup(format!(
+            "Session {session_id} is already attached. \
+             Use 'nono detach {session_id}' to release the existing client first."
+        ))
+    } else {
+        NonoError::Setup(format!(
+            "Failed to connect to session data pipe: {err}. Is another client already attached?"
+        ))
+    }
+}
+
 /// Default auto-prune threshold: prune if more than this many stale
 /// (>30d, Exited) session files are on disk when `nono ps` starts.
 const AUTO_PRUNE_STALE_THRESHOLD: usize = 100;
@@ -392,12 +423,7 @@ pub fn run_attach(args: &AttachArgs) -> Result<()> {
         .read(true)
         .write(true)
         .open(&data_pipe_name)
-        .map_err(|e| {
-            NonoError::Setup(format!(
-                "Failed to connect to session data pipe: {}. Is another client already attached?",
-                e
-            ))
-        })?;
+        .map_err(|e| translate_attach_open_error(&e, &session.session_id))?;
 
     println!(
         "\n{} to session {}. Press {} to detach.",
