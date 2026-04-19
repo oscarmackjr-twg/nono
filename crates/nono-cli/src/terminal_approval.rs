@@ -4,6 +4,8 @@
 //! additional filesystem access. This is the default approval backend
 //! for `nono run`.
 
+use nono::supervisor::policy;
+use nono::supervisor::{HandleKind, HandleTarget};
 use nono::{AccessMode, ApprovalBackend, ApprovalDecision, CapabilityRequest, NonoError, Result};
 use std::io::{BufRead, IsTerminal, Write};
 
@@ -151,6 +153,108 @@ fn format_access_mode(access: &AccessMode) -> &'static str {
         AccessMode::Read => "read-only",
         AccessMode::Write => "write-only",
         AccessMode::ReadWrite => "read+write",
+    }
+}
+
+/// Render the per-bit Event mask as a human-readable label per D-04.
+///
+/// Consumed transitively via `format_capability_prompt` by tests in this
+/// module; the dispatcher wiring (Plan 18-01 Task 5) will route the live
+/// CONIN$ prompt through it. Remove this `#[allow(dead_code)]` after Task 5
+/// lands the dispatcher path.
+#[allow(dead_code)]
+fn format_event_access(mask: u32) -> &'static str {
+    let wait = mask & policy::SYNCHRONIZE != 0;
+    let signal = mask & policy::EVENT_MODIFY_STATE != 0;
+    match (wait, signal) {
+        (true, true) => "wait+signal",
+        (true, false) => "wait",
+        (false, true) => "signal",
+        (false, false) => "(none)",
+    }
+}
+
+/// Render the per-bit Mutex mask as a human-readable label per D-04.
+///
+/// Consumed transitively via `format_capability_prompt` by tests in this
+/// module; the dispatcher wiring (Plan 18-01 Task 5) will route the live
+/// CONIN$ prompt through it. Remove this `#[allow(dead_code)]` after Task 5
+/// lands the dispatcher path.
+#[allow(dead_code)]
+fn format_mutex_access(mask: u32) -> &'static str {
+    let wait = mask & policy::SYNCHRONIZE != 0;
+    let release = mask & policy::MUTEX_MODIFY_STATE != 0;
+    match (wait, release) {
+        (true, true) => "wait+release",
+        (true, false) => "wait",
+        (false, true) => "release",
+        (false, false) => "(none)",
+    }
+}
+
+/// Render the per-handle-type approval prompt per CONTEXT.md D-04
+/// (Phase 18 AIPC-01).
+///
+/// Every untrusted string field (`host`, `name`, `reason`) is run through
+/// [`sanitize_for_terminal`] before embedding in the output. The CONIN$
+/// branch + y/N parser are reused unchanged from Phase 11 D-04; this
+/// function only produces the prompt string.
+///
+/// `Socket`, `Pipe`, and `JobObject` branches return placeholder strings in
+/// this plan (Plan 18-01); Plans 18-02 (Pipe + Socket) and 18-03 (Job Object)
+/// replace them with the D-04-locked templates.
+///
+/// Consumed by tests in this module; the dispatcher wiring (Plan 18-01
+/// Task 5) routes the live CONIN$ prompt through it. Remove this
+/// `#[allow(dead_code)]` after Task 5 lands the dispatcher path.
+#[allow(dead_code)]
+pub(crate) fn format_capability_prompt(
+    kind: HandleKind,
+    target: &HandleTarget,
+    access_mask: u32,
+    reason: Option<&str>,
+) -> String {
+    let reason_display = sanitize_for_terminal(reason.unwrap_or(""));
+    match (kind, target) {
+        (HandleKind::File, HandleTarget::FilePath { path }) => {
+            let path_display = sanitize_for_terminal(&path.display().to_string());
+            // For File, access semantics come from CapabilityRequest.access
+            // (Phase 11 shape) not access_mask. Caller is responsible for
+            // passing the right mask string; this branch keeps the historical
+            // Phase 11 prompt shape but in the D-04 single-template format.
+            format!(
+                "[nono] Grant file access? path={path_display} access=0x{access_mask:08x} reason=\"{reason_display}\" [y/N]"
+            )
+        }
+        (HandleKind::Event, HandleTarget::EventName { name }) => {
+            let name_display = sanitize_for_terminal(name);
+            let access_display = format_event_access(access_mask);
+            format!(
+                "[nono] Grant event access? name={name_display} access={access_display} reason=\"{reason_display}\" [y/N]"
+            )
+        }
+        (HandleKind::Mutex, HandleTarget::MutexName { name }) => {
+            let name_display = sanitize_for_terminal(name);
+            let access_display = format_mutex_access(access_mask);
+            format!(
+                "[nono] Grant mutex access? name={name_display} access={access_display} reason=\"{reason_display}\" [y/N]"
+            )
+        }
+        // Plans 18-02 and 18-03 replace the placeholders below with the
+        // D-04-locked templates for Socket / Pipe / JobObject. The helper
+        // stays total over all HandleKind variants so the dispatcher never
+        // panics on an unrecognized request shape.
+        (HandleKind::Socket, _) | (HandleKind::Pipe, _) | (HandleKind::JobObject, _) => {
+            format!(
+                "[nono] Grant {kind:?} access? (unsupported in this build) reason=\"{reason_display}\" [y/N]"
+            )
+        }
+        // Mismatched (kind, target) shapes — defense-in-depth; the dispatcher
+        // should reject these BEFORE calling this helper, but emitting a
+        // clear placeholder is safer than panicking.
+        _ => format!(
+            "[nono] Grant unknown access? (kind/target mismatch) reason=\"{reason_display}\" [y/N]"
+        ),
     }
 }
 
@@ -328,5 +432,93 @@ mod tests {
             }
             other => panic!("expected Denied, got {other:?}"),
         }
+    }
+
+    // Phase 18 AIPC-01 Task 4 — `format_capability_prompt` helper tests.
+
+    #[test]
+    fn format_capability_prompt_file_kind() {
+        let target = HandleTarget::FilePath {
+            path: std::path::PathBuf::from("/tmp/x"),
+        };
+        let prompt = format_capability_prompt(HandleKind::File, &target, 0, Some("agent op"));
+        // For File, access is rendered as `0x00000000` here because the
+        // helper is the D-04 single template; the legacy `request_capability`
+        // body keeps the Phase 11 multi-line format unchanged.
+        assert!(
+            prompt.contains("Grant file access? path=/tmp/x"),
+            "prompt missing File template prefix: {prompt}"
+        );
+        assert!(prompt.contains("reason=\"agent op\""), "prompt: {prompt}");
+        assert!(prompt.ends_with("[y/N]"), "prompt: {prompt}");
+    }
+
+    #[test]
+    fn format_capability_prompt_event_kind() {
+        let target = HandleTarget::EventName {
+            name: "shutdown".to_string(),
+        };
+        let prompt = format_capability_prompt(
+            HandleKind::Event,
+            &target,
+            policy::EVENT_DEFAULT_MASK,
+            Some("lifecycle"),
+        );
+        assert_eq!(
+            prompt,
+            r#"[nono] Grant event access? name=shutdown access=wait+signal reason="lifecycle" [y/N]"#
+        );
+    }
+
+    #[test]
+    fn format_capability_prompt_mutex_kind() {
+        let target = HandleTarget::MutexName {
+            name: "logfile".to_string(),
+        };
+        let prompt =
+            format_capability_prompt(HandleKind::Mutex, &target, policy::MUTEX_DEFAULT_MASK, None);
+        assert_eq!(
+            prompt,
+            r#"[nono] Grant mutex access? name=logfile access=wait+release reason="" [y/N]"#
+        );
+    }
+
+    #[test]
+    fn prompt_sanitizes_untrusted_target_strings() {
+        let target = HandleTarget::EventName {
+            name: "\x1b[31mevil\x1b[0m".to_string(),
+        };
+        let prompt = format_capability_prompt(
+            HandleKind::Event,
+            &target,
+            policy::EVENT_DEFAULT_MASK,
+            Some("\x1b[31malso-evil\x1b[0m"),
+        );
+        // Sanitizer must strip ANSI bytes from BOTH the name and the reason.
+        assert!(!prompt.contains('\x1b'), "ANSI byte leaked: {prompt}");
+        assert!(prompt.contains("evil"), "literal name missing: {prompt}");
+        assert!(
+            prompt.contains("also-evil"),
+            "literal reason missing: {prompt}"
+        );
+    }
+
+    #[test]
+    fn prompt_falls_back_for_unsupported_kind() {
+        let target = HandleTarget::SocketEndpoint {
+            protocol: nono::supervisor::SocketProtocol::Tcp,
+            host: "example.com".to_string(),
+            port: 8080,
+            role: nono::supervisor::SocketRole::Connect,
+        };
+        let prompt = format_capability_prompt(HandleKind::Socket, &target, 0, Some("test"));
+        // Plan 18-02 will replace this branch with the live Socket template;
+        // until then the helper returns a SAFE placeholder so the dispatcher
+        // never panics on a not-yet-wired kind.
+        assert!(
+            prompt.contains("unsupported in this build"),
+            "expected placeholder fallback: {prompt}"
+        );
+        assert!(prompt.contains("reason=\"test\""), "prompt: {prompt}");
     }
 }
