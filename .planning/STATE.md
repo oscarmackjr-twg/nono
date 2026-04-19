@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: Resource Limits, Extended IPC, Attach-Streaming & Cleanup
-status: Phase 19 complete (verifier passed 25/25 must-haves); v2.1 remaining: Phase 17 (ATCH-01) and Phase 18 (AIPC-01)
-stopped_at: Phase 19 closed 2026-04-19 — verifier commit `6597fbf`; ready to plan Phase 17 or 18
+status: Phase 20 context gathered (4 gray areas discussed; 4 plans scoped); v2.1 remaining: Phase 17 (ATCH-01), Phase 18 (AIPC-01), Phase 20 (UPST)
+stopped_at: Phase 20 CONTEXT.md + DISCUSSION-LOG.md committed (commit `d434253`); ready for `/gsd-plan-phase 20`
 last_updated: "2026-04-19T02:30:00.000Z"
-last_activity: 2026-04-19 — Phase 19 (cleanup) complete. All 4 plans shipped, verifier agent passed 25/25 must-haves (commit `6597fbf`). v2.1 now at 15/17 phases complete on disk; milestone remaining = ATCH-01 + AIPC-01.
+last_activity: 2026-04-19 — Phase 20 (Upstream Parity Sync, UPST) context gathered. 4 gray areas discussed; merge strategy hybrid-per-feature + target v0.37.1 (includes RUSTSEC-2026-0098/0099 rustls-webpki fix) + 4-plan decomposition (20-01 security sequential, 20-02/03/04 parallel) + Windows-protection invariant D-21 locked. 9 of 16 considered upstream items in scope; 7 deferred.
 progress:
-  total_phases: 19
+  total_phases: 20
   completed_phases: 15
   total_plans: 44
   completed_plans: 44
-  percent: 100
+  percent: 95
 ---
 
 # Project State: nono — v2.1 (Resource Limits, Extended IPC, Attach-Streaming & Cleanup)
@@ -24,9 +24,9 @@ progress:
 
 ## Current Position
 
-Phase: 19 (cleanup) — COMPLETE 2026-04-19 (4/4 plans; verifier commit `6597fbf` passed 25/25 must-haves)
-Plan: — (phase closed; no active plan)
-Milestone: v2.1 — 15/17 phases complete. Phases 17 (ATCH-01) and 18 (AIPC-01) remain before milestone ships.
+Phase: 20 (Upstream Parity Sync, UPST) — CONTEXT gathered 2026-04-19 (commit `d434253`); awaiting `/gsd-plan-phase 20`
+Plan: — (phase not yet planned)
+Milestone: v2.1 — 15/20 phases complete on disk. Phases 17 (ATCH-01), 18 (AIPC-01), and 20 (UPST) remain before milestone ships.
 
   - v1.0 Windows Alpha — shipped 2026-03-31 (tag `v1.0`).
   - v2.0 Windows Gap Closure — shipped 2026-04-18 (tag `v2.0` pending on merge). Carry-forward closed by Phase 15 the same day.
