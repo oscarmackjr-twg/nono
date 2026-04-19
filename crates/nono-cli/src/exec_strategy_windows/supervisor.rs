@@ -5,9 +5,9 @@ use nono::supervisor::socket::{
     bind_aipc_pipe, broker_event_to_process, broker_job_object_to_process, broker_mutex_to_process,
     broker_pipe_to_process, broker_socket_to_process, broker_target_pid,
 };
-use nono::supervisor::{HandleKind, HandleTarget, PipeDirection, SocketProtocol};
 #[cfg(all(test, target_os = "windows"))]
 use nono::supervisor::SocketRole;
+use nono::supervisor::{HandleKind, HandleTarget, PipeDirection, SocketProtocol};
 use std::io::{Read, Write};
 use std::mem::ManuallyDrop;
 use std::os::windows::ffi::OsStrExt;
@@ -29,11 +29,11 @@ use windows_sys::Win32::System::Console::{
     GetConsoleScreenBufferInfo, GetStdHandle, ResizePseudoConsole, SetConsoleCtrlHandler,
     CONSOLE_SCREEN_BUFFER_INFO, COORD, CTRL_C_EVENT, STD_OUTPUT_HANDLE,
 };
+use windows_sys::Win32::System::JobObjects::OpenJobObjectW;
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
-use windows_sys::Win32::System::JobObjects::OpenJobObjectW;
 use windows_sys::Win32::System::Threading::{CreateEventW, CreateMutexW};
 use windows_sys::Win32::System::Threading::{
     GetExitCodeProcess, TerminateProcess, WaitForSingleObject,

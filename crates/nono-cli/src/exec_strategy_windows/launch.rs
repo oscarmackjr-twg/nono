@@ -1688,7 +1688,8 @@ mod detached_stdio_tests {
         }
         // Repeat to ensure no global state was corrupted.
         {
-            let mut pipes2 = DetachedStdioPipes::create().expect("create second DetachedStdioPipes");
+            let mut pipes2 =
+                DetachedStdioPipes::create().expect("create second DetachedStdioPipes");
             unsafe { pipes2.close_child_ends() };
         }
     }

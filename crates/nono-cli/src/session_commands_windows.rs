@@ -32,10 +32,7 @@ fn reject_if_sandboxed(command: &str) -> Result<()> {
 /// constructing a `SessionRecord`. Returns `NonoError::Setup` (not
 /// `NonoError::AttachBusy`) per CONTEXT.md D-21 — the `AttachBusy` variant
 /// stays generic; the session-id-bearing message lives at the call site.
-pub(crate) fn translate_attach_open_error(
-    err: &std::io::Error,
-    session_id: &str,
-) -> NonoError {
+pub(crate) fn translate_attach_open_error(err: &std::io::Error, session_id: &str) -> NonoError {
     use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
     if err.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) {
         NonoError::Setup(format!(

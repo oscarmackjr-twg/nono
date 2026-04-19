@@ -146,10 +146,7 @@ impl Default for AipcResolvedAllowlist {
     }
 }
 
-fn socket_role_from_token(
-    profile_name: &str,
-    tok: &str,
-) -> Result<nono::supervisor::SocketRole> {
+fn socket_role_from_token(profile_name: &str, tok: &str) -> Result<nono::supervisor::SocketRole> {
     match tok {
         "connect" => Ok(nono::supervisor::SocketRole::Connect),
         "bind" => Ok(nono::supervisor::SocketRole::Bind),
@@ -4718,11 +4715,7 @@ mod tests {
             (
                 "job_object",
                 "kill",
-                &[
-                    "kill",
-                    "job_object",
-                    "query, set_attributes, terminate",
-                ],
+                &["kill", "job_object", "query, set_attributes, terminate"],
             ),
             (
                 "event",
@@ -4924,14 +4917,12 @@ mod tests {
         // validator across every named profile to catch drift between data
         // and schema.
         use jsonschema::Validator;
-        let policy_json: serde_json::Value = serde_json::from_str(include_str!(
-            "../../data/policy.json"
-        ))
-        .expect("policy.json must be valid JSON");
-        let schema_json: serde_json::Value = serde_json::from_str(include_str!(
-            "../../data/nono-profile.schema.json"
-        ))
-        .expect("nono-profile.schema.json must be valid JSON");
+        let policy_json: serde_json::Value =
+            serde_json::from_str(include_str!("../../data/policy.json"))
+                .expect("policy.json must be valid JSON");
+        let schema_json: serde_json::Value =
+            serde_json::from_str(include_str!("../../data/nono-profile.schema.json"))
+                .expect("nono-profile.schema.json must be valid JSON");
         let validator = Validator::new(&schema_json).expect("schema must compile");
 
         let profiles_obj = policy_json

@@ -29,9 +29,7 @@
 #![allow(clippy::unwrap_used)]
 
 use nono::supervisor::policy;
-use nono::supervisor::{
-    GrantedResourceKind, PipeDirection, ResourceTransferKind, SocketRole,
-};
+use nono::supervisor::{GrantedResourceKind, PipeDirection, ResourceTransferKind, SocketRole};
 use nono::BrokerTargetProcess;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 
@@ -40,8 +38,7 @@ fn integration_event_broker_round_trip() {
     use windows_sys::Win32::System::Threading::CreateEventW;
     // SAFETY: anonymous event creation with NULL attributes/name. Manual
     // reset = FALSE, initial state = FALSE.
-    let source: HANDLE =
-        unsafe { CreateEventW(std::ptr::null_mut(), 0, 0, std::ptr::null()) };
+    let source: HANDLE = unsafe { CreateEventW(std::ptr::null_mut(), 0, 0, std::ptr::null()) };
     assert!(
         !source.is_null(),
         "CreateEventW failed: {}",
@@ -55,7 +52,10 @@ fn integration_event_broker_round_trip() {
     )
     .expect("broker event into current process");
     assert_eq!(grant.resource_kind, GrantedResourceKind::Event);
-    assert_eq!(grant.transfer, ResourceTransferKind::DuplicatedWindowsHandle);
+    assert_eq!(
+        grant.transfer,
+        ResourceTransferKind::DuplicatedWindowsHandle
+    );
     let dup = grant.raw_handle.expect("event grant must carry raw handle");
     assert_ne!(dup, 0);
 
@@ -72,8 +72,7 @@ fn integration_mutex_broker_round_trip() {
     use windows_sys::Win32::System::Threading::CreateMutexW;
     // SAFETY: anonymous mutex creation with NULL attrs/name; initial
     // owner = FALSE.
-    let source: HANDLE =
-        unsafe { CreateMutexW(std::ptr::null_mut(), 0, std::ptr::null()) };
+    let source: HANDLE = unsafe { CreateMutexW(std::ptr::null_mut(), 0, std::ptr::null()) };
     assert!(
         !source.is_null(),
         "CreateMutexW failed: {}",
@@ -87,7 +86,10 @@ fn integration_mutex_broker_round_trip() {
     )
     .expect("broker mutex into current process");
     assert_eq!(grant.resource_kind, GrantedResourceKind::Mutex);
-    assert_eq!(grant.transfer, ResourceTransferKind::DuplicatedWindowsHandle);
+    assert_eq!(
+        grant.transfer,
+        ResourceTransferKind::DuplicatedWindowsHandle
+    );
     let dup = grant.raw_handle.expect("mutex grant must carry raw handle");
     assert_ne!(dup, 0);
 
@@ -104,10 +106,7 @@ fn integration_pipe_broker_round_trip() {
     // pipe with the byte-identical Phase 11 SDDL via
     // build_low_integrity_security_attributes. The integration test
     // exercises the full lifecycle (CreateNamedPipeW + DuplicateHandle).
-    let canonical = format!(
-        "\\\\.\\pipe\\nono-aipc-integ-{}-pipe",
-        std::process::id()
-    );
+    let canonical = format!("\\\\.\\pipe\\nono-aipc-integ-{}-pipe", std::process::id());
     let source = nono::supervisor::socket::bind_aipc_pipe(&canonical, PipeDirection::Read)
         .expect("bind AIPC pipe");
 
@@ -118,7 +117,10 @@ fn integration_pipe_broker_round_trip() {
     )
     .expect("broker pipe into current process");
     assert_eq!(grant.resource_kind, GrantedResourceKind::Pipe);
-    assert_eq!(grant.transfer, ResourceTransferKind::DuplicatedWindowsHandle);
+    assert_eq!(
+        grant.transfer,
+        ResourceTransferKind::DuplicatedWindowsHandle
+    );
     assert_eq!(grant.access, nono::AccessMode::Read);
     let dup = grant.raw_handle.expect("pipe grant must carry raw handle");
     assert_ne!(dup, 0);
@@ -134,8 +136,8 @@ fn integration_pipe_broker_round_trip() {
 #[test]
 fn integration_socket_broker_round_trip() {
     use windows_sys::Win32::Networking::WinSock::{
-        closesocket, WSASocketW, WSAStartup, AF_INET, INVALID_SOCKET, IPPROTO_TCP,
-        SOCK_STREAM, WSADATA, WSA_FLAG_OVERLAPPED,
+        closesocket, WSASocketW, WSAStartup, AF_INET, INVALID_SOCKET, IPPROTO_TCP, SOCK_STREAM,
+        WSADATA, WSA_FLAG_OVERLAPPED,
     };
     // SAFETY: WSAStartup with version 2.2 (0x0202); reference-counted
     // initialization, idempotent for the lifetime of the process.
@@ -166,10 +168,7 @@ fn integration_socket_broker_round_trip() {
     )
     .expect("broker socket into current process");
     assert_eq!(grant.resource_kind, GrantedResourceKind::Socket);
-    assert_eq!(
-        grant.transfer,
-        ResourceTransferKind::SocketProtocolInfoBlob
-    );
+    assert_eq!(grant.transfer, ResourceTransferKind::SocketProtocolInfoBlob);
     assert!(
         grant.raw_handle.is_none(),
         "socket grant uses protocol_info_blob, not raw_handle"
@@ -194,8 +193,7 @@ fn integration_socket_broker_round_trip() {
 fn integration_job_object_broker_round_trip() {
     use windows_sys::Win32::System::JobObjects::CreateJobObjectW;
     // SAFETY: anonymous Job Object creation with NULL attributes/name.
-    let source: HANDLE =
-        unsafe { CreateJobObjectW(std::ptr::null_mut(), std::ptr::null()) };
+    let source: HANDLE = unsafe { CreateJobObjectW(std::ptr::null_mut(), std::ptr::null()) };
     assert!(
         !source.is_null(),
         "CreateJobObjectW failed: {}",
@@ -209,7 +207,10 @@ fn integration_job_object_broker_round_trip() {
     )
     .expect("broker Job Object into current process");
     assert_eq!(grant.resource_kind, GrantedResourceKind::JobObject);
-    assert_eq!(grant.transfer, ResourceTransferKind::DuplicatedWindowsHandle);
+    assert_eq!(
+        grant.transfer,
+        ResourceTransferKind::DuplicatedWindowsHandle
+    );
     let dup = grant
         .raw_handle
         .expect("Job Object grant must carry raw handle");
