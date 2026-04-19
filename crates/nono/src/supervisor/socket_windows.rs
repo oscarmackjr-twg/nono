@@ -6,7 +6,9 @@
 //! plus `DuplicateHandle` into the child process.
 
 use crate::error::{NonoError, Result};
-use crate::supervisor::types::{ResourceGrant, SupervisorMessage, SupervisorResponse};
+use crate::supervisor::types::{
+    PipeDirection, ResourceGrant, SocketRole, SupervisorMessage, SupervisorResponse,
+};
 use getrandom::fill as random_fill;
 use sha2::{Digest, Sha256};
 use std::fs::File;
@@ -18,6 +20,9 @@ use windows_sys::Win32::Foundation::{
     DuplicateHandle, LocalFree, DUPLICATE_SAME_ACCESS, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY,
     ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
 };
+use windows_sys::Win32::Networking::WinSock::{
+    WSADuplicateSocketW, INVALID_SOCKET, SOCKET, WSAPROTOCOL_INFOW,
+};
 use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
 use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 use windows_sys::Win32::Storage::FileSystem::{
@@ -26,9 +31,9 @@ use windows_sys::Win32::Storage::FileSystem::{
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, CreatePipe, DisconnectNamedPipe,
     GetNamedPipeServerProcessId, WaitNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
-    PIPE_TYPE_BYTE, PIPE_WAIT,
+    PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
-use windows_sys::Win32::System::Threading::GetCurrentProcess;
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId, GetProcessId};
 
 /// SDDL revision used by `ConvertStringSecurityDescriptorToSecurityDescriptorW`.
 const SDDL_REVISION_1: u32 = 1;
@@ -262,6 +267,46 @@ impl BrokerTargetProcess {
     fn raw(self) -> HANDLE {
         self.handle
     }
+
+    /// Return the OS-level PID for this target process.
+    ///
+    /// For [`BrokerTargetProcess::current()`] the underlying handle is the
+    /// pseudo-handle returned by `GetCurrentProcess`; `GetProcessId` resolves
+    /// it to the real PID. For wrapped process handles, `GetProcessId` returns
+    /// the target's PID. Returns 0 only when the underlying call fails (an
+    /// invalid handle), which the [`broker_target_pid`] free function falls
+    /// back to the current PID for safety.
+    ///
+    /// Phase 18 AIPC-01 Plan 18-02: required by the Socket broker so
+    /// `WSADuplicateSocketW(socket, target_pid, &mut info)` can bind the
+    /// resulting `WSAPROTOCOL_INFOW` blob to the correct process.
+    #[must_use]
+    pub fn pid(self) -> u32 {
+        // SAFETY: `self.handle` is either the GetCurrentProcess pseudo-handle
+        // (always valid) or a process HANDLE wrapped via from_raw_handle whose
+        // caller asserted liveness for the broker call. GetProcessId reads the
+        // PID from the kernel object the handle refers to and returns 0 on
+        // failure (no UB on bad handle — it just returns 0).
+        unsafe { GetProcessId(self.handle) }
+    }
+}
+
+/// Resolve the target PID for a brokered Socket request.
+///
+/// Wraps [`BrokerTargetProcess::pid`] with a fail-safe fallback to the current
+/// process's PID when `GetProcessId` returns 0 (e.g. when target is the
+/// pseudo-handle in test code). The Socket broker uses this in lieu of a
+/// caller-supplied PID for `WSADuplicateSocketW`.
+#[must_use]
+pub fn broker_target_pid(target: &BrokerTargetProcess) -> u32 {
+    let pid = target.pid();
+    if pid == 0 {
+        // SAFETY: GetCurrentProcessId is a leaf-safe Win32 call with no
+        // arguments; always returns the calling process's PID.
+        unsafe { GetCurrentProcessId() }
+    } else {
+        pid
+    }
 }
 
 /// Duplicate an opened file handle into the target process and describe it in
@@ -409,6 +454,164 @@ pub fn broker_mutex_to_process(
         duplicated as usize as u64,
         mask,
     ))
+}
+
+/// Duplicate a Windows named-pipe handle into the target process with access
+/// mapped DOWN from the supervisor source's `PIPE_ACCESS_DUPLEX` to the
+/// requested `direction`. The mask is `GENERIC_READ`, `GENERIC_WRITE`, or
+/// `GENERIC_READ | GENERIC_WRITE` per `direction`.
+///
+/// `dwOptions = 0` (NOT `DUPLICATE_SAME_ACCESS`) — must MAP DOWN. The supervisor
+/// source has full PIPE_ACCESS_DUPLEX and `DUPLICATE_SAME_ACCESS` would
+/// over-grant.
+///
+/// Per CONTEXT.md D-10 (Phase 18 AIPC-01): caller closes the supervisor source
+/// AFTER `send_response` returns; this function does NOT close the source.
+///
+/// The function is `safe` because the caller has already validated `handle` is
+/// a live named-pipe HANDLE owned by the supervisor (via [`bind_aipc_pipe`]);
+/// `DuplicateHandle` itself is the only FFI the function performs and the
+/// unsafe contract for that call is documented inside.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub fn broker_pipe_to_process(
+    handle: HANDLE,
+    target_process: BrokerTargetProcess,
+    direction: PipeDirection,
+) -> Result<ResourceGrant> {
+    let mask = match direction {
+        PipeDirection::Read => GENERIC_READ,
+        PipeDirection::Write => GENERIC_WRITE,
+        PipeDirection::ReadWrite => GENERIC_READ | GENERIC_WRITE,
+    };
+    let mut duplicated: HANDLE = std::ptr::null_mut();
+    // SAFETY: `handle` is a live pipe-end HANDLE owned by the supervisor
+    // (created via CreateNamedPipeW in `bind_aipc_pipe`).
+    // `target_process.raw()` was wrapped from a live process handle.
+    // `duplicated` points to writable storage. `mask` is derived from the
+    // validated direction enum. `dwOptions = 0` is critical: the supervisor
+    // source has full PIPE_ACCESS_DUPLEX and `DUPLICATE_SAME_ACCESS` would
+    // over-grant — we MAP DOWN to the requested direction.
+    let ok = unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            handle,
+            target_process.raw(),
+            &mut duplicated,
+            mask,
+            0,
+            0, // dwOptions = 0 — MAP DOWN
+        )
+    };
+    if ok == 0 || duplicated.is_null() {
+        return Err(NonoError::SandboxInit(format!(
+            "DuplicateHandle (pipe, mask=0x{mask:08x}) failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(ResourceGrant::duplicated_windows_pipe_handle(
+        duplicated as usize as u64,
+        direction,
+    ))
+}
+
+/// Serialize a supervisor-owned `SOCKET` into a `WSAPROTOCOL_INFOW` blob the
+/// target child process can consume via
+/// `WSASocketW(FROM_PROTOCOL_INFO, ...)`.
+///
+/// The blob is single-use and bound to `target_pid` at duplication time per
+/// the Microsoft API contract (RESEARCH Landmines § Socket).
+///
+/// Per CONTEXT.md D-10 + RESEARCH Landmines § Socket: caller closes the
+/// supervisor's source `SOCKET` via `closesocket(s)` AFTER `send_response`
+/// returns. If the supervisor exits before the child consumes the blob, the
+/// underlying socket is leaked (the kernel keeps the socket alive until ALL
+/// descriptors close, and the duplicated descriptor only materializes when
+/// the child calls `WSASocketW(FROM_PROTOCOL_INFO, ...)`).
+pub fn broker_socket_to_process(
+    socket: SOCKET,
+    _target_process: BrokerTargetProcess,
+    target_pid: u32,
+    role: SocketRole,
+) -> Result<ResourceGrant> {
+    if socket == INVALID_SOCKET {
+        return Err(NonoError::SandboxInit(
+            "WSADuplicateSocketW failed: source socket is INVALID_SOCKET".to_string(),
+        ));
+    }
+    // SAFETY: zeroing a POD struct is well-defined; `WSAPROTOCOL_INFOW` is a
+    // ~372-byte plain-old-data struct per the Microsoft API contract.
+    let mut proto_info: WSAPROTOCOL_INFOW = unsafe { std::mem::zeroed() };
+    // SAFETY: `socket` is a live SOCKET created by the supervisor with
+    // WSASocketW (validated as not INVALID_SOCKET above). `target_pid` is the
+    // validated child PID. `proto_info` points to writable 372-byte storage.
+    // WSADuplicateSocketW serializes the socket capability into proto_info;
+    // the result is single-use by the target PID.
+    let rc = unsafe { WSADuplicateSocketW(socket, target_pid, &mut proto_info) };
+    if rc != 0 {
+        return Err(NonoError::SandboxInit(format!(
+            "WSADuplicateSocketW failed (target_pid={target_pid}): {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    // Serialize the WSAPROTOCOL_INFOW struct to a Vec<u8> for wire transport.
+    // SAFETY: `proto_info` is a live POD struct; we read its bytes as an
+    // immutable byte slice of the struct's exact size (~372 bytes on x64).
+    let bytes: Vec<u8> = unsafe {
+        std::slice::from_raw_parts(
+            std::ptr::addr_of!(proto_info) as *const u8,
+            std::mem::size_of::<WSAPROTOCOL_INFOW>(),
+        )
+        .to_vec()
+    };
+    Ok(ResourceGrant::socket_protocol_info_blob(bytes, role))
+}
+
+/// Create a named pipe for AIPC broker handoff with Low Integrity SDDL
+/// (mirrors Phase 11 `CAPABILITY_PIPE_SDDL`). Returns the supervisor-side
+/// pipe `HANDLE` the dispatcher then duplicates into the child via
+/// [`broker_pipe_to_process`].
+///
+/// The pipe is created as `PIPE_ACCESS_DUPLEX` server-side; the broker maps
+/// the access DOWN to the requested direction at `DuplicateHandle` time, so
+/// the supervisor source can serve any direction the child requests. The
+/// `_direction` parameter is currently informational (kept in the signature
+/// for forward-compat audit enrichment).
+///
+/// `canonical_name` MUST be the server-canonicalized
+/// `\\.\pipe\nono-aipc-<user_session_id>-<sanitized_name>` shape per
+/// CONTEXT.md `<specifics>` line 168 — the caller is responsible for that
+/// canonicalization before reaching this helper.
+pub fn bind_aipc_pipe(canonical_name: &str, _direction: PipeDirection) -> Result<HANDLE> {
+    let (sa, _sd_guard) = build_low_integrity_security_attributes()?;
+    let wide_name = to_wide(canonical_name);
+
+    // SAFETY: `wide_name` is a valid null-terminated UTF-16 string with a
+    // lifetime that outlives the FFI call. `sa` carries a security descriptor
+    // owned by `_sd_guard` for the duration of this call. PIPE_ACCESS_DUPLEX
+    // with PIPE_UNLIMITED_INSTANCES is the standard server-side AIPC pipe
+    // shape so multiple AIPC capability requests can target distinct
+    // canonical names without competing for the single-instance slot the
+    // supervisor control pipe uses. Returned HANDLE is owned by the caller
+    // and must be closed via CloseHandle (caller's responsibility per D-10).
+    let handle: HANDLE = unsafe {
+        CreateNamedPipeW(
+            wide_name.as_ptr(),
+            PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+            PIPE_UNLIMITED_INSTANCES,
+            4096,
+            4096,
+            0,
+            &sa,
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE || handle.is_null() {
+        return Err(NonoError::SandboxInit(format!(
+            "CreateNamedPipeW(\"{canonical_name}\") failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(handle)
 }
 
 impl Drop for SupervisorSocket {
@@ -1200,5 +1403,193 @@ mod tests {
             msg.contains("DuplicateHandle (mutex"),
             "unexpected error: {msg}"
         );
+    }
+
+    // Phase 18 AIPC-01 Plan 18-02 Task 2 — pipe + socket broker unit tests.
+    // All gated `#[cfg(target_os = "windows")]` (the file is already
+    // Windows-only via #[path] routing in mod.rs but the explicit gate makes
+    // the intent unambiguous and survives any future routing change).
+
+    fn unique_aipc_pipe_name(suffix: &str) -> String {
+        // Use the per-process PID + a SHA-derived suffix to avoid collisions
+        // between concurrent test invocations within the same process. The
+        // canonical AIPC namespace prefix is `\\.\pipe\nono-aipc-<id>-<name>`.
+        format!(
+            r"\\.\pipe\nono-aipc-test{}-{suffix}",
+            std::process::id()
+        )
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_broker_pipe_to_process_duplicates_with_read_access() {
+        use windows_sys::Win32::Foundation::CloseHandle;
+
+        let name = unique_aipc_pipe_name("pipe-read");
+        let handle = bind_aipc_pipe(&name, PipeDirection::Read).expect("bind aipc pipe");
+        assert_ne!(handle, INVALID_HANDLE_VALUE);
+
+        let grant = broker_pipe_to_process(
+            handle,
+            BrokerTargetProcess::current(),
+            PipeDirection::Read,
+        )
+        .expect("broker pipe with read direction");
+        assert_eq!(
+            grant.transfer,
+            ResourceTransferKind::DuplicatedWindowsHandle
+        );
+        assert_eq!(
+            grant.resource_kind,
+            crate::supervisor::types::GrantedResourceKind::Pipe
+        );
+        assert_eq!(grant.access, AccessMode::Read);
+        let raw = grant.raw_handle.expect("raw handle present");
+        assert_ne!(raw, 0);
+
+        // SAFETY: `raw` came from DuplicateHandle just above; `handle` came
+        // from CreateNamedPipeW above. Both are live HANDLEs we own.
+        unsafe {
+            CloseHandle(raw as usize as HANDLE);
+            CloseHandle(handle);
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_broker_pipe_to_process_duplicates_with_readwrite_access() {
+        use windows_sys::Win32::Foundation::CloseHandle;
+
+        let name = unique_aipc_pipe_name("pipe-rw");
+        let handle = bind_aipc_pipe(&name, PipeDirection::ReadWrite).expect("bind aipc pipe");
+        assert_ne!(handle, INVALID_HANDLE_VALUE);
+
+        let grant = broker_pipe_to_process(
+            handle,
+            BrokerTargetProcess::current(),
+            PipeDirection::ReadWrite,
+        )
+        .expect("broker pipe with read+write direction");
+        assert_eq!(grant.access, AccessMode::ReadWrite);
+        let raw = grant.raw_handle.expect("raw handle present");
+        assert_ne!(raw, 0);
+
+        unsafe {
+            CloseHandle(raw as usize as HANDLE);
+            CloseHandle(handle);
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_broker_pipe_to_process_propagates_duplicate_handle_failure() {
+        let result = broker_pipe_to_process(
+            std::ptr::null_mut(),
+            BrokerTargetProcess::current(),
+            PipeDirection::Read,
+        );
+        let err = result.expect_err("NULL source handle must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("DuplicateHandle (pipe,"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_broker_socket_to_process_serializes_proto_info_blob() {
+        use windows_sys::Win32::Networking::WinSock::{
+            closesocket, WSAStartup, WSASocketW, AF_INET, IPPROTO_TCP, SOCK_STREAM, WSADATA,
+            WSA_FLAG_OVERLAPPED,
+        };
+
+        // SAFETY: WSAStartup with version 2.2 (0x0202) is the standard
+        // Winsock initialization; wsadata points to writable storage. The
+        // call is reference-counted and idempotent.
+        let mut wsadata: WSADATA = unsafe { std::mem::zeroed() };
+        let _ = unsafe { WSAStartup(0x0202, &mut wsadata) };
+
+        // SAFETY: WSASocketW with NULL protocol_info creates a fresh socket.
+        // AF_INET / SOCK_STREAM / IPPROTO_TCP are well-defined constants.
+        let sock = unsafe {
+            WSASocketW(
+                AF_INET as i32,
+                SOCK_STREAM,
+                IPPROTO_TCP,
+                std::ptr::null(),
+                0,
+                WSA_FLAG_OVERLAPPED,
+            )
+        };
+        assert_ne!(
+            sock, INVALID_SOCKET,
+            "WSASocketW failed: {}",
+            std::io::Error::last_os_error()
+        );
+
+        let target_pid = unsafe { GetCurrentProcessId() };
+        let grant = broker_socket_to_process(
+            sock,
+            BrokerTargetProcess::current(),
+            target_pid,
+            SocketRole::Connect,
+        )
+        .expect("broker socket should serialize proto_info blob");
+        assert_eq!(grant.transfer, ResourceTransferKind::SocketProtocolInfoBlob);
+        assert_eq!(
+            grant.resource_kind,
+            crate::supervisor::types::GrantedResourceKind::Socket
+        );
+        assert!(grant.raw_handle.is_none());
+        let blob = grant.protocol_info_blob.as_ref().expect("blob present");
+        assert_eq!(
+            blob.len(),
+            std::mem::size_of::<WSAPROTOCOL_INFOW>(),
+            "blob length must match WSAPROTOCOL_INFOW size"
+        );
+
+        // SAFETY: `sock` is the live SOCKET we created via WSASocketW above
+        // and have not freed elsewhere.
+        unsafe {
+            closesocket(sock);
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_broker_socket_to_process_propagates_wsa_failure() {
+        let result = broker_socket_to_process(
+            INVALID_SOCKET,
+            BrokerTargetProcess::current(),
+            unsafe { GetCurrentProcessId() },
+            SocketRole::Connect,
+        );
+        let err = result.expect_err("INVALID_SOCKET source must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("WSADuplicateSocketW failed"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_bind_aipc_pipe_creates_pipe_with_low_integrity_sddl() {
+        use windows_sys::Win32::Foundation::CloseHandle;
+
+        // The SDDL applied is the byte-identical Phase 11 CAPABILITY_PIPE_SDDL
+        // constant via build_low_integrity_security_attributes(); the SDDL
+        // contents themselves are exercised by test_bind_low_integrity_roundtrip
+        // (Phase 11). Here we verify bind_aipc_pipe produces a usable handle.
+        let name = unique_aipc_pipe_name("aipctest-sddl");
+        let handle = bind_aipc_pipe(&name, PipeDirection::ReadWrite).expect("bind aipc pipe");
+        assert_ne!(handle, INVALID_HANDLE_VALUE);
+        assert!(!handle.is_null(), "handle should be non-NULL");
+
+        // SAFETY: `handle` is a live HANDLE returned by bind_aipc_pipe above.
+        unsafe {
+            CloseHandle(handle);
+        }
     }
 }
