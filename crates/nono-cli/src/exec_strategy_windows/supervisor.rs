@@ -500,7 +500,11 @@ impl WindowsSupervisorRuntime {
     }
 
     fn start_logging(&self) -> Result<()> {
-        let session_id = self.session_id.clone();
+        // Phase 17 fix (debug 17-detached-child-immediate-exit): log file
+        // path must use the USER-FACING session ID so `nono attach` /
+        // `nono logs` (which compute the log path from `session.session_id`)
+        // find it. Mirrors `start_control_pipe_server`.
+        let session_id = self.user_session_id.clone();
         let pty_output_read = self
             .pty
             .as_ref()
@@ -841,7 +845,11 @@ impl WindowsSupervisorRuntime {
     }
 
     fn start_data_pipe_server(&self) -> Result<()> {
-        let session_id = self.session_id.clone();
+        // Phase 17 fix (debug 17-detached-child-immediate-exit): the data
+        // pipe must be named with the USER-FACING session ID. `nono attach`
+        // looks the pipe up by `session.session_id` (16-hex), not by the
+        // supervisor correlation ID. Mirrors `start_control_pipe_server`.
+        let session_id = self.user_session_id.clone();
         let pty_output_read = self
             .pty
             .as_ref()

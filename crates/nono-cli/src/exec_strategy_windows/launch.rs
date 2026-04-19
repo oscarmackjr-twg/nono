@@ -199,11 +199,7 @@ fn create_one_pipe(sa: &SECURITY_ATTRIBUTES, label: &str) -> Result<(HANDLE, HAN
 
 pub(super) fn create_process_containment(session_id: Option<&str>) -> Result<ProcessContainment> {
     let name_u16 = session_id.map(|id| {
-        let name = format!(
-            r"Local
-ono-session-{}",
-            id
-        );
+        let name = format!(r"Local\nono-session-{}", id);
         to_u16_null_terminated(&name)
     });
 
