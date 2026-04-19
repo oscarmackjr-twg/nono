@@ -72,7 +72,7 @@ Carry-forward → Phase 15: detached-console-grandchild `0xC0000142 STATUS_DLL_I
 
   **Plans:** TBD during `/gsd-plan-phase 18` (likely 3 plans: protocol extension + handle-type-specific brokers + security tests).
 
-- [ ] **Phase 19: Cleanup (CLEAN)** — `cargo fmt --all` for drifted files from commit `6749494`; diagnose 5 pre-existing Windows test flakes; triage disk-resident WIP (10-*, 11-*, 12-*, quick tasks, INTEGRATION-REPORT); prune 1172 stale session files + document retention policy.
+- [x] **Phase 19: Cleanup (CLEAN)** — `cargo fmt --all` for drifted files from commit `6749494`; diagnose 5 pre-existing Windows test flakes; triage disk-resident WIP (10-*, 11-*, 12-*, quick tasks, INTEGRATION-REPORT); prune 1172 stale session files + document retention policy. (complete 2026-04-19; verifier passed 25/25 must-haves, commit `6597fbf`)
 
   **Depends on:** Nothing; can run in parallel with the feature phases. Recommended to run last so it catches any drift introduced by the feature phases too.
 
@@ -104,4 +104,4 @@ Carry-forward → Phase 15: detached-console-grandchild `0xC0000142 STATUS_DLL_I
 | 16. Resource Limits (RESL-01..04) | v2.1 | 2/2 | Complete (RESL-01..04 shipped: CPU/memory/processes kernel-enforced, timeout via supervisor timer, `nono inspect` Limits block) | 2026-04-18 |
 | 17. Attach-Streaming (ATCH-01) | v2.1 | 0/? | Not Planned (run `/gsd-plan-phase 17` to start) | - |
 | 18. Extended IPC (AIPC-01) | v2.1 | 0/? | Not Planned (run `/gsd-plan-phase 18` to start) | - |
-| 19. Cleanup (CLEAN-01..04) | v2.1 | 4/4 | All plans complete on disk, awaiting verifier agent (19-01 CLEAN-01 fmt drift complete; 19-02 CLEAN-02 5 test flakes + query_path UNC prod fix complete-with-deviation; 19-03 CLEAN-03 10-item WIP triage complete; 19-04 CLEAN-04 retention + prune + auto-sweep + T-19-04-07 mitigation + 1343-file one-shot cleanup + docs complete) | - |
+| 19. Cleanup (CLEAN-01..04) | v2.1 | 4/4 | Complete (19-01 CLEAN-01 fmt drift; 19-02 CLEAN-02 5 test flakes + query_path UNC prod fix complete-with-deviation; 19-03 CLEAN-03 10-item WIP triage; 19-04 CLEAN-04 retention + prune + auto-sweep + T-19-04-07 mitigation + 1343-file one-shot cleanup + docs; verifier passed 25/25 must-haves, commit `6597fbf`) | 2026-04-19 |

@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: Resource Limits, Extended IPC, Attach-Streaming & Cleanup
-status: Phase 19 all 4 plans complete on disk — awaiting verifier agent to close the phase
-stopped_at: Phase 19 plans 19-01 + 19-02 + 19-03 + 19-04 executed; phase ready for verification
-last_updated: "2026-04-19T01:00:00.000Z"
-last_activity: 2026-04-18 — Phase 19 plan 19-04 (CLEAN-04 session retention + `nono prune` flags + auto-prune on `ps` + T-19-04-07 NONO_CAP_FILE structural no-op + one-shot cleanup of 1343 stale session files) complete; 5 DCO-signed commits (18e9768, a71b2bf, c3defb6, ddf408b, f626e24) + bookkeeping
+status: Phase 19 complete (verifier passed 25/25 must-haves); v2.1 remaining: Phase 17 (ATCH-01) and Phase 18 (AIPC-01)
+stopped_at: Phase 19 closed 2026-04-19 — verifier commit `6597fbf`; ready to plan Phase 17 or 18
+last_updated: "2026-04-19T02:30:00.000Z"
+last_activity: 2026-04-19 — Phase 19 (cleanup) complete. All 4 plans shipped, verifier agent passed 25/25 must-haves (commit `6597fbf`). v2.1 now at 15/17 phases complete on disk; milestone remaining = ATCH-01 + AIPC-01.
 progress:
   total_phases: 19
-  completed_phases: 14
+  completed_phases: 15
   total_plans: 44
-  completed_plans: 43
-  percent: 98
+  completed_plans: 44
+  percent: 100
 ---
 
 # Project State: nono — v2.1 (Resource Limits, Extended IPC, Attach-Streaming & Cleanup)
@@ -20,13 +20,13 @@ progress:
 
 **Core Value:** Every nono command that works on Linux/macOS should work on Windows with equivalent security guarantees, or be explicitly documented as intentionally unsupported with a clear rationale.
 
-**Current Focus:** Phase 16 complete (RESL-01..04 shipped). Next: Phase 17 (ATCH-01) or Phase 18 (AIPC-01) — independent.
+**Current Focus:** Phase 16 + Phase 19 complete. Next: Phase 17 (ATCH-01) or Phase 18 (AIPC-01) — independent; either closes v2.1.
 
 ## Current Position
 
-Phase: 19 (cleanup) — ALL 4 PLANS COMPLETE ON DISK (4/4 plans); awaiting verifier agent before phase is marked complete
-Plan: 4 of 4 complete (19-01 SUMMARY at `.planning/phases/19-cleanup/19-01-SUMMARY.md`, 19-02 SUMMARY at `.planning/phases/19-cleanup/19-02-SUMMARY.md`, 19-03 SUMMARY at `.planning/phases/19-cleanup/19-03-SUMMARY.md`, 19-04 SUMMARY at `.planning/phases/19-cleanup/19-04-SUMMARY.md`); next step: orchestrator runs the Phase 19 verifier agent, then pick up Phase 17 (ATCH-01) or Phase 18 (AIPC-01).
-Milestone: v2.1 — Phase 16 done; Phase 19 underway.
+Phase: 19 (cleanup) — COMPLETE 2026-04-19 (4/4 plans; verifier commit `6597fbf` passed 25/25 must-haves)
+Plan: — (phase closed; no active plan)
+Milestone: v2.1 — 15/17 phases complete. Phases 17 (ATCH-01) and 18 (AIPC-01) remain before milestone ships.
 
   - v1.0 Windows Alpha — shipped 2026-03-31 (tag `v1.0`).
   - v2.0 Windows Gap Closure — shipped 2026-04-18 (tag `v2.0` pending on merge). Carry-forward closed by Phase 15 the same day.
