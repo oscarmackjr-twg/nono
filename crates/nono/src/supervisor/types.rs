@@ -322,6 +322,60 @@ impl ResourceGrant {
             protocol_info_blob: None,
         }
     }
+
+    /// Build Windows-side metadata for a duplicated named-pipe handle
+    /// transferred inline (Phase 18-02).
+    ///
+    /// The `direction` is encoded in the access mask passed to
+    /// `DuplicateHandle` server-side; here it's stored as
+    /// `AccessMode::Read` / `AccessMode::Write` / `AccessMode::ReadWrite`
+    /// for human-readability in the audit log.
+    #[must_use]
+    pub fn duplicated_windows_pipe_handle(raw_handle: u64, direction: PipeDirection) -> Self {
+        let access = match direction {
+            PipeDirection::Read => AccessMode::Read,
+            PipeDirection::Write => AccessMode::Write,
+            PipeDirection::ReadWrite => AccessMode::ReadWrite,
+        };
+        Self {
+            transfer: ResourceTransferKind::DuplicatedWindowsHandle,
+            resource_kind: GrantedResourceKind::Pipe,
+            access,
+            raw_handle: Some(raw_handle),
+            protocol_info_blob: None,
+        }
+    }
+
+    /// Build Windows-side metadata for a socket transferred via
+    /// `WSADuplicateSocketW` (Phase 18-02).
+    ///
+    /// The `protocol_info_blob` is the ~372-byte `WSAPROTOCOL_INFOW` struct
+    /// serialized as bytes; the child reconstructs the SOCKET via
+    /// `WSASocketW(FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO,
+    /// FROM_PROTOCOL_INFO, &proto_info, 0, WSA_FLAG_OVERLAPPED)`. Single-use;
+    /// bound to a specific target PID at duplication time (CONTEXT.md
+    /// `<specifics>` + RESEARCH Landmines § Socket).
+    ///
+    /// `access` is set to `AccessMode::ReadWrite` as a sentinel for non-file
+    /// kinds where `AccessMode` is semantically inert; the meaningful access
+    /// information for sockets is the role recorded in
+    /// `CapabilityRequest.target` (the audit log carries it via the original
+    /// request).
+    #[must_use]
+    pub fn socket_protocol_info_blob(bytes: Vec<u8>, role: SocketRole) -> Self {
+        // The `role` parameter is currently informational only — kept in the
+        // signature so future audit-trail enrichment can carry per-role data
+        // without changing the constructor signature. The `let _ = role;`
+        // placates clippy without an `#[allow(unused)]` attribute.
+        let _ = role;
+        Self {
+            transfer: ResourceTransferKind::SocketProtocolInfoBlob,
+            resource_kind: GrantedResourceKind::Socket,
+            access: AccessMode::ReadWrite,
+            raw_handle: None,
+            protocol_info_blob: Some(bytes),
+        }
+    }
 }
 
 impl ApprovalDecision {
@@ -567,5 +621,56 @@ mod tests {
         let decoded: ResourceTransferKind = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded, ResourceTransferKind::SocketProtocolInfoBlob);
         assert!(json.contains("SocketProtocolInfoBlob"));
+    }
+
+    // Phase 18 AIPC-01 Plan 18-02 Task 1 — pipe + socket constructor unit tests.
+
+    #[test]
+    fn resource_grant_pipe_constructor_shape_read() {
+        let grant = ResourceGrant::duplicated_windows_pipe_handle(0xAABB_CCDD, PipeDirection::Read);
+        assert_eq!(
+            grant.transfer,
+            ResourceTransferKind::DuplicatedWindowsHandle
+        );
+        assert_eq!(grant.resource_kind, GrantedResourceKind::Pipe);
+        assert_eq!(grant.access, AccessMode::Read);
+        assert_eq!(grant.raw_handle, Some(0xAABB_CCDD));
+        assert!(grant.protocol_info_blob.is_none());
+    }
+
+    #[test]
+    fn resource_grant_pipe_constructor_shape_readwrite() {
+        let grant =
+            ResourceGrant::duplicated_windows_pipe_handle(0x1234_5678, PipeDirection::ReadWrite);
+        assert_eq!(
+            grant.transfer,
+            ResourceTransferKind::DuplicatedWindowsHandle
+        );
+        assert_eq!(grant.resource_kind, GrantedResourceKind::Pipe);
+        assert_eq!(grant.access, AccessMode::ReadWrite);
+        assert_eq!(grant.raw_handle, Some(0x1234_5678));
+        assert!(grant.protocol_info_blob.is_none());
+    }
+
+    #[test]
+    fn resource_grant_socket_protocol_info_blob_shape() {
+        let bytes = vec![0xAAu8; 372];
+        let grant = ResourceGrant::socket_protocol_info_blob(bytes.clone(), SocketRole::Connect);
+        assert_eq!(grant.transfer, ResourceTransferKind::SocketProtocolInfoBlob);
+        assert_eq!(grant.resource_kind, GrantedResourceKind::Socket);
+        assert!(grant.raw_handle.is_none());
+        assert_eq!(grant.protocol_info_blob.as_deref(), Some(bytes.as_slice()));
+    }
+
+    #[test]
+    fn resource_grant_socket_blob_json_round_trip_preserves_bytes() {
+        let bytes = vec![0xAAu8; 372];
+        let grant = ResourceGrant::socket_protocol_info_blob(bytes.clone(), SocketRole::Connect);
+        let json = serde_json::to_string(&grant).expect("serialize");
+        let decoded: ResourceGrant = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.transfer, ResourceTransferKind::SocketProtocolInfoBlob);
+        assert_eq!(decoded.resource_kind, GrantedResourceKind::Socket);
+        assert_eq!(decoded.protocol_info_blob.as_deref(), Some(bytes.as_slice()));
+        assert!(decoded.raw_handle.is_none());
     }
 }
