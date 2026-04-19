@@ -7,6 +7,7 @@ mod audit_commands;
 mod capability_ext;
 mod cli;
 mod cli_bootstrap;
+mod command_blocking_deprecation;
 mod command_runtime;
 mod config;
 mod credential_runtime;
@@ -101,6 +102,12 @@ fn main() {
     init_tracing(&cli);
     init_theme(&cli);
     print_legacy_network_warnings(&legacy_network_warnings, cli.silent);
+
+    // Plan 20-03 D-10: emit startup warnings for deprecated command-blocking
+    // surfaces (CLI flags, profile fields, manifest fields). Warnings-only;
+    // enforcement behaviour is unchanged.
+    let deprecation_warnings = command_blocking_deprecation::collect_cli_warnings(&cli);
+    command_blocking_deprecation::print_warnings(&deprecation_warnings, cli.silent);
 
     if let Err(e) = run_cli(cli) {
         error!("{}", e);

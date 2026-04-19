@@ -80,6 +80,45 @@ pub(crate) fn parse_duration(s: &str) -> std::result::Result<std::time::Duration
     Ok(std::time::Duration::from_secs(secs))
 }
 
+/// Validate an environment-variable filter pattern for `--env-allow` /
+/// `--env-deny`.
+///
+/// Accepted shapes (matching upstream v0.37.1 commit 1b412a7 semantics):
+/// - Exact variable name: `PATH`, `HOME` — must be non-empty and contain no `*`
+/// - Trailing-prefix glob: `AWS_*` — `*` must be the last character
+/// - Bare wildcard: `*` — matches all variables
+///
+/// Rejected (fails closed at clap parse time, BEFORE any child launch):
+/// - Empty pattern
+/// - `*` used as anything other than a trailing suffix (e.g. `A*B`, `*X`)
+///
+/// Security: fail-closed is mandated by CLAUDE.md § Fail Secure. A malformed
+/// filter that silently admitted everything would let sensitive parent-env
+/// vars leak into the sandboxed child. We reject at parse time so the child
+/// is never launched with an ambiguous filter.
+pub(crate) fn parse_env_filter_pattern(s: &str) -> std::result::Result<String, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("env filter pattern cannot be empty".to_string());
+    }
+    if s == "*" {
+        return Ok(s.to_string());
+    }
+    if s.contains('*') && !s.ends_with('*') {
+        return Err(format!(
+            "invalid env filter pattern '{s}': '*' is only valid as a trailing suffix \
+             (use 'AWS_*' or a bare '*', not 'A*B' or '*X')"
+        ));
+    }
+    if s.starts_with('*') && s.len() > 1 {
+        return Err(format!(
+            "invalid env filter pattern '{s}': use a bare '*' to match all variables, \
+             or a specific prefix like 'AWS_*'"
+        ));
+    }
+    Ok(s.to_string())
+}
+
 #[cfg(target_os = "windows")]
 const CLI_ABOUT: &str = "A capability-based shell for running untrusted AI agents and processes with OS-enforced isolation.\nUnsupported flows fail closed instead of implying full sandbox parity.";
 
@@ -1115,6 +1154,41 @@ pub struct SandboxArgs {
     )]
     pub env_credential_map: Vec<String>,
 
+    // ── Environment filter (upstream v0.37.1 #688 / 1b412a7) ─────────────────────────────────
+    /// Allow-list pattern for environment variables inherited by the
+    /// sandboxed child. Accepts an exact name (`PATH`), a trailing-prefix
+    /// glob (`AWS_*`), or a bare `*` to match all variables. Repeatable.
+    /// Malformed patterns fail closed at parse time with a clap error,
+    /// BEFORE the sandbox is launched. When any `--env-allow` is set, only
+    /// matching variables (plus nono-injected credentials) reach the child.
+    /// Upstream parity shim: full propagation to the child env boundary
+    /// lives in profile-surface code owned by a sibling plan; the flag is
+    /// accepted here with fail-closed validation so a future profile-wiring
+    /// patch can consume it without re-plumbing the CLI surface.
+    #[arg(
+        long,
+        value_name = "PATTERN",
+        value_parser = parse_env_filter_pattern,
+        action = clap::ArgAction::Append,
+        help_heading = "ENVIRONMENT"
+    )]
+    pub env_allow: Vec<String>,
+
+    /// Deny-list pattern for environment variables inherited by the
+    /// sandboxed child. Accepts an exact name or a trailing-prefix glob
+    /// (e.g. `AWS_*`). Repeatable. Malformed patterns fail closed at
+    /// parse time. When both `--env-allow` and `--env-deny` match, deny
+    /// takes precedence — this prevents an overly-broad allow from
+    /// accidentally admitting something listed in deny.
+    #[arg(
+        long,
+        value_name = "PATTERN",
+        value_parser = parse_env_filter_pattern,
+        action = clap::ArgAction::Append,
+        help_heading = "ENVIRONMENT"
+    )]
+    pub env_deny: Vec<String>,
+
     // ── Commands ─────────────────────────────────────────────────────────
     /// Allow a normally-blocked dangerous command (use with caution)
     #[arg(long, value_name = "CMD", help_heading = "COMMANDS")]
@@ -1277,6 +1351,41 @@ pub struct WrapSandboxArgs {
     )]
     pub env_credential_map: Vec<String>,
 
+    // ── Environment filter (upstream v0.37.1 #688 / 1b412a7) ─────────────────────────────────
+    /// Allow-list pattern for environment variables inherited by the
+    /// sandboxed child. Accepts an exact name (`PATH`), a trailing-prefix
+    /// glob (`AWS_*`), or a bare `*` to match all variables. Repeatable.
+    /// Malformed patterns fail closed at parse time with a clap error,
+    /// BEFORE the sandbox is launched. When any `--env-allow` is set, only
+    /// matching variables (plus nono-injected credentials) reach the child.
+    /// Upstream parity shim: full propagation to the child env boundary
+    /// lives in profile-surface code owned by a sibling plan; the flag is
+    /// accepted here with fail-closed validation so a future profile-wiring
+    /// patch can consume it without re-plumbing the CLI surface.
+    #[arg(
+        long,
+        value_name = "PATTERN",
+        value_parser = parse_env_filter_pattern,
+        action = clap::ArgAction::Append,
+        help_heading = "ENVIRONMENT"
+    )]
+    pub env_allow: Vec<String>,
+
+    /// Deny-list pattern for environment variables inherited by the
+    /// sandboxed child. Accepts an exact name or a trailing-prefix glob
+    /// (e.g. `AWS_*`). Repeatable. Malformed patterns fail closed at
+    /// parse time. When both `--env-allow` and `--env-deny` match, deny
+    /// takes precedence — this prevents an overly-broad allow from
+    /// accidentally admitting something listed in deny.
+    #[arg(
+        long,
+        value_name = "PATTERN",
+        value_parser = parse_env_filter_pattern,
+        action = clap::ArgAction::Append,
+        help_heading = "ENVIRONMENT"
+    )]
+    pub env_deny: Vec<String>,
+
     // ── Commands ─────────────────────────────────────────────────────────
     /// Allow a normally-blocked dangerous command (use with caution)
     #[arg(long, value_name = "CMD", help_heading = "COMMANDS")]
@@ -1354,6 +1463,8 @@ impl From<WrapSandboxArgs> for SandboxArgs {
             env_credential_map: args.env_credential_map,
             allow_command: args.allow_command,
             block_command: args.block_command,
+            env_allow: args.env_allow,
+            env_deny: args.env_deny,
             profile: args.profile,
             allow_launch_services: args.allow_launch_services,
             config: args.config,
@@ -2356,6 +2467,198 @@ mod parser_tests {
     fn memory_zero_rejected_by_parser() {
         let err = Cli::try_parse_from(["nono", "run", "--memory", "0", "--allow", ".", "echo"]);
         assert!(err.is_err());
+    }
+
+    // ==================================================================
+    // Environment-variable filter flags (upstream v0.37.1 #688 / 1b412a7)
+    // D-09 scoped port — CLI surface + parse-time validator only.
+    // ==================================================================
+
+    #[test]
+    fn parse_env_filter_pattern_accepts_exact_names() {
+        assert_eq!(parse_env_filter_pattern("PATH"), Ok("PATH".to_string()));
+        assert_eq!(parse_env_filter_pattern("HOME"), Ok("HOME".to_string()));
+        assert_eq!(
+            parse_env_filter_pattern("MY_CUSTOM_VAR"),
+            Ok("MY_CUSTOM_VAR".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_env_filter_pattern_accepts_prefix_glob() {
+        assert_eq!(parse_env_filter_pattern("AWS_*"), Ok("AWS_*".to_string()));
+        assert_eq!(parse_env_filter_pattern("LANG_*"), Ok("LANG_*".to_string()));
+    }
+
+    #[test]
+    fn parse_env_filter_pattern_accepts_bare_wildcard() {
+        assert_eq!(parse_env_filter_pattern("*"), Ok("*".to_string()));
+    }
+
+    #[test]
+    fn parse_env_filter_pattern_rejects_empty() {
+        assert!(parse_env_filter_pattern("").is_err());
+        assert!(parse_env_filter_pattern("   ").is_err());
+    }
+
+    #[test]
+    fn parse_env_filter_pattern_rejects_middle_wildcard() {
+        let err = parse_env_filter_pattern("INVALID*PATTERN")
+            .expect_err("middle wildcard should fail closed");
+        assert!(err.contains("trailing suffix"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_env_filter_pattern_rejects_leading_wildcard() {
+        let err =
+            parse_env_filter_pattern("*SUFFIX").expect_err("leading wildcard should fail closed");
+        assert!(
+            err.contains("bare '*'") || err.contains("trailing suffix"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn env_allow_accepts_exact_and_glob_via_clap() {
+        let cli = Cli::try_parse_from([
+            "nono",
+            "run",
+            "--env-allow",
+            "PATH",
+            "--env-allow",
+            "AWS_*",
+            "--env-allow",
+            "*",
+            "--allow",
+            ".",
+            "echo",
+        ]);
+        assert!(cli.is_ok(), "valid allow patterns should parse: {cli:?}");
+        if let Ok(Cli {
+            command: Commands::Run(args),
+            ..
+        }) = cli
+        {
+            assert_eq!(args.sandbox.env_allow, vec!["PATH", "AWS_*", "*"]);
+        } else {
+            panic!("expected Run command");
+        }
+    }
+
+    #[test]
+    fn env_deny_accepts_exact_and_glob_via_clap() {
+        let cli = Cli::try_parse_from([
+            "nono",
+            "run",
+            "--env-deny",
+            "SECRET_KEY",
+            "--env-deny",
+            "AWS_SECRET_*",
+            "--allow",
+            ".",
+            "echo",
+        ]);
+        assert!(cli.is_ok(), "valid deny patterns should parse");
+        if let Ok(Cli {
+            command: Commands::Run(args),
+            ..
+        }) = cli
+        {
+            assert_eq!(args.sandbox.env_deny, vec!["SECRET_KEY", "AWS_SECRET_*"]);
+        }
+    }
+
+    #[test]
+    fn env_allow_malformed_pattern_fails_closed_at_parse() {
+        // Plan-required: malformed pattern fails closed BEFORE sandbox launch.
+        let cli = Cli::try_parse_from([
+            "nono",
+            "run",
+            "--env-allow",
+            "MIDDLE*STAR",
+            "--allow",
+            ".",
+            "echo",
+        ]);
+        assert!(cli.is_err(), "malformed --env-allow must reject at parse");
+        let err = cli.unwrap_err().to_string();
+        assert!(
+            err.contains("trailing suffix") || err.contains("invalid"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn env_deny_malformed_pattern_fails_closed_at_parse() {
+        let cli = Cli::try_parse_from([
+            "nono",
+            "run",
+            "--env-deny",
+            "*LEADING_STAR",
+            "--allow",
+            ".",
+            "echo",
+        ]);
+        assert!(cli.is_err(), "malformed --env-deny must reject at parse");
+    }
+
+    #[test]
+    fn env_filter_flags_do_not_collide_with_phase16_flags() {
+        // Regression guard: Phase 16's --cpu-percent / --memory / --timeout /
+        // --max-processes remain parseable alongside the new env filter flags.
+        let cli = Cli::try_parse_from([
+            "nono",
+            "run",
+            "--env-allow",
+            "PATH",
+            "--env-deny",
+            "SECRET",
+            "--cpu-percent",
+            "25",
+            "--memory",
+            "512M",
+            "--timeout",
+            "30s",
+            "--max-processes",
+            "10",
+            "--allow",
+            ".",
+            "echo",
+        ]);
+        assert!(
+            cli.is_ok(),
+            "env-filter + Phase 16 flags must coexist: {cli:?}"
+        );
+    }
+
+    #[test]
+    fn env_filter_flags_available_on_shell_and_wrap() {
+        let shell_cli =
+            Cli::try_parse_from(["nono", "shell", "--env-allow", "PATH", "--allow", "."]);
+        assert!(
+            shell_cli.is_ok(),
+            "shell env-allow should parse: {shell_cli:?}"
+        );
+
+        let wrap_cli = Cli::try_parse_from([
+            "nono",
+            "wrap",
+            "--env-deny",
+            "SECRET_*",
+            "--allow",
+            ".",
+            "echo",
+        ]);
+        assert!(wrap_cli.is_ok(), "wrap env-deny should parse: {wrap_cli:?}");
+    }
+
+    #[test]
+    fn env_allow_default_is_empty_vec() {
+        let cli = Cli::try_parse_from(["nono", "run", "--allow", ".", "echo"]).unwrap();
+        if let Commands::Run(args) = &cli.command {
+            assert!(args.sandbox.env_allow.is_empty());
+            assert!(args.sandbox.env_deny.is_empty());
+        }
     }
 }
 
