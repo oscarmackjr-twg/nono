@@ -35,14 +35,25 @@ pub mod socket;
 pub mod socket;
 pub mod types;
 
+pub use socket::SupervisorSocket;
 #[cfg(target_os = "windows")]
 pub use socket::{broker_event_to_process, broker_mutex_to_process, BrokerTargetProcess};
-pub use socket::SupervisorSocket;
 pub use types::{
-    ApprovalDecision, AuditEntry, CapabilityRequest, GrantedResourceKind, ResourceGrant,
-    ResourceTransferKind, SupervisorMessage, SupervisorResponse, UrlOpenRequest,
+    ApprovalDecision,
+    AuditEntry,
+    CapabilityRequest,
+    GrantedResourceKind,
     // Phase 18 additions:
-    HandleKind, HandleTarget, PipeDirection, SocketProtocol, SocketRole,
+    HandleKind,
+    HandleTarget,
+    PipeDirection,
+    ResourceGrant,
+    ResourceTransferKind,
+    SocketProtocol,
+    SocketRole,
+    SupervisorMessage,
+    SupervisorResponse,
+    UrlOpenRequest,
 };
 
 use crate::error::Result;

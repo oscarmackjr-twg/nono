@@ -82,11 +82,7 @@ mod tests {
     fn mask_subset_validates_correctly() {
         assert!(mask_is_allowed(HandleKind::JobObject, 0x0004, 0x0004));
         assert!(!mask_is_allowed(HandleKind::JobObject, 0x0008, 0x0004));
-        assert!(mask_is_allowed(
-            HandleKind::Event,
-            0x0010_0002,
-            0x0010_0002
-        ));
+        assert!(mask_is_allowed(HandleKind::Event, 0x0010_0002, 0x0010_0002));
         assert!(!mask_is_allowed(
             HandleKind::Event,
             EVENT_ALL_ACCESS,

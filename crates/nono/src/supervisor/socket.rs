@@ -526,7 +526,9 @@ impl Drop for SupervisorSocket {
 mod tests {
     use super::*;
     use crate::capability::AccessMode;
-    use crate::supervisor::types::{CapabilityRequest, HandleKind, SupervisorMessage, SupervisorResponse};
+    use crate::supervisor::types::{
+        CapabilityRequest, HandleKind, SupervisorMessage, SupervisorResponse,
+    };
 
     #[test]
     fn test_socket_pair_roundtrip() {

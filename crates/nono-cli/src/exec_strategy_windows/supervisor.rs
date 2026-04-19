@@ -12,7 +12,6 @@ use std::time::Instant;
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, LocalFree, BOOL, HANDLE, INVALID_HANDLE_VALUE,
 };
-use windows_sys::Win32::System::Threading::{CreateEventW, CreateMutexW};
 use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
 use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX};
@@ -24,6 +23,7 @@ use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
+use windows_sys::Win32::System::Threading::{CreateEventW, CreateMutexW};
 use windows_sys::Win32::System::Threading::{
     GetExitCodeProcess, TerminateProcess, WaitForSingleObject,
 };
@@ -1200,9 +1200,9 @@ fn audit_entry_with_redacted_token(
 /// Plan 18-01 the helper returns the hard-coded default only.
 fn resolved_mask_for_kind(kind: HandleKind) -> u32 {
     match kind {
-        HandleKind::File => 0,      // mask not used for File (uses AccessMode)
-        HandleKind::Socket => 0,    // role-based, not mask-based (Plan 18-02)
-        HandleKind::Pipe => 0,      // direction-based (Plan 18-02)
+        HandleKind::File => 0,   // mask not used for File (uses AccessMode)
+        HandleKind::Socket => 0, // role-based, not mask-based (Plan 18-02)
+        HandleKind::Pipe => 0,   // direction-based (Plan 18-02)
         HandleKind::JobObject => policy::JOB_OBJECT_DEFAULT_MASK,
         HandleKind::Event => policy::EVENT_DEFAULT_MASK,
         HandleKind::Mutex => policy::MUTEX_DEFAULT_MASK,
@@ -2030,7 +2030,11 @@ mod capability_handler_tests {
             other => panic!("unexpected response: {other:?}"),
         }
 
-        assert_eq!(backend.calls(), 1, "backend consulted once for granted Event");
+        assert_eq!(
+            backend.calls(),
+            1,
+            "backend consulted once for granted Event"
+        );
         assert_eq!(audit_log.len(), 1);
         assert_eq!(audit_log[0].request.kind, HandleKind::Event);
         assert!(matches!(
@@ -2069,11 +2073,18 @@ mod capability_handler_tests {
         .expect("dispatch");
 
         // Backend MUST NOT be consulted — mask check happens BEFORE backend.
-        assert_eq!(backend.calls(), 0, "backend must not be consulted on out-of-allowlist mask");
+        assert_eq!(
+            backend.calls(),
+            0,
+            "backend must not be consulted on out-of-allowlist mask"
+        );
         assert_eq!(audit_log.len(), 1);
         assert!(audit_log[0].decision.is_denied());
         if let nono::ApprovalDecision::Denied { reason } = &audit_log[0].decision {
-            assert!(reason.contains("access mask"), "unexpected reason: {reason}");
+            assert!(
+                reason.contains("access mask"),
+                "unexpected reason: {reason}"
+            );
             assert!(reason.contains("allowlist"), "unexpected reason: {reason}");
         } else {
             panic!("expected Denied");
@@ -2163,7 +2174,10 @@ mod capability_handler_tests {
         assert_eq!(audit_log.len(), 1);
         assert!(audit_log[0].decision.is_denied());
         if let nono::ApprovalDecision::Denied { reason } = &audit_log[0].decision {
-            assert!(reason.contains("access mask"), "unexpected reason: {reason}");
+            assert!(
+                reason.contains("access mask"),
+                "unexpected reason: {reason}"
+            );
             assert!(reason.contains("allowlist"), "unexpected reason: {reason}");
         } else {
             panic!("expected Denied");
@@ -2179,13 +2193,7 @@ mod capability_handler_tests {
         let mut audit_log = Vec::new();
 
         let token = "testtoken12345678";
-        let mut req = make_request_aipc(
-            token,
-            "unk-disc-001",
-            HandleKind::File,
-            None,
-            0,
-        );
+        let mut req = make_request_aipc(token, "unk-disc-001", HandleKind::File, None, 0);
         // SAFETY: HandleKind is #[repr(u8)] with explicit discriminators 0..=5.
         // Setting the underlying byte to 99 produces an invalid variant; the
         // discriminator-validation step is the test target. The struct field

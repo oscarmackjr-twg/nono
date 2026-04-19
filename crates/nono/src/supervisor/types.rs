@@ -501,10 +501,13 @@ mod tests {
             req.target = Some(target.clone());
             req.access_mask = 0x0010_0002;
             let json = serde_json::to_string(&req).expect("serialize");
-            let decoded: CapabilityRequest =
-                serde_json::from_str(&json).expect("deserialize");
+            let decoded: CapabilityRequest = serde_json::from_str(&json).expect("deserialize");
             assert_eq!(decoded.kind, kind, "kind round-trips for {kind:?}");
-            assert_eq!(decoded.target, Some(target), "target round-trips for {kind:?}");
+            assert_eq!(
+                decoded.target,
+                Some(target),
+                "target round-trips for {kind:?}"
+            );
             assert_eq!(decoded.access_mask, 0x0010_0002);
             assert_eq!(decoded.session_token, "tok");
         }
@@ -535,9 +538,11 @@ mod tests {
 
     #[test]
     fn resource_grant_event_constructor_shape() {
-        let grant =
-            ResourceGrant::duplicated_windows_event_handle(0xDEAD_BEEF, 0x0010_0002);
-        assert_eq!(grant.transfer, ResourceTransferKind::DuplicatedWindowsHandle);
+        let grant = ResourceGrant::duplicated_windows_event_handle(0xDEAD_BEEF, 0x0010_0002);
+        assert_eq!(
+            grant.transfer,
+            ResourceTransferKind::DuplicatedWindowsHandle
+        );
         assert_eq!(grant.resource_kind, GrantedResourceKind::Event);
         assert_eq!(grant.raw_handle, Some(0xDEAD_BEEF));
         assert!(grant.protocol_info_blob.is_none());
@@ -545,9 +550,11 @@ mod tests {
 
     #[test]
     fn resource_grant_mutex_constructor_shape() {
-        let grant =
-            ResourceGrant::duplicated_windows_mutex_handle(0xCAFE_F00D, 0x0010_0001);
-        assert_eq!(grant.transfer, ResourceTransferKind::DuplicatedWindowsHandle);
+        let grant = ResourceGrant::duplicated_windows_mutex_handle(0xCAFE_F00D, 0x0010_0001);
+        assert_eq!(
+            grant.transfer,
+            ResourceTransferKind::DuplicatedWindowsHandle
+        );
         assert_eq!(grant.resource_kind, GrantedResourceKind::Mutex);
         assert_eq!(grant.raw_handle, Some(0xCAFE_F00D));
         assert!(grant.protocol_info_blob.is_none());
@@ -557,8 +564,7 @@ mod tests {
     fn socket_protocol_info_blob_variant_round_trips() {
         let kind = ResourceTransferKind::SocketProtocolInfoBlob;
         let json = serde_json::to_string(&kind).expect("serialize");
-        let decoded: ResourceTransferKind =
-            serde_json::from_str(&json).expect("deserialize");
+        let decoded: ResourceTransferKind = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded, ResourceTransferKind::SocketProtocolInfoBlob);
         assert!(json.contains("SocketProtocolInfoBlob"));
     }

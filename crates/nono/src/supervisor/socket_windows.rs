@@ -1099,8 +1099,7 @@ mod tests {
         use windows_sys::Win32::System::Threading::CreateEventW;
         // SAFETY: anonymous event creation with NULL attributes/name. Manual
         // reset = FALSE, initial state = FALSE.
-        let event: HANDLE =
-            unsafe { CreateEventW(std::ptr::null_mut(), 0, 0, std::ptr::null()) };
+        let event: HANDLE = unsafe { CreateEventW(std::ptr::null_mut(), 0, 0, std::ptr::null()) };
         assert!(
             !event.is_null(),
             "CreateEventW failed: {}",
@@ -1113,7 +1112,10 @@ mod tests {
             crate::supervisor::policy::EVENT_DEFAULT_MASK,
         )
         .expect("duplicate event into current process");
-        assert_eq!(grant.transfer, ResourceTransferKind::DuplicatedWindowsHandle);
+        assert_eq!(
+            grant.transfer,
+            ResourceTransferKind::DuplicatedWindowsHandle
+        );
         assert_eq!(
             grant.resource_kind,
             crate::supervisor::types::GrantedResourceKind::Event
@@ -1152,8 +1154,7 @@ mod tests {
         use windows_sys::Win32::System::Threading::CreateMutexW;
         // SAFETY: anonymous mutex creation with NULL attributes/name. Initial
         // owner = FALSE.
-        let mutex: HANDLE =
-            unsafe { CreateMutexW(std::ptr::null_mut(), 0, std::ptr::null()) };
+        let mutex: HANDLE = unsafe { CreateMutexW(std::ptr::null_mut(), 0, std::ptr::null()) };
         assert!(
             !mutex.is_null(),
             "CreateMutexW failed: {}",
@@ -1166,7 +1167,10 @@ mod tests {
             crate::supervisor::policy::MUTEX_DEFAULT_MASK,
         )
         .expect("duplicate mutex into current process");
-        assert_eq!(grant.transfer, ResourceTransferKind::DuplicatedWindowsHandle);
+        assert_eq!(
+            grant.transfer,
+            ResourceTransferKind::DuplicatedWindowsHandle
+        );
         assert_eq!(
             grant.resource_kind,
             crate::supervisor::types::GrantedResourceKind::Mutex
