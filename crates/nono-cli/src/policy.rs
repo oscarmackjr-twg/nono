@@ -123,6 +123,11 @@ pub struct ProfileDef {
     pub allow_launch_services: Option<bool>,
     #[serde(default)]
     pub interactive: bool,
+    /// Phase 18 Plan 18-03: per-handle-type AIPC capability widening
+    /// (CapabilitiesConfig.aipc). Built-in profiles set this in policy.json;
+    /// default is `None` aipc block (hard-coded supervisor defaults apply).
+    #[serde(default)]
+    pub capabilities: profile::CapabilitiesConfig,
 }
 
 impl ProfileDef {
@@ -154,6 +159,10 @@ impl ProfileDef {
             allow_launch_services: self.allow_launch_services,
             interactive: self.interactive,
             skipdirs: Vec::new(),
+            // Phase 18 Plan 18-03: forward the `capabilities` block from
+            // policy.json verbatim. Default (empty `CapabilitiesConfig`) means
+            // the hard-coded supervisor defaults apply (D-05).
+            capabilities: self.capabilities.clone(),
         }
     }
 }

@@ -1,10 +1,13 @@
 use super::*;
+use crate::profile::AipcResolvedAllowlist;
 use nono::supervisor::policy;
 use nono::supervisor::socket::{
     bind_aipc_pipe, broker_event_to_process, broker_job_object_to_process, broker_mutex_to_process,
     broker_pipe_to_process, broker_socket_to_process, broker_target_pid,
 };
-use nono::supervisor::{HandleKind, HandleTarget, PipeDirection, SocketProtocol, SocketRole};
+use nono::supervisor::{HandleKind, HandleTarget, PipeDirection, SocketProtocol};
+#[cfg(all(test, target_os = "windows"))]
+use nono::supervisor::SocketRole;
 use std::io::{Read, Write};
 use std::mem::ManuallyDrop;
 use std::os::windows::ffi::OsStrExt;
@@ -257,6 +260,21 @@ pub(super) struct WindowsSupervisorRuntime {
     /// declaring `containment` BEFORE `WindowsSupervisorRuntime::initialize` in
     /// `execute_supervised` so `containment` outlives the runtime in drop order.
     containment_job: windows_sys::Win32::Foundation::HANDLE,
+    /// AIPC-01 (Phase 18) per-handle-type access allowlist resolved at
+    /// supervisor construction time from `Profile::resolve_aipc_allowlist`
+    /// (hard-coded supervisor defaults ∪ profile widening). Cloned `Arc` into
+    /// the capability pipe server thread closure; consulted by every per-kind
+    /// helper (`handle_event_request`, `handle_mutex_request`,
+    /// `handle_pipe_request`, `handle_socket_request`,
+    /// `handle_job_object_request`) for the per-request mask / role /
+    /// direction validation step.
+    ///
+    /// Currently populated with `Default::default()` (matching D-05 defaults
+    /// byte-for-byte). A future plan will thread `SupervisorConfig` through to
+    /// carry the loaded `Profile`'s resolved allowlist; the default-only
+    /// behavior preserved here matches the pre-Plan-18-03 hard-coded
+    /// resolved_mask_for_kind semantics 1:1.
+    resolved_aipc_allowlist: std::sync::Arc<crate::profile::AipcResolvedAllowlist>,
 }
 
 /// Compute the absolute deadline `Instant` for a supervisor-side wall-clock
@@ -333,6 +351,16 @@ impl WindowsSupervisorRuntime {
             approval_backend: supervisor.approval_backend.clone(),
             timeout_deadline,
             containment_job,
+            // Phase 18 Plan 18-03: defaults match the pre-Plan-18-03
+            // hard-coded resolved_mask_for_kind semantics. A future plan will
+            // populate from supervisor.resolved_aipc_allowlist (loaded via
+            // Profile::resolve_aipc_allowlist) once SupervisorConfig carries
+            // the resolved allowlist field. Until then, the default Connect-
+            // only / read-OR-write / QUERY / wait+signal / wait+release
+            // behavior is preserved byte-identical with Plans 18-01 + 18-02.
+            resolved_aipc_allowlist: std::sync::Arc::new(
+                crate::profile::AipcResolvedAllowlist::default(),
+            ),
         };
 
         // Phase 17 reorder (RESEARCH.md Pitfall 5): start_control_pipe_server
@@ -412,6 +440,9 @@ impl WindowsSupervisorRuntime {
         // and the thread closure both BORROW it for the lifetime of the
         // session. SendableHandle wraps a raw HANDLE for Send/Sync.
         let runtime_containment_job = SendableHandle(self.containment_job);
+        // Phase 18 Plan 18-03: clone the resolved AIPC allowlist Arc into
+        // the thread closure so all per-kind helpers consult it.
+        let resolved_aipc_allowlist = self.resolved_aipc_allowlist.clone();
 
         std::thread::spawn(move || {
             // Disjoint capture safety: bind the SendableHandle wrapper to a
@@ -485,6 +516,7 @@ impl WindowsSupervisorRuntime {
                             &session_token,
                             &user_session_id,
                             runtime_containment_job_local.0,
+                            resolved_aipc_allowlist.as_ref(),
                         ) {
                             tracing::warn!(
                                 session_id = %session_id,
@@ -1217,21 +1249,6 @@ fn audit_entry_with_redacted_token(
     }
 }
 
-/// Resolve the per-handle-type access-mask allowlist (D-05 hard-coded
-/// defaults). Plan 18-03 layers profile widening on top via a
-/// `resolved_aipc_allowlist` field on `WindowsSupervisorRuntime`; for
-/// Plan 18-01 the helper returns the hard-coded default only.
-fn resolved_mask_for_kind(kind: HandleKind) -> u32 {
-    match kind {
-        HandleKind::File => 0,   // mask not used for File (uses AccessMode)
-        HandleKind::Socket => 0, // role-based, not mask-based (Plan 18-02)
-        HandleKind::Pipe => 0,   // direction-based (Plan 18-02)
-        HandleKind::JobObject => policy::JOB_OBJECT_DEFAULT_MASK,
-        HandleKind::Event => policy::EVENT_DEFAULT_MASK,
-        HandleKind::Mutex => policy::MUTEX_DEFAULT_MASK,
-    }
-}
-
 /// Server-side validation of a leaf name supplied by the child for an AIPC
 /// kernel-object request (Event/Mutex/Pipe/Job Object). Per CONTEXT.md
 /// `<specifics>` line 168, the server canonicalizes the namespace prefix
@@ -1268,6 +1285,7 @@ fn handle_event_request(
     request: &nono::CapabilityRequest,
     target_process: nono::BrokerTargetProcess,
     user_session_id: &str,
+    resolved_allowlist: &AipcResolvedAllowlist,
 ) -> Result<Option<nono::supervisor::ResourceGrant>> {
     let raw_name = match request.target.as_ref() {
         Some(HandleTarget::EventName { name }) => name,
@@ -1278,7 +1296,9 @@ fn handle_event_request(
         }
     };
     validate_aipc_object_name(raw_name)?;
-    let resolved = resolved_mask_for_kind(HandleKind::Event);
+    // Plan 18-03: profile widening replaces the hard-coded D-05 default.
+    // The default-deny baseline is preserved by `AipcResolvedAllowlist::default`.
+    let resolved = resolved_allowlist.event_mask;
     if !policy::mask_is_allowed(HandleKind::Event, request.access_mask, resolved) {
         return Err(NonoError::SandboxInit(format!(
             "access mask 0x{:08x} not in allowlist for Event (resolved: 0x{:08x})",
@@ -1336,6 +1356,7 @@ fn handle_pipe_request(
     request: &nono::CapabilityRequest,
     target_process: nono::BrokerTargetProcess,
     user_session_id: &str,
+    resolved_allowlist: &AipcResolvedAllowlist,
 ) -> Result<Option<nono::supervisor::ResourceGrant>> {
     let raw_name = match request.target.as_ref() {
         Some(HandleTarget::PipeName { name }) => name,
@@ -1364,14 +1385,15 @@ fn handle_pipe_request(
         }
     };
 
-    // Default per D-05: read OR write (not both); ReadWrite requires profile
-    // widening (Plan 18-03 layers the profile-widening lookup on top). Plan
-    // 18-02 ships with default-only enforcement.
-    if matches!(direction, PipeDirection::ReadWrite) {
-        return Err(NonoError::SandboxInit(
-            "pipe direction ReadWrite not in default allowlist (profile widening required)"
-                .to_string(),
-        ));
+    // Plan 18-03: profile widening lookup replaces the Plan 18-02
+    // hard-coded "ReadWrite requires profile widening" branch. The default
+    // allowlist (`AipcResolvedAllowlist::default()`) contains only
+    // [Read, Write], so `ReadWrite` still falls through to Denied unless
+    // a profile explicitly widens.
+    if !resolved_allowlist.pipe_directions.contains(&direction) {
+        return Err(NonoError::SandboxInit(format!(
+            "pipe direction {direction:?} not in resolved allowlist (profile widening required)"
+        )));
     }
 
     // Phase 17 latent-bug carry-forward: namespace prefix MUST use
@@ -1418,6 +1440,7 @@ fn handle_socket_request(
     request: &nono::CapabilityRequest,
     target_process: nono::BrokerTargetProcess,
     _user_session_id: &str,
+    resolved_allowlist: &AipcResolvedAllowlist,
 ) -> Result<Option<nono::supervisor::ResourceGrant>> {
     let (protocol, host, port, role) = match request.target.as_ref() {
         Some(HandleTarget::SocketEndpoint {
@@ -1442,11 +1465,13 @@ fn handle_socket_request(
         )));
     }
 
-    // Role validation — Plan 18-02 default allowlist: Connect only.
-    // Plan 18-03 wires the profile-widening lookup; for now hard-coded.
-    if !matches!(role, SocketRole::Connect) {
+    // Plan 18-03: profile widening lookup replaces the Plan 18-02
+    // hard-coded "Connect-only" check. The default allowlist
+    // (`AipcResolvedAllowlist::default()`) is `[Connect]`; Bind/Listen
+    // require profile opt-in via `capabilities.aipc.socket`.
+    if !resolved_allowlist.socket_roles.contains(&role) {
         return Err(NonoError::SandboxInit(format!(
-            "socket role {role:?} not in default allowlist (profile widening required)"
+            "socket role {role:?} not in resolved allowlist (profile widening required)"
         )));
     }
 
@@ -1521,6 +1546,7 @@ fn handle_mutex_request(
     request: &nono::CapabilityRequest,
     target_process: nono::BrokerTargetProcess,
     user_session_id: &str,
+    resolved_allowlist: &AipcResolvedAllowlist,
 ) -> Result<Option<nono::supervisor::ResourceGrant>> {
     let raw_name = match request.target.as_ref() {
         Some(HandleTarget::MutexName { name }) => name,
@@ -1531,7 +1557,8 @@ fn handle_mutex_request(
         }
     };
     validate_aipc_object_name(raw_name)?;
-    let resolved = resolved_mask_for_kind(HandleKind::Mutex);
+    // Plan 18-03: profile widening replaces the hard-coded D-05 default.
+    let resolved = resolved_allowlist.mutex_mask;
     if !policy::mask_is_allowed(HandleKind::Mutex, request.access_mask, resolved) {
         return Err(NonoError::SandboxInit(format!(
             "access mask 0x{:08x} not in allowlist for Mutex (resolved: 0x{:08x})",
@@ -1589,6 +1616,7 @@ fn handle_job_object_request(
     target_process: nono::BrokerTargetProcess,
     user_session_id: &str,
     runtime_containment_job: HANDLE,
+    resolved_allowlist: &AipcResolvedAllowlist,
 ) -> Result<Option<nono::supervisor::ResourceGrant>> {
     let raw_name = match request.target.as_ref() {
         Some(HandleTarget::JobObjectName { name }) => name,
@@ -1600,8 +1628,10 @@ fn handle_job_object_request(
     };
     validate_aipc_object_name(raw_name)?;
 
-    // Mask validation against the resolved per-type allowlist.
-    let resolved = resolved_mask_for_kind(HandleKind::JobObject);
+    // Plan 18-03: profile widening replaces the hard-coded D-05 default.
+    // The runtime guard below ALSO fires regardless of resolved mask
+    // (containment-Job hijack defense — T-18-03-01).
+    let resolved = resolved_allowlist.job_object_mask;
     if !policy::mask_is_allowed(HandleKind::JobObject, request.access_mask, resolved) {
         return Err(NonoError::SandboxInit(format!(
             "access mask 0x{:08x} not in allowlist for JobObject (resolved: 0x{:08x})",
@@ -1681,13 +1711,12 @@ fn handle_job_object_request(
 /// the inbound `CapabilityRequest.session_token` BEFORE the approval backend
 /// is consulted. The token is NEVER logged and is redacted before any
 /// `AuditEntry` is constructed.
-// Note: 9 parameters is intentional — packing the dispatcher state into a
+// Note: 10 parameters is intentional — packing the dispatcher state into a
 // struct would obscure the per-call ownership semantics of the borrowed
 // `seen_request_ids` and `audit_log` mut refs vs the shared session
-// token + user_session_id strings. Phase 18 Plan 18-03 added
-// `runtime_containment_job` for the Job Object containment-Job runtime guard
-// (CONTEXT.md D-05 footnote — refuse to broker the supervisor's own
-// containment Job regardless of profile widening).
+// token + user_session_id strings + resolved allowlist. Phase 18 Plan 18-03
+// added `runtime_containment_job` for the Job Object containment-Job runtime
+// guard AND `resolved_allowlist` for the profile widening lookup (D-05/D-06).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn handle_windows_supervisor_message(
     sock: &mut nono::SupervisorSocket,
@@ -1699,6 +1728,7 @@ pub(super) fn handle_windows_supervisor_message(
     expected_session_token: &str,
     user_session_id: &str,
     runtime_containment_job: HANDLE,
+    resolved_allowlist: &AipcResolvedAllowlist,
 ) -> Result<()> {
     match msg {
         nono::supervisor::SupervisorMessage::Request(request) => {
@@ -1775,19 +1805,27 @@ pub(super) fn handle_windows_supervisor_message(
             }
 
             // Server-side per-kind mask validation (D-07). For HandleKind::File
-            // the mask is unused (Phase 11 path uses AccessMode); for the
-            // not-yet-wired Socket/Pipe arms the resolved mask is 0 so any
-            // non-zero requested mask is denied — that's intentional and
-            // gets fleshed out in Plans 18-02/18-03.
-            //
-            // For Event and Mutex this is the load-bearing pre-broker check.
-            // We perform it BEFORE the backend dispatch so an out-of-allowlist
-            // request never reaches the user's approval prompt.
+            // the mask is unused (Phase 11 path uses AccessMode); for
+            // Socket/Pipe the validation is role/direction-based and lives
+            // inside the per-kind helpers (NOT mask-based here). For
+            // Event/Mutex/JobObject this is the load-bearing pre-broker
+            // check. We perform it BEFORE the backend dispatch so an
+            // out-of-allowlist request never reaches the user's approval
+            // prompt. Phase 18 Plan 18-03: the resolved allowlist now
+            // comes from `Profile::resolve_aipc_allowlist` (hard-coded
+            // default ∪ profile widening, D-05 + D-06).
             if matches!(
                 request.kind,
                 HandleKind::Event | HandleKind::Mutex | HandleKind::JobObject
             ) {
-                let resolved = resolved_mask_for_kind(request.kind);
+                let resolved = match request.kind {
+                    HandleKind::Event => resolved_allowlist.event_mask,
+                    HandleKind::Mutex => resolved_allowlist.mutex_mask,
+                    HandleKind::JobObject => resolved_allowlist.job_object_mask,
+                    // unreachable per the matches! gate above; keeps `match`
+                    // exhaustive without a default arm.
+                    _ => 0,
+                };
                 if !policy::mask_is_allowed(request.kind, request.access_mask, resolved) {
                     let decision = nono::ApprovalDecision::Denied {
                         reason: format!(
@@ -1834,23 +1872,36 @@ pub(super) fn handle_windows_supervisor_message(
                             Err(e) => Err(e),
                         }
                     }
-                    HandleKind::Event => {
-                        handle_event_request(&request, target_process, user_session_id)
-                    }
-                    HandleKind::Mutex => {
-                        handle_mutex_request(&request, target_process, user_session_id)
-                    }
-                    HandleKind::Pipe => {
-                        handle_pipe_request(&request, target_process, user_session_id)
-                    }
-                    HandleKind::Socket => {
-                        handle_socket_request(&request, target_process, user_session_id)
-                    }
+                    HandleKind::Event => handle_event_request(
+                        &request,
+                        target_process,
+                        user_session_id,
+                        resolved_allowlist,
+                    ),
+                    HandleKind::Mutex => handle_mutex_request(
+                        &request,
+                        target_process,
+                        user_session_id,
+                        resolved_allowlist,
+                    ),
+                    HandleKind::Pipe => handle_pipe_request(
+                        &request,
+                        target_process,
+                        user_session_id,
+                        resolved_allowlist,
+                    ),
+                    HandleKind::Socket => handle_socket_request(
+                        &request,
+                        target_process,
+                        user_session_id,
+                        resolved_allowlist,
+                    ),
                     HandleKind::JobObject => handle_job_object_request(
                         &request,
                         target_process,
                         user_session_id,
                         runtime_containment_job,
+                        resolved_allowlist,
                     ),
                 };
                 match result {
@@ -2037,6 +2088,7 @@ mod capability_handler_tests {
             "expected-token",
             "testaipc12345678",
             std::ptr::null_mut(),
+            &AipcResolvedAllowlist::default(),
         )
         .expect("handle");
 
@@ -2078,6 +2130,7 @@ mod capability_handler_tests {
             "right",
             "testaipc12345678",
             std::ptr::null_mut(),
+            &AipcResolvedAllowlist::default(),
         )
         .expect("handle");
 
@@ -2106,6 +2159,7 @@ mod capability_handler_tests {
             "the-token",
             "testaipc12345678",
             std::ptr::null_mut(),
+            &AipcResolvedAllowlist::default(),
         )
         .expect("handle");
 
@@ -2141,6 +2195,7 @@ mod capability_handler_tests {
             sensitive_token,
             "testaipc12345678",
             std::ptr::null_mut(),
+            &AipcResolvedAllowlist::default(),
         )
         .expect("handle");
 
@@ -2173,6 +2228,7 @@ mod capability_handler_tests {
             "the-token",
             "testaipc12345678",
             std::ptr::null_mut(),
+            &AipcResolvedAllowlist::default(),
         )
         .expect("first handle");
 
@@ -2187,6 +2243,7 @@ mod capability_handler_tests {
             "the-token",
             "testaipc12345678",
             std::ptr::null_mut(),
+            &AipcResolvedAllowlist::default(),
         )
         .expect("second handle");
 
@@ -2230,6 +2287,7 @@ mod capability_handler_tests {
             sensitive,
             "testaipc12345678",
             std::ptr::null_mut(),
+            &AipcResolvedAllowlist::default(),
         )
         .expect("handle");
 
@@ -2268,6 +2326,7 @@ mod capability_handler_tests {
             "right",
             "testaipc12345678",
             std::ptr::null_mut(),
+            &AipcResolvedAllowlist::default(),
         )
         .expect("handle");
 
@@ -2333,6 +2392,7 @@ mod capability_handler_tests {
             token,
             "testaipc12345678",
             std::ptr::null_mut(),
+            &AipcResolvedAllowlist::default(),
         )
         .expect("dispatch");
 
@@ -2396,6 +2456,7 @@ mod capability_handler_tests {
             token,
             "testaipc12345678",
             std::ptr::null_mut(),
+            &AipcResolvedAllowlist::default(),
         )
         .expect("dispatch");
 
@@ -2446,6 +2507,7 @@ mod capability_handler_tests {
             token,
             "testaipc12345678",
             std::ptr::null_mut(),
+            &AipcResolvedAllowlist::default(),
         )
         .expect("dispatch");
 
@@ -2497,6 +2559,7 @@ mod capability_handler_tests {
             token,
             "testaipc12345678",
             std::ptr::null_mut(),
+            &AipcResolvedAllowlist::default(),
         )
         .expect("dispatch");
         assert_eq!(backend.calls(), 0);
@@ -2541,6 +2604,7 @@ mod capability_handler_tests {
             token,
             "testaipc12345678",
             std::ptr::null_mut(),
+            &AipcResolvedAllowlist::default(),
         )
         .expect("dispatch");
 
@@ -2582,6 +2646,7 @@ mod capability_handler_tests {
             sensitive,
             "testaipc12345678",
             std::ptr::null_mut(),
+            &AipcResolvedAllowlist::default(),
         )
         .expect("dispatch");
 
@@ -2627,6 +2692,7 @@ mod capability_handler_tests {
             sensitive,
             "testaipc12345678",
             std::ptr::null_mut(),
+            &AipcResolvedAllowlist::default(),
         )
         .expect("dispatch");
 
@@ -2676,6 +2742,7 @@ mod capability_handler_tests {
             token,
             "testaipc12345678",
             std::ptr::null_mut(),
+            &AipcResolvedAllowlist::default(),
         )
         .expect("dispatch");
 
@@ -2730,6 +2797,7 @@ mod capability_handler_tests {
             token,
             "testaipc12345678",
             std::ptr::null_mut(),
+            &AipcResolvedAllowlist::default(),
         )
         .expect("dispatch");
 
@@ -2785,6 +2853,7 @@ mod capability_handler_tests {
             token,
             "testaipc12345678",
             std::ptr::null_mut(),
+            &AipcResolvedAllowlist::default(),
         )
         .expect("dispatch");
 
@@ -2852,6 +2921,7 @@ mod capability_handler_tests {
             token,
             "testaipc12345678",
             std::ptr::null_mut(),
+            &AipcResolvedAllowlist::default(),
         )
         .expect("dispatch");
 
@@ -2902,6 +2972,7 @@ mod capability_handler_tests {
             token,
             "testaipc12345678",
             std::ptr::null_mut(),
+            &AipcResolvedAllowlist::default(),
         )
         .expect("dispatch");
 
@@ -2946,6 +3017,7 @@ mod capability_handler_tests {
             sensitive,
             "testaipc12345678",
             std::ptr::null_mut(),
+            &AipcResolvedAllowlist::default(),
         )
         .expect("dispatch");
 
@@ -2993,6 +3065,7 @@ mod capability_handler_tests {
             sensitive,
             "testaipc12345678",
             std::ptr::null_mut(),
+            &AipcResolvedAllowlist::default(),
         )
         .expect("dispatch");
 
@@ -3066,6 +3139,7 @@ mod capability_handler_tests {
             token,
             "testaipc12345678",
             std::ptr::null_mut(), // no containment job — guard does not fire
+            &AipcResolvedAllowlist::default(),
         )
         .expect("dispatch");
 
@@ -3123,6 +3197,7 @@ mod capability_handler_tests {
             token,
             "testaipc12345678",
             std::ptr::null_mut(),
+            &AipcResolvedAllowlist::default(),
         )
         .expect("dispatch");
 
@@ -3198,6 +3273,7 @@ mod capability_handler_tests {
             token,
             "testaipc12345678",
             containment, // the runtime guard target
+            &AipcResolvedAllowlist::default(),
         )
         .expect("dispatch");
 
@@ -3272,6 +3348,7 @@ mod capability_handler_tests {
             sensitive,
             "testaipc12345678",
             std::ptr::null_mut(),
+            &AipcResolvedAllowlist::default(),
         )
         .expect("dispatch");
 
@@ -3291,6 +3368,144 @@ mod capability_handler_tests {
         // SAFETY: `pre_created` is a live HANDLE returned by CreateJobObjectW.
         unsafe {
             CloseHandle(pre_created);
+        }
+    }
+
+    // Phase 18 AIPC-01 Plan 18-03 Task 2 — profile-widening dispatcher tests
+    // (regression: default-only profiles still deny widened paths;
+    // widening unlocks the path; containment-Job runtime guard fires
+    // regardless of widening).
+
+    #[test]
+    fn handle_brokers_socket_with_bind_role_when_profile_widens() {
+        let backend = CountingGrantBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        // Profile-widened allowlist: Connect AND Bind.
+        let mut allowlist = AipcResolvedAllowlist::default();
+        allowlist.socket_roles.push(SocketRole::Bind);
+
+        let token = "testtoken12345678";
+        let req = make_request_aipc(
+            token,
+            "sock-bind-widened-001",
+            HandleKind::Socket,
+            Some(HandleTarget::SocketEndpoint {
+                protocol: SocketProtocol::Tcp,
+                host: "127.0.0.1".to_string(),
+                port: 8080,
+                role: SocketRole::Bind, // widened path
+            }),
+            0,
+        );
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(req),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            token,
+            "testaipc12345678",
+            std::ptr::null_mut(),
+            &allowlist,
+        )
+        .expect("dispatch");
+
+        assert_eq!(backend.calls(), 1);
+        assert_eq!(audit_log.len(), 1);
+        let response = child.recv_response().expect("response");
+        match response {
+            nono::supervisor::SupervisorResponse::Decision { grant, .. } => {
+                assert!(
+                    grant.is_some(),
+                    "Bind role with profile widening must produce grant=Some"
+                );
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn handle_denies_job_object_brokering_of_containment_job_even_with_profile_widening() {
+        let backend = CountingGrantBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        // Pre-create the same canonical the dispatcher will OpenJobObjectW.
+        let canonical = "Local\\nono-aipc-testaipc12345678-orch-widened";
+        let wide: Vec<u16> = std::ffi::OsStr::new(canonical)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: Named Job Object creation matching the dispatcher canonical.
+        let containment: HANDLE = unsafe {
+            windows_sys::Win32::System::JobObjects::CreateJobObjectW(
+                std::ptr::null_mut(),
+                wide.as_ptr(),
+            )
+        };
+        assert!(
+            !containment.is_null(),
+            "CreateJobObjectW for containment stand-in failed: {}",
+            std::io::Error::last_os_error()
+        );
+
+        // Profile-widened allowlist that includes JOB_OBJECT_TERMINATE.
+        // The runtime guard MUST still fire — defense-in-depth on top of
+        // the mask validation.
+        let mut allowlist = AipcResolvedAllowlist::default();
+        allowlist.job_object_mask |= policy::JOB_OBJECT_TERMINATE;
+
+        let token = "testtoken12345678";
+        let req = make_request_aipc(
+            token,
+            "job-containment-guard-widened-001",
+            HandleKind::JobObject,
+            Some(HandleTarget::JobObjectName {
+                name: "orch-widened".to_string(),
+            }),
+            policy::JOB_OBJECT_QUERY | policy::JOB_OBJECT_TERMINATE,
+        );
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(req),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            token,
+            "testaipc12345678",
+            containment, // the runtime guard target
+            &allowlist,
+        )
+        .expect("dispatch");
+
+        // Backend WAS consulted (mask is now allowed by widening); the
+        // runtime guard still fires INSIDE handle_job_object_request,
+        // producing grant=None even though the mask check passed. This
+        // proves the runtime guard is structurally above the profile
+        // widening — the worst case (terminating the supervisor's own
+        // containment Job) is impossible.
+        assert_eq!(backend.calls(), 1);
+        assert_eq!(audit_log.len(), 1);
+        let response = child.recv_response().expect("drain");
+        match response {
+            nono::supervisor::SupervisorResponse::Decision { grant, .. } => {
+                assert!(
+                    grant.is_none(),
+                    "containment-Job runtime guard must fire EVEN when profile widens TERMINATE"
+                );
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+
+        // SAFETY: `containment` is a live HANDLE returned by CreateJobObjectW.
+        unsafe {
+            CloseHandle(containment);
         }
     }
 }
