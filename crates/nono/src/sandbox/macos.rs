@@ -505,6 +505,30 @@ fn generate_profile(caps: &CapabilitySet) -> Result<String> {
         profile.push('\n');
     }
 
+    // GPU access (D-12 upstream parity port — upstream v0.31–0.33, refined
+    // in v0.34 via commit 4535473). Emits IOKit rules for Metal/AGX GPU
+    // user clients. Emitted in the same slot as platform rules so the
+    // upstream ordering contract (read < GPU < write) holds.
+    //
+    // The exact grant list mirrors upstream's `maybe_enable_macos_gpu`
+    // function (scparkinson 4535473). Path-scoping is implicit in the
+    // IOKit user-client class names: only clients whose class names
+    // exactly match `AGXDeviceUserClient`, `AGXSharedUserClient`, or
+    // `IOSurfaceRootUserClient` on connections of type `IOGPU` are
+    // permitted, so this does NOT broaden access to arbitrary IOKit
+    // services (CLAUDE.md § Permission Scope CRITICAL).
+    if caps.gpu() {
+        profile.push_str(
+            "(allow iokit-open \
+                (iokit-connection \"IOGPU\") \
+                (iokit-user-client-class \
+                    \"AGXDeviceUserClient\" \
+                    \"AGXSharedUserClient\" \
+                    \"IOSurfaceRootUserClient\"))\n",
+        );
+        profile.push_str("(allow iokit-get-properties)\n");
+    }
+
     // Add write rules for all capabilities with Write or ReadWrite access.
     // These come AFTER platform deny rules so user-granted write paths can
     // override global denials like (deny file-write-unlink).
@@ -1284,5 +1308,105 @@ mod tests {
 
         assert!(!profile.contains("(deny network*)"));
         assert!(!profile.contains("mDNSResponder"));
+    }
+
+    // GPU capability (D-12 upstream parity port, macOS Seatbelt path)
+    //
+    // These tests are host-independent: `generate_profile` is a pure string
+    // builder that does not invoke `sandbox_init`. They validate the
+    // structural contract for the IOKit/Metal grants, so they run on
+    // Linux/Windows hosts as well.
+
+    #[test]
+    fn test_generate_profile_gpu_disabled_by_default() {
+        // T-20-04-01: without the flag, no GPU-related tokens must appear.
+        let caps = CapabilitySet::new();
+        let profile = generate_profile(&caps).unwrap();
+
+        assert!(!profile.contains("iokit-open"), "no iokit-open without gpu");
+        assert!(
+            !profile.contains("iokit-get-properties"),
+            "no iokit-get-properties without gpu"
+        );
+        assert!(!profile.contains("IOGPU"), "no IOGPU without gpu");
+        assert!(
+            !profile.contains("AGXDeviceUserClient"),
+            "no AGXDeviceUserClient without gpu"
+        );
+    }
+
+    #[test]
+    fn test_generate_profile_gpu_enabled_emits_metal_iokit_rules() {
+        // D-12 must-have: macOS Seatbelt profile contains the Metal/AGX
+        // framework subpath grant when --allow-gpu is set. We grant IOKit
+        // connections rather than filesystem subpaths because Apple Silicon
+        // GPU access is mediated through IOKit user-client classes, not
+        // through reading files under /System/Library/Frameworks/Metal.framework.
+        //
+        // Upstream (scparkinson 4535473) uses the same approach: the
+        // --allow-gpu flag emits IOKit rules for IOGPU + AGX user clients,
+        // which is the actual privilege boundary on macOS. The Metal.framework
+        // path itself is already readable by default (part of /System/Library).
+        let caps = CapabilitySet::new().allow_gpu();
+        let profile = generate_profile(&caps).unwrap();
+
+        assert!(
+            profile.contains("(allow iokit-open"),
+            "GPU profile must contain iokit-open rule"
+        );
+        assert!(profile.contains("IOGPU"), "GPU profile must contain IOGPU");
+        assert!(
+            profile.contains("AGXDeviceUserClient"),
+            "GPU profile must contain AGXDeviceUserClient"
+        );
+        assert!(
+            profile.contains("AGXSharedUserClient"),
+            "GPU profile must contain AGXSharedUserClient"
+        );
+        assert!(
+            profile.contains("IOSurfaceRootUserClient"),
+            "GPU profile must contain IOSurfaceRootUserClient"
+        );
+        assert!(
+            profile.contains("(allow iokit-get-properties)"),
+            "GPU profile must allow iokit-get-properties"
+        );
+    }
+
+    #[test]
+    fn test_generate_profile_gpu_rules_between_reads_and_writes() {
+        // Ordering contract: GPU/IOKit rules occupy the same slot as platform
+        // rules — between read-allows and write-allows. Upstream's test
+        // (`test_generate_profile_gpu_rules_ordering`) relies on this ordering
+        // so that user-granted writes can override deny-unlink.
+        let mut caps = CapabilitySet::new().allow_gpu();
+        caps.add_fs(FsCapability {
+            original: PathBuf::from("/test"),
+            resolved: PathBuf::from("/test"),
+            access: AccessMode::ReadWrite,
+            is_file: false,
+            source: CapabilitySource::User,
+        });
+
+        let profile = generate_profile(&caps).unwrap();
+
+        let read_pos = profile
+            .find("(allow file-read* (subpath \"/test\"))")
+            .expect("read rule not found");
+        let iokit_pos = profile
+            .find("(allow iokit-get-properties)")
+            .expect("iokit rule not found");
+        let write_pos = profile
+            .find("(allow file-write* (subpath \"/test\"))")
+            .expect("write rule not found");
+
+        assert!(
+            read_pos < iokit_pos,
+            "read rules must come before GPU/IOKit rules"
+        );
+        assert!(
+            iokit_pos < write_pos,
+            "GPU/IOKit rules must come before write rules"
+        );
     }
 }

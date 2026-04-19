@@ -644,6 +644,24 @@ pub fn apply_with_abi(caps: &CapabilitySet, abi: &DetectedAbi) -> Result<Seccomp
             })?;
     }
 
+    // GPU capability dispatch (D-12 upstream parity port, Linux Landlock).
+    //
+    // When `--allow-gpu` is set the Landlock allowlist must include NVIDIA
+    // compute devices (`/dev/nvidia*`, `nvidiactl`, `nvidia-uvm`,
+    // `nvidia-uvm-tools`, `nvidia-caps`), DRM render nodes
+    // (`/dev/dri/renderD*`), AMD KFD (`/dev/kfd`), and NVIDIA procfs
+    // entries (`/proc/driver/nvidia`, `/proc/driver/nvidia-uvm`) required
+    // for CUDA initialisation under driver 570+ (upstream 4df0a8e).
+    //
+    // Task 2 (D-12) only wires the capability and emits macOS grants; the
+    // Linux device-node + procfs list is added by Task 3 (D-13). Keep this
+    // branch as a compiling no-op so Task 2 ships atomically per D-17.
+    if caps.gpu() {
+        // NVIDIA procfs + /dev/nvidia-uvm-tools allowlist lands in Task 3 (D-13).
+        // Deliberately empty — see docblock above.
+        let _ = &mut ruleset;
+    }
+
     // Apply the ruleset - THIS IS IRREVERSIBLE
     let status = ruleset
         .restrict_self()

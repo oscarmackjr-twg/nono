@@ -1213,6 +1213,12 @@ pub struct SandboxArgs {
     #[arg(long, help_heading = "OPTIONS")]
     pub allow_launch_services: bool,
 
+    /// Grant the sandboxed process access to GPU device nodes (Linux) or GPU
+    /// framework paths (macOS). On Windows, accepted but not enforced — emits
+    /// a warning (upstream v0.31–0.33 D-12 + v0.34 D-13).
+    #[arg(long, help_heading = "OPTIONS")]
+    pub allow_gpu: bool,
+
     /// Internal: force WFP readiness for test-built Windows binaries.
     #[cfg(debug_assertions)]
     #[arg(long, hide = true, help_heading = "OPTIONS")]
@@ -1252,6 +1258,55 @@ impl SandboxArgs {
             || !self.allow_proxy.is_empty()
             || !self.proxy_credential.is_empty()
             || self.external_proxy.is_some()
+    }
+
+    /// Emit a `tracing::warn!` for `--allow-gpu` when the flag is set but the
+    /// current platform's sandbox backend cannot enforce GPU passthrough.
+    ///
+    /// Upstream parity D-12 (v0.31–0.33) ships the flag with a three-platform
+    /// behavior split:
+    ///
+    /// - **Linux (Landlock):** allowlist NVIDIA/AMD/DRM device nodes +
+    ///   NVIDIA procfs (D-13). Enforced.
+    /// - **macOS (Seatbelt):** emit IOKit Metal/AGX GPU user-client rules.
+    ///   Enforced.
+    /// - **Windows (WFP + Job Object):** no kernel-level GPU sandboxing
+    ///   primitive exists. The flag is accepted for CLI parity so scripts
+    ///   are portable, but a warning is emitted so operators do not falsely
+    ///   assume GPU passthrough is sandboxed. Mirrors the Phase 16
+    ///   RESL-01..04 pattern (`collect_unix_resource_limit_warnings`) for
+    ///   unsupported flags, but lives at the CLI layer — per D-21, the
+    ///   Windows sandbox backend (`crates/nono/src/sandbox/windows.rs`) is
+    ///   NOT touched by this port and receives no GPU-related capability
+    ///   bit. The Windows sandbox state is byte-identical with and without
+    ///   `--allow-gpu`.
+    ///
+    /// Callers should invoke this at most once per sandbox launch. The
+    /// capability-wiring layer (`capability_ext::CapabilitySetExt::from_args`)
+    /// calls this before deciding whether to set
+    /// `CapabilitySet::allow_gpu()` — on Windows the warning fires and the
+    /// capability is deliberately NOT added to the set, which is the
+    /// enforcement-boundary proof that the Windows sandbox state does not
+    /// change.
+    pub fn warn_if_allow_gpu_unsupported_on_platform(&self) {
+        if !self.allow_gpu {
+            return;
+        }
+        #[cfg(target_os = "windows")]
+        {
+            tracing::warn!(
+                "--allow-gpu is not enforced on Windows: GPU access on Windows is \
+                 not supported by nono's sandbox backend (WFP + Job Object has no \
+                 GPU-passthrough primitive). The flag is accepted for CLI parity \
+                 with Linux/macOS; no capability is added to the Windows sandbox \
+                 state. See REQUIREMENTS.md § UPST-04."
+            );
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            // No-op on Linux/macOS — the flag is enforced by the respective
+            // sandbox backends (Landlock / Seatbelt).
+        }
     }
 }
 
@@ -1410,6 +1465,12 @@ pub struct WrapSandboxArgs {
     #[arg(long, help_heading = "OPTIONS")]
     pub allow_launch_services: bool,
 
+    /// Grant the sandboxed process access to GPU device nodes (Linux) or GPU
+    /// framework paths (macOS). On Windows, accepted but not enforced — emits
+    /// a warning (upstream v0.31–0.33 D-12 + v0.34 D-13).
+    #[arg(long, help_heading = "OPTIONS")]
+    pub allow_gpu: bool,
+
     /// Capability manifest file (JSON). A fully-resolved sandbox specification —
     /// mutually exclusive with all other sandbox configuration flags.
     #[arg(
@@ -1467,6 +1528,7 @@ impl From<WrapSandboxArgs> for SandboxArgs {
             env_deny: args.env_deny,
             profile: args.profile,
             allow_launch_services: args.allow_launch_services,
+            allow_gpu: args.allow_gpu,
             config: args.config,
             verbose: args.verbose,
             #[cfg(debug_assertions)]
@@ -2659,6 +2721,129 @@ mod parser_tests {
             assert!(args.sandbox.env_allow.is_empty());
             assert!(args.sandbox.env_deny.is_empty());
         }
+    }
+
+    // --allow-gpu CLI surface (D-12 upstream parity port).
+
+    #[test]
+    fn allow_gpu_default_is_false() {
+        // T-20-04-01 mitigation: flag must default to off.
+        let cli = Cli::try_parse_from(["nono", "run", "--allow", ".", "echo"])
+            .expect("baseline nono run should parse");
+        if let Commands::Run(args) = &cli.command {
+            assert!(!args.sandbox.allow_gpu);
+        } else {
+            panic!("expected Run subcommand");
+        }
+    }
+
+    #[test]
+    fn allow_gpu_parses_on_run() {
+        let cli = Cli::try_parse_from(["nono", "run", "--allow-gpu", "--allow", ".", "echo"])
+            .expect("nono run --allow-gpu should parse");
+        if let Commands::Run(args) = &cli.command {
+            assert!(args.sandbox.allow_gpu);
+        } else {
+            panic!("expected Run subcommand");
+        }
+    }
+
+    #[test]
+    fn allow_gpu_parses_on_wrap() {
+        let cli = Cli::try_parse_from(["nono", "wrap", "--allow-gpu", "--allow", ".", "echo"])
+            .expect("wrap --allow-gpu should parse");
+        if let Commands::Wrap(args) = &cli.command {
+            assert!(args.sandbox.allow_gpu);
+        } else {
+            panic!("expected Wrap subcommand");
+        }
+    }
+
+    #[test]
+    fn allow_gpu_parses_on_shell() {
+        let cli = Cli::try_parse_from(["nono", "shell", "--allow-gpu", "--allow", "."])
+            .expect("shell --allow-gpu should parse");
+        // Shell uses the same SandboxArgs surface — presence alone is enough.
+        assert!(matches!(cli.command, Commands::Shell(_)));
+    }
+
+    #[test]
+    fn allow_gpu_coexists_with_phase16_and_env_filter_flags() {
+        // Regression guard: --allow-gpu does NOT collide with Phase 16's
+        // resource-limit flags or Plan 20-03's env-filter flags. All four
+        // sets land on SandboxArgs via the same clap surface.
+        let cli = Cli::try_parse_from([
+            "nono",
+            "run",
+            "--allow-gpu",
+            "--env-allow",
+            "PATH",
+            "--env-deny",
+            "SECRET",
+            "--cpu-percent",
+            "25",
+            "--memory",
+            "512M",
+            "--timeout",
+            "30s",
+            "--max-processes",
+            "10",
+            "--allow",
+            ".",
+            "echo",
+        ]);
+        assert!(
+            cli.is_ok(),
+            "--allow-gpu must coexist with Phase 16 + Plan 20-03 flags: {cli:?}"
+        );
+    }
+
+    #[test]
+    fn wrap_to_sandbox_args_propagates_allow_gpu() {
+        // The WrapSandboxArgs → SandboxArgs conversion must carry allow_gpu
+        // across. A regression here would silently drop the flag on
+        // `nono wrap --allow-gpu` even though the parser accepts it.
+        let wrap_cli = Cli::try_parse_from(["nono", "wrap", "--allow-gpu", "--allow", ".", "echo"])
+            .expect("nono wrap --allow-gpu should parse");
+        if let Commands::Wrap(args) = wrap_cli.command {
+            let sandbox: SandboxArgs = args.sandbox.clone().into();
+            assert!(sandbox.allow_gpu);
+        } else {
+            panic!("expected Wrap subcommand");
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn allow_gpu_windows_warning_helper_is_callable() {
+        // T-20-04-05 mitigation: on Windows, `warn_if_allow_gpu_unsupported_on_platform`
+        // emits a `tracing::warn!`. We don't intercept tracing events here
+        // (that requires `tracing-test`), but we verify the helper is callable
+        // without panic on both branches (flag off and flag on).
+        let args_off = SandboxArgs {
+            allow_gpu: false,
+            ..SandboxArgs::default()
+        };
+        args_off.warn_if_allow_gpu_unsupported_on_platform(); // no-op branch
+
+        let args_on = SandboxArgs {
+            allow_gpu: true,
+            ..SandboxArgs::default()
+        };
+        args_on.warn_if_allow_gpu_unsupported_on_platform(); // emits warn!, no panic
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn allow_gpu_non_windows_warning_helper_is_noop() {
+        // On Linux/macOS the helper must be a total no-op even when the flag
+        // is set — enforcement happens in the sandbox backend, not at CLI
+        // parse time.
+        let args = SandboxArgs {
+            allow_gpu: true,
+            ..SandboxArgs::default()
+        };
+        args.warn_if_allow_gpu_unsupported_on_platform();
     }
 }
 
