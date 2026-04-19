@@ -25,6 +25,9 @@ ignore.workspace = true
 globset.workspace = true
 regress = "0.11"
 
+# URL component parsing for fail-closed OIDC issuer pinning (D-11 / T-20-04-03)
+url.workspace = true
+
 # Unix socket IPC for supervisor
 libc = "0.2"
 

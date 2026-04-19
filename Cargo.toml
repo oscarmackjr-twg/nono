@@ -44,6 +44,9 @@ hyper = { version = "1", features = ["http1", "server", "client"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 http-body-util = "0.1"
 
+# URL parsing (component equality for OIDC issuer pinning — CLAUDE.md § Common Footguns #1)
+url = "2.5"
+
 # Testing
 tempfile = "3"
 
