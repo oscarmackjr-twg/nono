@@ -202,6 +202,14 @@ pub(super) struct WindowsSupervisorRuntime {
     audit_log: Vec<AuditEntry>,
     terminate_requested: Arc<AtomicBool>,
     pty: Option<crate::pty_proxy::PtyPair>,
+    /// Phase 17: parent-end stdio handles when the child was spawned with
+    /// anonymous-pipe stdio (Windows detached path only). Lifetime extends
+    /// until the runtime is dropped — bridge threads in `start_logging` /
+    /// `start_data_pipe_server` borrow these via
+    /// `ManuallyDrop<File::from_raw_handle>`. `None` on the PTY (non-detached)
+    /// path. Populated post-`initialize` via `attach_detached_stdio()` in
+    /// `execute_supervised`, before `start_streaming()` is called.
+    detached_stdio: Option<DetachedStdioPipes>,
     active_attachment: Arc<Mutex<Option<SendableHandle>>>,
     interactive_shell: bool,
     /// Session token validated against every `CapabilityRequest` on the
@@ -295,6 +303,12 @@ impl WindowsSupervisorRuntime {
             audit_log: Vec::new(),
             terminate_requested,
             pty,
+            // Phase 17: populated post-spawn via `attach_detached_stdio` in
+            // `execute_supervised`. Initialized to None so the runtime can be
+            // constructed before the child is launched (the existing
+            // start_control_pipe_server still runs first per RESEARCH.md
+            // Pitfall 5 — see start_streaming below).
+            detached_stdio: None,
             active_attachment,
             interactive_shell: supervisor.interactive_shell,
             session_token: supervisor.session_token.map(str::to_string),
@@ -306,13 +320,14 @@ impl WindowsSupervisorRuntime {
             containment_job,
         };
 
+        // Phase 17 reorder (RESEARCH.md Pitfall 5): start_control_pipe_server
+        // MUST stay in `initialize` so the outer probe in
+        // startup_runtime::run_detached_launch can find the control pipe
+        // BEFORE the detached banner is printed. The streaming threads
+        // (start_logging / start_data_pipe_server / start_interactive_terminal_io)
+        // are deferred to `start_streaming()` which the caller invokes AFTER
+        // `attach_detached_stdio()` has populated the detached_stdio field.
         runtime.start_control_pipe_server()?;
-        if runtime.interactive_shell {
-            runtime.start_interactive_terminal_io()?;
-        } else {
-            runtime.start_logging()?;
-            runtime.start_data_pipe_server()?;
-        }
 
         // Start the capability pipe server only when the caller wired up
         // BOTH a token and a rendezvous path. Either being `None` keeps
@@ -325,6 +340,30 @@ impl WindowsSupervisorRuntime {
 
         runtime.state = WindowsSupervisorLifecycleState::ControlChannelReady;
         Ok(runtime)
+    }
+
+    /// Phase 17: hand the parent-end stdio handles produced by
+    /// `spawn_windows_child` to the runtime. Called from
+    /// `execute_supervised` immediately after the child is spawned and
+    /// BEFORE `start_streaming()`. Idempotent overwrite is acceptable
+    /// (only one child is spawned per runtime).
+    pub(super) fn attach_detached_stdio(&mut self, stdio: Option<DetachedStdioPipes>) {
+        self.detached_stdio = stdio;
+    }
+
+    /// Phase 17: start the per-session streaming threads (log writer + data
+    /// pipe server, or interactive terminal I/O for `nono shell`). Deferred
+    /// from `initialize` so the bridge threads can observe the populated
+    /// `detached_stdio` field (Pitfall 5 reorder). Must be invoked exactly
+    /// once after `attach_detached_stdio` returns.
+    pub(super) fn start_streaming(&mut self) -> Result<()> {
+        if self.interactive_shell {
+            self.start_interactive_terminal_io()?;
+        } else {
+            self.start_logging()?;
+            self.start_data_pipe_server()?;
+        }
+        Ok(())
     }
 
     /// Capability-pipe background thread. Binds a Low Integrity-accessible
@@ -971,6 +1010,15 @@ impl WindowsSupervisorRuntime {
 
     pub(super) fn pty(&self) -> Option<&crate::pty_proxy::PtyPair> {
         self.pty.as_ref()
+    }
+
+    /// Phase 17: borrowed access to the parent-end stdio handles for the
+    /// Windows detached path. `None` on the PTY (non-detached) path. Used by
+    /// the bridge threads in `start_logging` (pipe-source branch) and
+    /// `start_data_pipe_server` (pipe-sink branch).
+    #[allow(dead_code)]
+    pub(super) fn detached_stdio(&self) -> Option<&DetachedStdioPipes> {
+        self.detached_stdio.as_ref()
     }
 }
 

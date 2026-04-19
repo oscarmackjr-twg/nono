@@ -705,13 +705,13 @@ pub fn execute_supervised(
         }
     );
 
-    // Phase 17 (Task 2): spawn_windows_child returns
-    // (WindowsSupervisedChild, Option<DetachedStdioPipes>). Task 3 wires the
-    // second tuple element into runtime.attach_detached_stdio(...) so the
-    // pipe-source / pipe-sink bridge threads can borrow the parent-end
-    // handles. Until Task 3 lands, the value is held in a local so it
-    // outlives the child and is closed cleanly on Drop at function exit.
-    let (mut child, _detached_stdio) = spawn_windows_child(
+    // Phase 17 (Tasks 2 + 3): spawn_windows_child returns
+    // (WindowsSupervisedChild, Option<DetachedStdioPipes>). The second
+    // tuple element is the parent-end stdio handles for the Windows
+    // detached path; it is None on the PTY (non-detached) path. Hand it to
+    // the runtime via attach_detached_stdio BEFORE start_streaming so the
+    // pipe-source / pipe-sink bridge threads see the populated field.
+    let (mut child, detached_stdio) = spawn_windows_child(
         config,
         launch_program,
         &containment,
@@ -721,6 +721,11 @@ pub fn execute_supervised(
         session_id,
     )
     .map_err(|err| runtime.startup_failure(err.to_string()))?;
+
+    runtime.attach_detached_stdio(detached_stdio);
+    runtime
+        .start_streaming()
+        .map_err(|err| runtime.startup_failure(err.to_string()))?;
 
     // Publish the child's process handle so the capability pipe server
     // thread can broker granted file handles via `DuplicateHandle`.
