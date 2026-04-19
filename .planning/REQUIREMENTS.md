@@ -295,3 +295,55 @@ ATCH-01 is Windows-only because Unix detached sessions already support attach st
 AIPC-01 is Windows-only because it extends Phase 11's Windows capability pipe. A cross-platform handle-passing abstraction is out of scope for v2.1.
 
 CLEAN-01..04 are platform-agnostic in spirit; CLEAN-02 specifically targets Windows test flakes.
+
+---
+
+## UPST — Upstream Parity Sync
+
+Context: The fork is pinned at crate version 0.30.1 while upstream `always-further/nono` has shipped 0.31–0.37.1. Phase 20 back-ports selected upstream features and the `rustls-webpki` RUSTSEC-2026-0098/0099 security upgrade while preserving all Windows-specific work from Phases 1–19. Decomposition and scope locked in `.planning/phases/20-upstream-parity-sync/20-CONTEXT.md`.
+
+### UPST-01: Security upgrade + workspace version realignment
+
+**What:** `rustls-webpki` transitive upgrade to `0.103.12` (clears RUSTSEC-2026-0098 and RUSTSEC-2026-0099) and workspace-wide crate version bump from `0.30.1` to `0.37.1` so the fork's published surface matches upstream `v0.37.1`.
+
+**Acceptance:**
+1. `cargo tree -i rustls-webpki` shows only versions `>= 0.103.12` in the transitive closure.
+2. Every workspace crate (`nono`, `nono-cli`, `nono-proxy`, `nono-ffi`/`bindings-c`) reports `0.37.1` via `cargo pkgid`.
+3. `cargo build --workspace` and `cargo test --workspace --all-features` exit 0 on the Windows host.
+4. Phase 15 5-row detached-console smoke (`nono run <profile> → nono ps → nono stop`) passes unchanged.
+
+**Maps to:** Phase 20 Plan 20-01.
+
+### UPST-02: Profile & claude-code fixes
+
+**What:** Port upstream profile `extends` infinite-recursion fix (commit `c1bc439`) and claude-code `.claude.json` symlink for token refresh (commit `97f7294`) into the fork's profile/hooks surface.
+
+**Acceptance:**
+1. A profile with `extends` referencing itself (direct or cyclic indirect) returns a clear `NonoError` within bounded time instead of stack-overflowing.
+2. `.claude.json` symlink path resolution behaves as upstream v0.37.1 when refreshing claude-code tokens.
+3. `make ci` passes on the Windows host.
+
+**Maps to:** Phase 20 Plan 20-02.
+
+### UPST-03: Credentials & environment parity
+
+**What:** Port upstream `keyring://service/account` credential URI + `?decode=go-keyring` query-param handling (upstream 0.36), environment-variable filtering (upstream 0.37.0 #688, commit `1b412a7`), and `command_blocking_deprecation.rs` backport (upstream 0.33, ~190 lines).
+
+**Acceptance:**
+1. `keyring://service/account` parses into a typed URI variant; hostile inputs (path traversal, junk decode param) are rejected with `NonoError::InvalidConfig` (fail-closed).
+2. An env-var filter profile rejects a malformed pattern up-front; well-formed filters allow/deny at the sandboxed process-env boundary as specified upstream.
+3. `command_blocking_deprecation.rs` surfaces the deprecation warning for the documented command list and does not break existing `run`/`wrap`/`shell` paths.
+4. `make ci` passes on the Windows host.
+
+**Maps to:** Phase 20 Plan 20-03. If the keyring manual port exceeds ~400 lines the plan splits into 20-03a (keyring) and 20-03b (env-filter + deprecation) per CONTEXT § Specifics.
+
+### UPST-04: GPU + trust parity
+
+**What:** Port upstream `--allow-gpu` flag (upstream 0.31–0.33) with NVIDIA procfs + `nvidia-uvm-tools` Linux device allowlist (upstream 0.34), and GitLab ID tokens for trust signing (upstream 0.35) alongside the existing GitHub ID token path.
+
+**Acceptance:**
+1. `nono run --allow-gpu …` parses cleanly; on Linux the sandbox grants `/dev/nvidia*` + NVIDIA procfs + `nvidia-uvm-tools`; on macOS it grants Metal/GPU framework paths via Seatbelt; on Windows it accepts the flag with a `not-enforced-on-this-platform` warning (Phase 16 pattern).
+2. A `nono trust` signing path that consumes a GitLab ID token completes end-to-end, mirroring the existing GitHub ID token test coverage.
+3. `make ci` passes on the Windows host.
+
+**Maps to:** Phase 20 Plan 20-04.
