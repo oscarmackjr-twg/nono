@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: Resource Limits, Extended IPC, Attach-Streaming & Cleanup
-status: Phase 20 all 4 plans complete (20-01, 20-02, 20-03, 20-04); phase awaits verifier pass
+status: Phase 20 COMPLETE — verifier passed 38/38 must-haves (UPST-01..04 all traced); v2.1 needs Phase 17 (ATCH-01) and Phase 18 (AIPC-01) to ship
 stopped_at: Phase 20 waves 0+1+2 executed end-to-end. Wave 0: 20-01 (3 feat commits + SUMMARY, rustls-webpki 0.103.12 + workspace 0.37.1). Wave 1 parallel: 20-02 (profile extends cycle guard end-to-end regression tests + claude.json symlink with root-containment validator; 2 fix commits + SUMMARY + merge aa018ad) and 20-03 (keyring:// URI manual port + --env-allow/--env-deny CLI flags + command_blocking_deprecation backport; 3 feat commits + SUMMARY + merge 9e69792). Wave 2 sequential: 20-04 (--allow-gpu flag + CapabilitySet::gpu surface + macOS Seatbelt IOKit Metal/AGX grants + Linux NVIDIA/DRM/AMD/WSL2 + NVIDIA procfs Landlock allowlist + GitLab ID token trust signing via fail-closed url::Url::parse issuer validator; 3 feat commits f377a3e/ec73a8a/af5c124 + SUMMARY). D-21 Windows-invariance held across all 4 plans (zero *_windows.rs touched across 11 commits). Post-plan gate: cargo build --workspace exit 0; nono lib 593/593 pass; 19 pre-existing Phase 19 CLEAN-02 deferred env_vars.rs windows_* failures (exact match for 20-01 baseline, no NEW failures).
 last_updated: "2026-04-19T12:30:00.000Z"
 last_activity: 2026-04-19 — Phase 20 all 4 plans complete. 20-04 adds --allow-gpu flag (upstream cb6de49 + 4535473, D-12) with 3-platform dispatch (Linux Landlock NVIDIA+DRM+AMD+WSL2 allowlist, macOS Seatbelt IOKit Metal/AGX grants, Windows CLI-layer tracing::warn!), NVIDIA procfs + nvidia-uvm-tools Linux device allowlist (upstream b162b5c + 4df0a8e, D-13), and GitLab ID tokens for trust signing (upstream ab5a064, D-11) with url::Url::parse component-equality issuer validator guarding against iss.starts_with prefix-match anti-pattern. D-21 invariant upheld — crates/nono-cli/src/trust_intercept_windows.rs and crates/nono/src/sandbox/windows.rs byte-identical. 18 + 4 + 17 new tests green on Windows host.
 progress:
   total_phases: 20
-  completed_phases: 15
+  completed_phases: 16
   total_plans: 48
   completed_plans: 48
-  percent: 95
+  percent: 80
 ---
 
 # Project State: nono — v2.1 (Resource Limits, Extended IPC, Attach-Streaming & Cleanup)
