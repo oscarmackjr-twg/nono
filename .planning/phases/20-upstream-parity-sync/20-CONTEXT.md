@@ -205,7 +205,7 @@ These were considered during discussion and left out of Phase 20. Capture as can
 
 ### Cross-cutting items not in Phase 20
 - **Fork crate renaming (`nono` → `nono-windows`)** — considered in D-19 options, rejected in favor of bumping version to 0.37.1. Rename is a strategic branding decision, not a Phase 20 decision.
-- **Retroactive update of `REQUIREMENTS.md` to add UPST-01..04 requirement IDs matching Phase 20 plans** — planner call; either add as part of Plan 20-01 or leave to the phase-close bookkeeping pass.
+- **Retroactive update of `REQUIREMENTS.md` to add UPST-01..04 requirement IDs matching Phase 20 plans** — planner call; either add as part of Plan 20-01 or leave to the phase-close bookkeeping pass. **RESOLVED in Plan 20-01 Task 1** — UPST-01..04 are added to REQUIREMENTS.md as option (a). Deferred item closed.
 - **Re-sync from upstream past 0.37.1** — once Phase 20 lands, the fork is at upstream-0.37.1 feature level. Future minor-release sync is a recurring chore; not a Phase 20 item but worth scheduling as a cadence (e.g., per upstream minor release).
 
 </deferred>

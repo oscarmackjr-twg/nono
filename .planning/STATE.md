@@ -2,10 +2,10 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: Resource Limits, Extended IPC, Attach-Streaming & Cleanup
-status: Phase 20 context gathered (4 gray areas discussed; 4 plans scoped); v2.1 remaining: Phase 17 (ATCH-01), Phase 18 (AIPC-01), Phase 20 (UPST)
-stopped_at: Phase 20 CONTEXT.md + DISCUSSION-LOG.md committed (commit `d434253`); ready for `/gsd-plan-phase 20`
-last_updated: "2026-04-19T02:30:00.000Z"
-last_activity: 2026-04-19 — Phase 20 (Upstream Parity Sync, UPST) context gathered. 4 gray areas discussed; merge strategy hybrid-per-feature + target v0.37.1 (includes RUSTSEC-2026-0098/0099 rustls-webpki fix) + 4-plan decomposition (20-01 security sequential, 20-02/03/04 parallel) + Windows-protection invariant D-21 locked. 9 of 16 considered upstream items in scope; 7 deferred.
+status: Phase 20 planned (4 plans — 20-01 security wave 0, 20-02/20-03 wave 1 parallel, 20-04 wave 2 sequential on 20-03 due to cli.rs overlap); ready to execute
+stopped_at: Phase 20 plans 20-01/02/03/04 written + plan-checker passed after revision loop (iter 1: 3 blockers+7 warnings, iter 2: 1 blocker on D-21 exception clauses in 20-04, iter 3: direct edit cleared). Ready for `/gsd-execute-phase 20`
+last_updated: "2026-04-18T23:15:00.000Z"
+last_activity: 2026-04-18 — Phase 20 planning complete. 4 plans written covering UPST-01..04: 20-01 rustls-webpki + crate version bump (wave 0, sequential), 20-02 profile extends cycle fix + claude-code token refresh (wave 1), 20-03 keyring:// URI manual-port + env-var filtering + command_blocking_deprecation backport (wave 1), 20-04 --allow-gpu + NVIDIA allowlist + GitLab ID tokens (wave 2, deps on 20-03 due to shared cli.rs). D-21 Windows-invariance enforced strictly across all plans (no sandbox/windows.rs edits authorized).
 progress:
   total_phases: 20
   completed_phases: 15
