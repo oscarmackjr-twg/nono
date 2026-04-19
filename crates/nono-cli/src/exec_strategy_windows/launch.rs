@@ -1,5 +1,19 @@
 use super::*;
 
+// Phase 17: Anonymous-pipe stdio for the Windows detached path.
+// These imports are NOT in the parent module (mod.rs) by default — they live
+// only in launch.rs because they are exclusively used by the new
+// DetachedStdioPipes struct + spawn_windows_child wiring.
+use windows_sys::Win32::Foundation::{
+    SetHandleInformation, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+};
+use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+use windows_sys::Win32::System::Pipes::CreatePipe;
+// STARTF_USESTDHANDLES is consumed by spawn_windows_child in Task 2; allow
+// the unused-import warning during Task 1 only — Task 2 removes the allow.
+#[allow(unused_imports)]
+use windows_sys::Win32::System::Threading::STARTF_USESTDHANDLES;
+
 impl OwnedHandle {
     fn raw(&self) -> HANDLE {
         self.0
@@ -28,6 +42,162 @@ impl Drop for ProcessContainment {
             }
         }
     }
+}
+
+/// Phase 17: Anonymous-pipe stdio for the Windows detached path (ATCH-01).
+///
+/// Holds three pairs of anonymous pipe handles (stdin, stdout, stderr).
+/// At spawn time:
+///   - The CHILD-end handles (`stdin_read`, `stdout_write`, `stderr_write`) are
+///     bound to `STARTUPINFOW.hStd*` and inherited by the child via
+///     `CreateProcessW(.., bInheritHandles=TRUE, ..)`.
+///   - The PARENT-end handles (`stdout_read`, `stderr_read`, `stdin_write`) are
+///     flipped non-inheritable via `SetHandleInformation(HANDLE_FLAG_INHERIT, 0)`
+///     so the child does NOT receive duplicates of them.
+///   - After `CreateProcessW` returns successfully, the supervisor calls
+///     `close_child_ends()` to release its copy of the child-end handles. The
+///     child still holds its own duplicates (inherited at spawn).
+///
+/// Lifetime: parent-end handles must outlive the bridge threads in
+/// `start_logging` / `start_data_pipe_server`. Owned by `WindowsSupervisorRuntime`
+/// for the duration of the child process. `Drop` closes every handle exactly once,
+/// guarded by `INVALID_HANDLE_VALUE` / null checks so post-`close_child_ends`
+/// fields are not double-closed.
+///
+/// See `.planning/phases/17-attach-streaming/17-RESEARCH.md` Code Example 1
+/// and 17-PATTERNS.md § DetachedStdioPipes for the full mechanical contract.
+#[derive(Debug)]
+pub(super) struct DetachedStdioPipes {
+    /// Parent end — supervisor reads child stdout from this.
+    pub stdout_read: HANDLE,
+    /// Parent end — supervisor reads child stderr from this.
+    pub stderr_read: HANDLE,
+    /// Parent end — supervisor writes child stdin to this.
+    pub stdin_write: HANDLE,
+    /// Child end — set in STARTUPINFOW.hStdInput; closed by supervisor after CreateProcess.
+    pub stdin_read: HANDLE,
+    /// Child end — set in STARTUPINFOW.hStdOutput; closed by supervisor after CreateProcess.
+    pub stdout_write: HANDLE,
+    /// Child end — set in STARTUPINFOW.hStdError; closed by supervisor after CreateProcess.
+    pub stderr_write: HANDLE,
+}
+
+impl DetachedStdioPipes {
+    pub fn create() -> Result<Self> {
+        let sa = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: std::ptr::null_mut(),
+            // Both ends inheritable initially; flip parent ends OFF below via
+            // SetHandleInformation. This is the canonical Win32 idiom for
+            // "child sees one end, parent sees the other" (RESEARCH.md A1).
+            bInheritHandle: 1,
+        };
+
+        let (stdin_read, stdin_write) = create_one_pipe(&sa, "stdin")?;
+        let (stdout_read, stdout_write) = create_one_pipe(&sa, "stdout").inspect_err(|_| {
+            // SAFETY: stdin_read / stdin_write were returned by CreatePipe in the
+            // same scope and not yet returned to caller; close on the error path
+            // before propagating to avoid leaking on the failure cascade.
+            unsafe {
+                CloseHandle(stdin_read);
+                CloseHandle(stdin_write);
+            }
+        })?;
+        let (stderr_read, stderr_write) = create_one_pipe(&sa, "stderr").inspect_err(|_| {
+            // SAFETY: same scope, same lifetime guarantees as the stdout-error
+            // arm above; close all four prior handles before propagating.
+            unsafe {
+                CloseHandle(stdin_read);
+                CloseHandle(stdin_write);
+                CloseHandle(stdout_read);
+                CloseHandle(stdout_write);
+            }
+        })?;
+
+        // SAFETY: parent-end handles are owned by this thread and not yet
+        // inherited by any child. Flipping HANDLE_FLAG_INHERIT off here ensures
+        // the supervisor-side ends are NOT duplicated into the child during
+        // CreateProcessW(.., bInheritHandles=TRUE, ..). Threat T-17-01.
+        unsafe {
+            SetHandleInformation(stdin_write, HANDLE_FLAG_INHERIT, 0);
+            SetHandleInformation(stdout_read, HANDLE_FLAG_INHERIT, 0);
+            SetHandleInformation(stderr_read, HANDLE_FLAG_INHERIT, 0);
+        }
+
+        Ok(Self {
+            stdout_read,
+            stderr_read,
+            stdin_write,
+            stdin_read,
+            stdout_write,
+            stderr_write,
+        })
+    }
+
+    /// Close the child-end handles after `CreateProcess` inherits them.
+    ///
+    /// Must be called AFTER `CreateProcessW` returns successfully (so the child
+    /// already holds its own duplicates) and BEFORE `ResumeThread` (so the child
+    /// observes EOF on stdin only when the supervisor's parent-end write handle
+    /// is closed later). After this call, the three child-end fields equal
+    /// `INVALID_HANDLE_VALUE`; the call is idempotent.
+    ///
+    /// # Safety
+    /// Caller must guarantee `CreateProcessW` has returned successfully and the
+    /// child already holds its own duplicate of the inheritable handles.
+    pub unsafe fn close_child_ends(&mut self) {
+        if self.stdin_read != INVALID_HANDLE_VALUE {
+            CloseHandle(self.stdin_read);
+            self.stdin_read = INVALID_HANDLE_VALUE;
+        }
+        if self.stdout_write != INVALID_HANDLE_VALUE {
+            CloseHandle(self.stdout_write);
+            self.stdout_write = INVALID_HANDLE_VALUE;
+        }
+        if self.stderr_write != INVALID_HANDLE_VALUE {
+            CloseHandle(self.stderr_write);
+            self.stderr_write = INVALID_HANDLE_VALUE;
+        }
+    }
+}
+
+impl Drop for DetachedStdioPipes {
+    fn drop(&mut self) {
+        // SAFETY: every handle was returned by CreatePipe in `create()` and is
+        // owned by Self. `close_child_ends` may have already zeroed three of
+        // them — guarded by the INVALID / null check below. Each close happens
+        // at most once across the struct's lifetime.
+        unsafe {
+            for h in [
+                self.stdin_read,
+                self.stdout_write,
+                self.stderr_write,
+                self.stdin_write,
+                self.stdout_read,
+                self.stderr_read,
+            ] {
+                if h != INVALID_HANDLE_VALUE && !h.is_null() {
+                    CloseHandle(h);
+                }
+            }
+        }
+    }
+}
+
+fn create_one_pipe(sa: &SECURITY_ATTRIBUTES, label: &str) -> Result<(HANDLE, HANDLE)> {
+    let mut read: HANDLE = INVALID_HANDLE_VALUE;
+    let mut write: HANDLE = INVALID_HANDLE_VALUE;
+    // SAFETY: CreatePipe writes into the two HANDLE locals (out-params) and
+    // returns nonzero on success. `sa` is a valid SECURITY_ATTRIBUTES with
+    // non-null nLength constructed by the caller.
+    let ok = unsafe { CreatePipe(&mut read, &mut write, sa as *const _, 0) };
+    if ok == 0 {
+        return Err(NonoError::SandboxInit(format!(
+            "CreatePipe({label}) failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok((read, write))
 }
 
 pub(super) fn create_process_containment(session_id: Option<&str>) -> Result<ProcessContainment> {
