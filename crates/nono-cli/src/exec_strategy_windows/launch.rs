@@ -1379,3 +1379,101 @@ mod apply_resource_limits_tests {
         apply_resource_limits(&containment, &limits).expect("second apply must also succeed");
     }
 }
+
+#[cfg(all(test, target_os = "windows"))]
+#[allow(clippy::unwrap_used)]
+mod detached_stdio_tests {
+    use super::DetachedStdioPipes;
+    use windows_sys::Win32::Foundation::{
+        GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+    };
+
+    fn handle_inherit_flag(handle: HANDLE) -> u32 {
+        let mut flags: u32 = 0;
+        let ok = unsafe { GetHandleInformation(handle, &mut flags) };
+        assert_ne!(ok, 0, "GetHandleInformation failed for handle {:?}", handle);
+        flags & HANDLE_FLAG_INHERIT
+    }
+
+    #[test]
+    fn detached_stdio_pipes_create_succeeds() {
+        let pipes = DetachedStdioPipes::create().expect("create DetachedStdioPipes");
+        for (label, h) in [
+            ("stdin_read", pipes.stdin_read),
+            ("stdin_write", pipes.stdin_write),
+            ("stdout_read", pipes.stdout_read),
+            ("stdout_write", pipes.stdout_write),
+            ("stderr_read", pipes.stderr_read),
+            ("stderr_write", pipes.stderr_write),
+        ] {
+            assert_ne!(h, INVALID_HANDLE_VALUE, "{label} should not be INVALID");
+            assert!(!h.is_null(), "{label} should not be null");
+        }
+    }
+
+    #[test]
+    fn parent_ends_are_non_inheritable() {
+        let pipes = DetachedStdioPipes::create().expect("create DetachedStdioPipes");
+        assert_eq!(
+            handle_inherit_flag(pipes.stdin_write),
+            0,
+            "parent stdin_write must NOT be inheritable"
+        );
+        assert_eq!(
+            handle_inherit_flag(pipes.stdout_read),
+            0,
+            "parent stdout_read must NOT be inheritable"
+        );
+        assert_eq!(
+            handle_inherit_flag(pipes.stderr_read),
+            0,
+            "parent stderr_read must NOT be inheritable"
+        );
+    }
+
+    #[test]
+    fn child_ends_are_inheritable() {
+        let pipes = DetachedStdioPipes::create().expect("create DetachedStdioPipes");
+        assert_ne!(
+            handle_inherit_flag(pipes.stdin_read),
+            0,
+            "child stdin_read MUST be inheritable"
+        );
+        assert_ne!(
+            handle_inherit_flag(pipes.stdout_write),
+            0,
+            "child stdout_write MUST be inheritable"
+        );
+        assert_ne!(
+            handle_inherit_flag(pipes.stderr_write),
+            0,
+            "child stderr_write MUST be inheritable"
+        );
+    }
+
+    #[test]
+    fn close_child_ends_zeroes_them() {
+        let mut pipes = DetachedStdioPipes::create().expect("create DetachedStdioPipes");
+        unsafe { pipes.close_child_ends() };
+        assert_eq!(pipes.stdin_read, INVALID_HANDLE_VALUE);
+        assert_eq!(pipes.stdout_write, INVALID_HANDLE_VALUE);
+        assert_eq!(pipes.stderr_write, INVALID_HANDLE_VALUE);
+        // Idempotent — second call must not panic / double-close.
+        unsafe { pipes.close_child_ends() };
+        assert_eq!(pipes.stdin_read, INVALID_HANDLE_VALUE);
+    }
+
+    #[test]
+    fn drop_closes_all_remaining_handles_without_panic() {
+        // Construct + immediate drop must not panic and must not propagate any
+        // CloseHandle errors. Drop always runs at scope exit.
+        {
+            let _pipes = DetachedStdioPipes::create().expect("create DetachedStdioPipes");
+        }
+        // Repeat to ensure no global state was corrupted.
+        {
+            let mut pipes2 = DetachedStdioPipes::create().expect("create second DetachedStdioPipes");
+            unsafe { pipes2.close_child_ends() };
+        }
+    }
+}
