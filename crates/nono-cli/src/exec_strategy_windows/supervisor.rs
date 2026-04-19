@@ -852,11 +852,28 @@ impl WindowsSupervisorRuntime {
             .as_ref()
             .map(|p| p.input_write as usize)
             .unwrap_or(0);
+        // Phase 17 (D-05): pipe-sink branch writes attach-client bytes into
+        // the parent-end stdin HANDLE owned by self.detached_stdio.
+        let stdin_write = self
+            .detached_stdio
+            .as_ref()
+            .map(|s| s.stdin_write as usize)
+            .unwrap_or(0);
         let active_attachment = self.active_attachment.clone();
 
-        if pty_output_read == 0 || pty_input_write == 0 {
+        // Three mutually-exclusive cases (the should_allocate_pty gate at
+        // supervised_runtime.rs:88-94 ensures
+        // (pty_input_write != 0 && pty_output_read != 0) XOR stdin_write != 0).
+        let sink_handle: usize = if pty_input_write != 0 && pty_output_read != 0 {
+            pty_input_write
+        } else if stdin_write != 0 {
+            stdin_write
+        } else {
+            // Neither PTY nor detached-stdio wired (e.g. interactive_shell
+            // handled elsewhere or a future code path). No sink thread to
+            // spawn.
             return Ok(());
-        }
+        };
 
         std::thread::spawn(move || {
             let pipe_name = format!("\\\\.\\pipe\\nono-data-{}", session_id);
@@ -869,6 +886,10 @@ impl WindowsSupervisorRuntime {
             };
 
             loop {
+                // SAFETY: h_pipe was just created by create_secure_pipe with
+                // nMaxInstances=1 (supervisor.rs:165) — single-attach is
+                // structurally enforced by the kernel. ConnectNamedPipe
+                // blocks until a client connects.
                 let connected = unsafe { ConnectNamedPipe(h_pipe, std::ptr::null_mut()) };
                 if connected != 0
                     || unsafe { GetLastError() }
@@ -879,11 +900,17 @@ impl WindowsSupervisorRuntime {
                         *lock = Some(SendableHandle(h_pipe));
                     }
 
-                    // For input, we read from the pipe and write to PTY input.
-                    // This thread will block on pipe reading while the client is attached.
+                    // SAFETY: h_pipe is owned by this loop iteration; File
+                    // takes the handle and we DisconnectNamedPipe + reuse it
+                    // on the next iteration. (Same pattern as the PTY-sink
+                    // pre-Phase-17.)
                     let mut file = unsafe { std::fs::File::from_raw_handle(h_pipe as _) };
-                    let mut pty_input = ManuallyDrop::new(unsafe {
-                        std::fs::File::from_raw_handle(pty_input_write as _)
+                    // SAFETY: sink_handle is either pty.input_write (lifetime
+                    // tied to runtime.pty) or detached_stdio.stdin_write
+                    // (lifetime tied to runtime.detached_stdio). ManuallyDrop
+                    // prevents double-close — the runtime owns the handle.
+                    let mut sink = ManuallyDrop::new(unsafe {
+                        std::fs::File::from_raw_handle(sink_handle as _)
                     });
 
                     let mut buf = [0u8; 4096];
@@ -891,7 +918,7 @@ impl WindowsSupervisorRuntime {
                         if n == 0 {
                             break;
                         }
-                        if pty_input.write_all(&buf[..n]).is_err() {
+                        if sink.write_all(&buf[..n]).is_err() {
                             break;
                         }
                     }
@@ -904,6 +931,9 @@ impl WindowsSupervisorRuntime {
                             }
                         }
                     }
+                    // SAFETY: standard Win32 named-pipe lifecycle —
+                    // disconnect to allow the next ConnectNamedPipe iteration
+                    // to accept a new client.
                     unsafe { DisconnectNamedPipe(h_pipe) };
                 }
             }
