@@ -2643,7 +2643,9 @@ mod parser_tests {
             "echo",
         ]);
         assert!(cli.is_err(), "malformed --env-allow must reject at parse");
-        let err = cli.unwrap_err().to_string();
+        let err = cli
+            .expect_err("malformed --env-allow must reject at parse")
+            .to_string();
         assert!(
             err.contains("trailing suffix") || err.contains("invalid"),
             "got: {err}"
@@ -2716,7 +2718,8 @@ mod parser_tests {
 
     #[test]
     fn env_allow_default_is_empty_vec() {
-        let cli = Cli::try_parse_from(["nono", "run", "--allow", ".", "echo"]).unwrap();
+        let cli = Cli::try_parse_from(["nono", "run", "--allow", ".", "echo"])
+            .expect("baseline `nono run --allow . echo` must parse");
         if let Commands::Run(args) = &cli.command {
             assert!(args.sandbox.env_allow.is_empty());
             assert!(args.sandbox.env_deny.is_empty());
