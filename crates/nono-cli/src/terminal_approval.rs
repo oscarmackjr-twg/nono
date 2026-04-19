@@ -34,9 +34,11 @@ impl ApprovalBackend for TerminalApproval {
         // Display the request (sanitize untrusted fields from the sandboxed child)
         eprintln!();
         eprintln!("[nono] The sandboxed process is requesting additional access:");
+        #[allow(deprecated)]
+        let request_path = &request.path;
         eprintln!(
             "[nono]   Path:   {}",
-            sanitize_for_terminal(&request.path.display().to_string())
+            sanitize_for_terminal(&request_path.display().to_string())
         );
         eprintln!("[nono]   Access: {}", format_access_mode(&request.access));
         if let Some(ref reason) = request.reason {
@@ -294,6 +296,7 @@ mod tests {
     /// references the absent interactive device.
     #[cfg(target_os = "windows")]
     #[test]
+    #[allow(deprecated)]
     fn windows_no_console_denies_gracefully() {
         let backend = TerminalApproval;
         let request = CapabilityRequest {
@@ -304,6 +307,9 @@ mod tests {
             child_pid: std::process::id(),
             session_id: "sess-test".to_string(),
             session_token: String::new(),
+            kind: nono::supervisor::types::HandleKind::File,
+            target: None,
+            access_mask: 0,
         };
 
         let decision = backend

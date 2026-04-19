@@ -522,10 +522,11 @@ impl Drop for SupervisorSocket {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::capability::AccessMode;
-    use crate::supervisor::types::{CapabilityRequest, SupervisorMessage, SupervisorResponse};
+    use crate::supervisor::types::{CapabilityRequest, HandleKind, SupervisorMessage, SupervisorResponse};
 
     #[test]
     fn test_socket_pair_roundtrip() {
@@ -540,6 +541,9 @@ mod tests {
             child_pid: 12345,
             session_id: "sess-001".to_string(),
             session_token: String::new(),
+            kind: HandleKind::File,
+            target: None,
+            access_mask: 0,
         };
 
         // Child sends request

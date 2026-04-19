@@ -729,6 +729,7 @@ fn to_wide(value: &str) -> Vec<u16> {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::capability::AccessMode;
@@ -750,6 +751,9 @@ mod tests {
             child_pid: 12345,
             session_id: "sess-001".to_string(),
             session_token: "test-token".to_string(),
+            kind: crate::supervisor::types::HandleKind::File,
+            target: None,
+            access_mask: 0,
         };
 
         child
@@ -931,6 +935,9 @@ mod tests {
             child_pid: 12345,
             session_id: "sess-lowint".to_string(),
             session_token: "tok".to_string(),
+            kind: crate::supervisor::types::HandleKind::File,
+            target: None,
+            access_mask: 0,
         };
         client
             .send_message(&SupervisorMessage::Request(request))

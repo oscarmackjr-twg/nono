@@ -131,6 +131,7 @@ mod tests {
         }
     }
 
+    #[allow(deprecated)]
     fn make_request() -> CapabilityRequest {
         CapabilityRequest {
             request_id: "test-001".to_string(),
@@ -140,6 +141,9 @@ mod tests {
             child_pid: 1234,
             session_id: "sess-001".to_string(),
             session_token: String::new(),
+            kind: crate::supervisor::types::HandleKind::File,
+            target: None,
+            access_mask: 0,
         }
     }
 

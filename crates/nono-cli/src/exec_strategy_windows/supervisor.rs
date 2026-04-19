@@ -1251,7 +1251,9 @@ pub(super) fn handle_windows_supervisor_message(
                 });
 
             let grant = if decision.is_granted() {
-                let file = open_windows_supervisor_path(&request.path, &request.access)?;
+                #[allow(deprecated)]
+                let path = &request.path;
+                let file = open_windows_supervisor_path(path, &request.access)?;
                 Some(nono::supervisor::socket::broker_file_handle_to_process(
                     &file,
                     target_process,
@@ -1334,6 +1336,7 @@ mod capability_handler_tests {
         }
     }
 
+    #[allow(deprecated)]
     fn make_request(session_token: &str) -> nono::CapabilityRequest {
         nono::CapabilityRequest {
             request_id: "cap-req-001".to_string(),
@@ -1343,6 +1346,9 @@ mod capability_handler_tests {
             child_pid: std::process::id(),
             session_id: "sess-test".to_string(),
             session_token: session_token.to_string(),
+            kind: nono::supervisor::types::HandleKind::File,
+            target: None,
+            access_mask: 0,
         }
     }
 

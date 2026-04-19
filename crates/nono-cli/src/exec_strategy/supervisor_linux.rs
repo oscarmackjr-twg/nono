@@ -395,6 +395,7 @@ pub(super) fn handle_seccomp_notification(
     };
 
     // 8. Delegate to approval backend (for both instruction and non-instruction files)
+    #[allow(deprecated)]
     let request = nono::supervisor::CapabilityRequest {
         request_id: format!("seccomp-{}", unique_request_id()),
         path: path.clone(),
@@ -403,6 +404,9 @@ pub(super) fn handle_seccomp_notification(
         child_pid: child.as_raw() as u32,
         session_id: config.session_id.to_string(),
         session_token: String::new(),
+        kind: nono::supervisor::types::HandleKind::File,
+        target: None,
+        access_mask: 0,
     };
 
     let decision = match config.approval_backend.request_capability(&request) {
