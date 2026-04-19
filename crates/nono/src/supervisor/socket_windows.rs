@@ -301,6 +301,116 @@ pub fn broker_file_handle_to_process(
     ))
 }
 
+/// Duplicate a Windows event kernel-object handle into the target process
+/// with the caller-validated access `mask`.
+///
+/// Per CONTEXT.md D-10 (Phase 18 AIPC-01): the supervisor closes its source
+/// `handle` AFTER `send_response` returns; this function does NOT close the
+/// source handle. The child owns the duplicated handle and is responsible
+/// for closing it.
+///
+/// The mask is pre-validated by the caller against the per-session AIPC
+/// allowlist via `policy::mask_is_allowed`; this function trusts the mask
+/// and performs the FFI call.
+///
+/// The function is `safe` because the caller has already validated `handle`
+/// is a live event kernel-object handle owned by this process (the supervisor
+/// opened it via `CreateEventW`); `DuplicateHandle` itself is the only FFI
+/// the function performs and the unsafe contract for that call is documented
+/// inside.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub fn broker_event_to_process(
+    handle: HANDLE,
+    target_process: BrokerTargetProcess,
+    mask: u32,
+) -> Result<ResourceGrant> {
+    let mut duplicated: HANDLE = std::ptr::null_mut();
+    // SAFETY: `handle` is a live event kernel-object handle owned by the
+    // supervisor. `target_process.raw()` was wrapped from a live process
+    // handle. `duplicated` points to writable storage. `mask` was validated
+    // by the caller against the per-session allowlist via
+    // `policy::mask_is_allowed` before this call. `dwOptions = 0` (NOT
+    // DUPLICATE_SAME_ACCESS) because we MAP DOWN — the supervisor source
+    // may have full EVENT_ALL_ACCESS but the child only gets the validated
+    // subset (T-18-01-11 mitigation).
+    let ok = unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            handle,
+            target_process.raw(),
+            &mut duplicated,
+            mask,
+            0,
+            0,
+        )
+    };
+    if ok == 0 || duplicated.is_null() {
+        return Err(NonoError::SandboxInit(format!(
+            "DuplicateHandle (event, mask=0x{mask:08x}) failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(ResourceGrant::duplicated_windows_event_handle(
+        duplicated as usize as u64,
+        mask,
+    ))
+}
+
+/// Duplicate a Windows mutex kernel-object handle into the target process
+/// with the caller-validated access `mask`.
+///
+/// Per CONTEXT.md D-10 (Phase 18 AIPC-01): the supervisor closes its source
+/// `handle` AFTER `send_response` returns; this function does NOT close the
+/// source handle. The child owns the duplicated handle and is responsible
+/// for closing it.
+///
+/// The mask is pre-validated by the caller against the per-session AIPC
+/// allowlist via `policy::mask_is_allowed`; this function trusts the mask
+/// and performs the FFI call.
+///
+/// The function is `safe` because the caller has already validated `handle`
+/// is a live mutex kernel-object handle owned by this process (the supervisor
+/// opened it via `CreateMutexW`); `DuplicateHandle` itself is the only FFI
+/// the function performs and the unsafe contract for that call is documented
+/// inside.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub fn broker_mutex_to_process(
+    handle: HANDLE,
+    target_process: BrokerTargetProcess,
+    mask: u32,
+) -> Result<ResourceGrant> {
+    let mut duplicated: HANDLE = std::ptr::null_mut();
+    // SAFETY: `handle` is a live mutex kernel-object handle owned by the
+    // supervisor. `target_process.raw()` was wrapped from a live process
+    // handle. `duplicated` points to writable storage. `mask` was validated
+    // by the caller against the per-session allowlist via
+    // `policy::mask_is_allowed` before this call. `dwOptions = 0` (NOT
+    // DUPLICATE_SAME_ACCESS) because we MAP DOWN — the supervisor source
+    // may have full MUTEX_ALL_ACCESS but the child only gets the validated
+    // subset (T-18-01-11 mitigation).
+    let ok = unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            handle,
+            target_process.raw(),
+            &mut duplicated,
+            mask,
+            0,
+            0,
+        )
+    };
+    if ok == 0 || duplicated.is_null() {
+        return Err(NonoError::SandboxInit(format!(
+            "DuplicateHandle (mutex, mask=0x{mask:08x}) failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(ResourceGrant::duplicated_windows_mutex_handle(
+        duplicated as usize as u64,
+        mask,
+    ))
+}
+
 impl Drop for SupervisorSocket {
     fn drop(&mut self) {
         if self.disconnect_on_drop {
@@ -975,5 +1085,116 @@ mod tests {
             // above and has not been wrapped or closed yet.
             windows_sys::Win32::Foundation::CloseHandle(raw_handle as usize as HANDLE);
         }
+    }
+
+    // Phase 18 AIPC-01 Task 3: per-fn unit tests for the new event/mutex
+    // brokers. All gated `#[cfg(target_os = "windows")]` (the entire file is
+    // already Windows-only via `#[path]` routing in `mod.rs` but we apply the
+    // gate explicitly so the intent is unambiguous).
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_broker_event_to_process_duplicates_handle() {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::CreateEventW;
+        // SAFETY: anonymous event creation with NULL attributes/name. Manual
+        // reset = FALSE, initial state = FALSE.
+        let event: HANDLE =
+            unsafe { CreateEventW(std::ptr::null_mut(), 0, 0, std::ptr::null()) };
+        assert!(
+            !event.is_null(),
+            "CreateEventW failed: {}",
+            std::io::Error::last_os_error()
+        );
+
+        let grant = broker_event_to_process(
+            event,
+            BrokerTargetProcess::current(),
+            crate::supervisor::policy::EVENT_DEFAULT_MASK,
+        )
+        .expect("duplicate event into current process");
+        assert_eq!(grant.transfer, ResourceTransferKind::DuplicatedWindowsHandle);
+        assert_eq!(
+            grant.resource_kind,
+            crate::supervisor::types::GrantedResourceKind::Event
+        );
+        let raw = grant.raw_handle.expect("raw handle present");
+        assert_ne!(raw, 0);
+
+        // SAFETY: `raw` came from DuplicateHandle just above; `event` came
+        // from CreateEventW above. Both are live HANDLEs we own.
+        unsafe {
+            CloseHandle(raw as usize as HANDLE);
+            CloseHandle(event);
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_broker_event_to_process_propagates_duplicate_handle_failure() {
+        let result = broker_event_to_process(
+            std::ptr::null_mut(),
+            BrokerTargetProcess::current(),
+            crate::supervisor::policy::EVENT_DEFAULT_MASK,
+        );
+        let err = result.expect_err("NULL source handle must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("DuplicateHandle (event"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_broker_mutex_to_process_duplicates_handle() {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::CreateMutexW;
+        // SAFETY: anonymous mutex creation with NULL attributes/name. Initial
+        // owner = FALSE.
+        let mutex: HANDLE =
+            unsafe { CreateMutexW(std::ptr::null_mut(), 0, std::ptr::null()) };
+        assert!(
+            !mutex.is_null(),
+            "CreateMutexW failed: {}",
+            std::io::Error::last_os_error()
+        );
+
+        let grant = broker_mutex_to_process(
+            mutex,
+            BrokerTargetProcess::current(),
+            crate::supervisor::policy::MUTEX_DEFAULT_MASK,
+        )
+        .expect("duplicate mutex into current process");
+        assert_eq!(grant.transfer, ResourceTransferKind::DuplicatedWindowsHandle);
+        assert_eq!(
+            grant.resource_kind,
+            crate::supervisor::types::GrantedResourceKind::Mutex
+        );
+        let raw = grant.raw_handle.expect("raw handle present");
+        assert_ne!(raw, 0);
+
+        // SAFETY: `raw` came from DuplicateHandle just above; `mutex` came
+        // from CreateMutexW above. Both are live HANDLEs we own.
+        unsafe {
+            CloseHandle(raw as usize as HANDLE);
+            CloseHandle(mutex);
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_broker_mutex_to_process_propagates_duplicate_handle_failure() {
+        let result = broker_mutex_to_process(
+            std::ptr::null_mut(),
+            BrokerTargetProcess::current(),
+            crate::supervisor::policy::MUTEX_DEFAULT_MASK,
+        );
+        let err = result.expect_err("NULL source handle must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("DuplicateHandle (mutex"),
+            "unexpected error: {msg}"
+        );
     }
 }

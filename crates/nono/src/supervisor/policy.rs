@@ -155,7 +155,14 @@ mod tests {
         // SYNCHRONIZE alone in current Windows. This test guards the
         // intentional inclusion against a future "dead code" cleanup.
         assert_eq!(MUTEX_MODIFY_STATE, 0x0001);
-        assert!(MUTEX_DEFAULT_MASK & MUTEX_MODIFY_STATE == MUTEX_MODIFY_STATE);
+        // Compile-time assertion: MUTEX_DEFAULT_MASK must contain
+        // MUTEX_MODIFY_STATE. Using `const _` because both operands are
+        // constants and `assert!` on a constant value would be a clippy lint
+        // (`assertions_on_constants`).
+        const _: () = assert!(
+            MUTEX_DEFAULT_MASK & MUTEX_MODIFY_STATE == MUTEX_MODIFY_STATE,
+            "MUTEX_DEFAULT_MASK must include MUTEX_MODIFY_STATE for symmetry with EVENT_MODIFY_STATE"
+        );
     }
 
     #[test]
