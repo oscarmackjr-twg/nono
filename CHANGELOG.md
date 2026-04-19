@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Security
+
+- *(deps)* Upgrade `rustls-webpki` from `0.103.10` to `0.103.12` to clear **RUSTSEC-2026-0098** and **RUSTSEC-2026-0099** (cherry-pick of upstream `8876d89`, Phase 20 plan 20-01)
+
 ### Documentation
 
 - *(windows)* Publish Windows filesystem parity contract and align preview/security docs with the current native subset
@@ -10,11 +14,28 @@
 ### Features
 
 - *(windows)* Expand the native filesystem subset to accept exact-file grants, write-only directory rules, Windows-aware path comparisons, and policy-preprocessed `override_deny`
+- *(cli, linux, macos)* Add `--allow-gpu` flag on `nono run` / `nono shell` / `nono wrap` with per-platform dispatch: Linux Landlock allowlist for `/dev/nvidia*` + DRM render nodes + AMD KFD + WSL2 DXG device nodes plus NVIDIA procfs + `/dev/nvidia-uvm-tools`; macOS Seatbelt IOKit Metal / AGX GPU user-client grants; Windows CLI-layer `tracing::warn!("--allow-gpu is not enforced on this platform")` with byte-identical sandbox state (D-21 invariant). Upstream port of `cb6de49` + `4535473` + `b162b5c` + `4df0a8e` (Phase 20 plans 20-04, D-12/D-13)
+- *(keystore)* Add `keyring://service/account[?decode=go-keyring]` credential URI scheme with fail-closed validator (rejects malformed URIs, unknown codecs, and path-traversal inputs without filesystem I/O). Manual port of upstream `5bccbc4` + `23e9a87` (Phase 20 plan 20-03, D-08)
+- *(cli)* Add `--env-allow PATTERN` and `--env-deny PATTERN` (both repeatable) environment-variable filter flags on `nono run` / `nono shell` / `nono wrap`, with parse-time fail-closed pattern validator (exact names, trailing-prefix globs like `AWS_*`, and bare `*` accepted; middle/leading globs rejected before sandbox launches). CLI-surface subset of upstream PR #688 / `1b412a7`; full propagation to the sandboxed child's env boundary is deferred to a future profile-surface plan (Phase 20 plan 20-03, D-09)
+- *(trust)* Add GitLab ID tokens for trust signing with `url::Url` component-equality issuer validator that fails closed against prefix-match anti-patterns, mirroring the existing GitHub Actions trust surface. Upstream port of `ab5a064` (Phase 20 plan 20-04, D-11)
+- *(hooks)* Wire `.claude.json` symlink at Claude Code hook install time with canonicalized `Path::starts_with` root-containment validation (rejects sibling-tempdir escapes) and Windows fail-open behavior on unprivileged symlink creation (tracing::warn! instead of hook-install failure). Upstream port of `97f7294` (Phase 20 plan 20-02, D-07)
 
 ### Bug Fixes
 
 - *(windows)* `nono setup --check-only` no longer self-contradicts about `nono wrap` — removes the stale "remain intentionally unavailable" sentence and adds the canonical "`'nono wrap' is available on Windows with Job Object + WFP enforcement (no exec-replace, unlike Unix)`" line (Phase 14 plan 14-02, closes P07-HV-2)
 - *(windows, detached)* Fixed `STATUS_DLL_INIT_FAILED (0xC0000142)` for console-application grandchildren spawned in detached-supervisor mode (`nono run --detached`). Root cause: `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` combined with `DETACHED_PROCESS` prevents DLL loader initialization in console children; the WRITE_RESTRICTED + session-SID token amplifies the failure. Fix (direction-b): PTY allocation is now skipped for Windows detached supervisors, and when the inner detached supervisor runs (`NONO_DETACHED_LAUNCH=1`), `spawn_windows_child` launches the grandchild with a null token (caller's token). Kernel network identity on the detached path falls back to AppID-based WFP filtering; per-session SID WFP is retained for non-detached (`nono run`, `nono shell`). Security waivers scoped to the detached path only: Low-Integrity isolation and per-session SID WFP — documented in the commit body. Phase 13 UAT items `P05-HV-1`, `P07-HV-3`, `P11-HV-1`, `P11-HV-3` promoted from `waived (v2.0-known-issue)` to `pass`. (Phase 15-02, fix commits `802c958` + `2c414d8`; Phase 15-03 bookkeeping commits `eda3d6f` + CHANGELOG.)
+
+### Refactoring
+
+- *(profile)* Add end-to-end regression coverage for the profile `extends` cycle guard (self-reference + indirect A→B→A + linear chain), driven through the public `load_profile` API against per-test `XDG_CONFIG_HOME` / `APPDATA` tempdirs. Upstream port of `c1bc439` (Phase 20 plan 20-02, D-06)
+
+### Miscellaneous
+
+- *(cli, deprecation)* Backport `command_blocking_deprecation` module from upstream v0.33+ and wire it into CLI startup as a warnings-only surface (`collect_cli_warnings` + `print_warnings` called after legacy-network warnings, before `run_cli`). Emits deprecation warnings for the documented deprecated command list without changing any command's enforcement behavior. Upstream port of `0ca641b` + `4af0c3e` (Phase 20 plan 20-03, D-10)
+
+### Build
+
+- *(workspace)* Realign all workspace crate versions from `0.30.1` to `0.37.1` (`nono`, `nono-cli`, `nono-proxy`, and `nono-ffi` — the last reconciled from the stale `0.1.0` pin). Internal path-dep pins updated in lockstep so Cargo does not fall back to resolving against old registry versions. (Phase 20 plan 20-01, UPST-01)
 
 ## [0.30.1] - 2026-04-09
 
