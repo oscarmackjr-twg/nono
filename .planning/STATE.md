@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: Resource Limits, Extended IPC, Attach-Streaming & Cleanup
-status: Phase 20 plan 20-01 complete (3 DCO-signed commits); wave 1 (20-02, 20-03, 20-04) unblocked — may rebase on post-20-01 HEAD
-stopped_at: Phase 20 plan 20-01 executed end-to-end. 3 commits on windows-squash (`198270e` REQUIREMENTS UPST-01..04, `835c43f` workspace 0.37.1 version bump, `540dca9` rustls-webpki 0.103.12 cherry-pick of upstream 8876d89). cargo audit clears RUSTSEC-2026-0098 and RUSTSEC-2026-0099. Phase 19 deferred flakes carry forward unchanged (19 env_vars.rs + 1-2 trust_scan tempdir-race); D-21 Windows-invariance held structurally (zero *_windows.rs touched).
-last_updated: "2026-04-18T23:58:00.000Z"
-last_activity: 2026-04-19 — Phase 20 plan 20-01 complete. RUSTSEC-2026-0098/0099 cleared via rustls-webpki 0.103.10 → 0.103.12 upgrade (cherry-pick of upstream 8876d89); workspace crate versions realigned 0.30.1 → 0.37.1 across nono, nono-cli, nono-proxy, and nono-ffi (bindings/c); UPST-01..04 requirement IDs added to REQUIREMENTS.md. Plan 20-01 SUMMARY: .planning/phases/20-upstream-parity-sync/20-01-SUMMARY.md
+status: Phase 20 wave 0+1 complete (plans 20-01, 20-02, 20-03 — 3/4 plans); wave 2 plan 20-04 unblocked
+stopped_at: Phase 20 waves 0+1 executed end-to-end. Wave 0: 20-01 (3 feat commits + SUMMARY, rustls-webpki 0.103.12 + workspace 0.37.1). Wave 1 parallel: 20-02 (profile extends cycle guard end-to-end regression tests + claude.json symlink with root-containment validator; 2 fix commits + SUMMARY + merge aa018ad) and 20-03 (keyring:// URI manual port + --env-allow/--env-deny CLI flags + command_blocking_deprecation backport; 3 feat commits + SUMMARY + merge 9e69792). D-21 Windows-invariance held across all 3 plans (zero *_windows.rs touched). Post-merge gate: cargo build --workspace --all-targets exit 0; nono lib 580/580 pass; nono-cli env_vars.rs shows 19 pre-existing Phase 19 CLEAN-02 deferred windows_* failures (exact match for 20-01 baseline, no NEW failures).
+last_updated: "2026-04-19T01:30:00.000Z"
+last_activity: 2026-04-19 — Phase 20 wave 0+1 complete. 20-01 rustls-webpki 0.103.12 + workspace 0.37.1 realignment. 20-02 profile extends cycle guard + claude.json symlink (upstream c1bc439 + 97f7294). 20-03 keyring:// URI scheme (manual port of upstream 5bccbc4 + 23e9a87), --env-allow/--env-deny CLI flags (upstream 1b412a7 CLI-surface subset), command_blocking_deprecation backport (upstream 0ca641b + 4af0c3e). Wave 2 plan 20-04 (--allow-gpu + GitLab ID tokens) unblocked.
 progress:
   total_phases: 20
   completed_phases: 15
-  total_plans: 45
-  completed_plans: 45
+  total_plans: 47
+  completed_plans: 47
   percent: 95
 ---
 
