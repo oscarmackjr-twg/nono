@@ -332,6 +332,196 @@ mod tests {
         );
     }
 
+    // ------------------------------------------------------------------
+    // Profile `extends` cycle-detection guard (upstream c1bc439 parity).
+    //
+    // Upstream c1bc439 (D-06, fix(profiles): prevent infinite recursion in
+    // profile extends check) hardens the extends chain traversal against
+    // cyclic definitions. The fork already carries the fix in
+    // `resolve_extends` (visited-Vec + MAX_INHERITANCE_DEPTH bound — see
+    // `profile/mod.rs`). These three tests are the plan-mandated regression
+    // safety net for 20-02: they exercise the guard end-to-end through the
+    // public `load_profile` API so a future refactor that accidentally
+    // strips the guard would fail-closed here instead of stack-overflowing
+    // at runtime.
+    //
+    // Pattern: each test writes user profile files to a tempdir, points
+    // the user-config-dir env var at it (APPDATA on Windows, XDG_CONFIG_HOME
+    // on Unix), and invokes the public loader. The env-var lock is
+    // required because Rust unit tests run in parallel within one process
+    // (see CLAUDE.md § Coding Standards > "Environment variables in tests").
+    // ------------------------------------------------------------------
+
+    /// Helper: seed a profile JSON file under `<config_dir>/nono/profiles/`.
+    fn seed_user_profile(
+        profiles_dir: &std::path::Path,
+        name: &str,
+        extends: Option<&[&str]>,
+    ) -> std::io::Result<()> {
+        std::fs::create_dir_all(profiles_dir)?;
+        let extends_json = match extends {
+            Some(bases) if bases.len() == 1 => {
+                format!(r#""extends": "{}","#, bases[0])
+            }
+            Some(bases) => {
+                let arr = bases
+                    .iter()
+                    .map(|b| format!("\"{}\"", b))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(r#""extends": [{}],"#, arr)
+            }
+            None => String::new(),
+        };
+        let body = format!(
+            r#"{{ {extends} "meta": {{ "name": "{name}" }} }}"#,
+            extends = extends_json,
+            name = name,
+        );
+        std::fs::write(profiles_dir.join(format!("{}.json", name)), body)?;
+        Ok(())
+    }
+
+    /// Helper: set the user-config-dir env var to `config_dir` for the
+    /// duration of the guard. On Windows this is APPDATA; on Unix it is
+    /// XDG_CONFIG_HOME (plus HOME for fallback paths). Returns the
+    /// EnvVarGuard so the caller binds its drop scope to the test body.
+    fn user_config_dir_guard(config_dir: &std::path::Path) -> crate::test_env::EnvVarGuard {
+        let config_str = config_dir
+            .to_str()
+            .expect("tempdir path must be utf-8 for env var");
+        #[cfg(target_os = "windows")]
+        {
+            crate::test_env::EnvVarGuard::set_all(&[
+                ("APPDATA", config_str),
+                ("USERPROFILE", config_str),
+                ("HOME", config_str),
+            ])
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            crate::test_env::EnvVarGuard::set_all(&[
+                ("XDG_CONFIG_HOME", config_str),
+                ("HOME", config_str),
+            ])
+        }
+    }
+
+    #[test]
+    fn test_profile_extends_self_reference_detected() {
+        use tempfile::tempdir;
+
+        let _guard = match crate::test_env::ENV_LOCK.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        let config_root = tempdir().expect("config tempdir");
+        let _env = user_config_dir_guard(config_root.path());
+
+        // Canonicalize so the value matches XDG_CONFIG_HOME's canonicalized
+        // resolution (symlink-stripped on macOS tempdirs).
+        let canonical_root = config_root
+            .path()
+            .canonicalize()
+            .expect("canonicalize tempdir");
+        let profiles_dir = canonical_root.join("nono").join("profiles");
+
+        // Profile "self-ref-a" extends itself → cycle must be caught.
+        seed_user_profile(&profiles_dir, "self-ref-a", Some(&["self-ref-a"]))
+            .expect("seed self-ref");
+
+        let result = crate::profile::load_profile("self-ref-a");
+        let err = result.expect_err("self-reference cycle must fail-closed, not stack-overflow");
+        assert!(
+            matches!(err, nono::NonoError::ProfileInheritance(_)),
+            "self-reference must surface ProfileInheritance error; got {:?}",
+            err
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("circular") || msg.contains("cycle"),
+            "error must mention cycle/circular: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_profile_extends_indirect_cycle_detected() {
+        use tempfile::tempdir;
+
+        let _guard = match crate::test_env::ENV_LOCK.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        let config_root = tempdir().expect("config tempdir");
+        let _env = user_config_dir_guard(config_root.path());
+
+        let canonical_root = config_root
+            .path()
+            .canonicalize()
+            .expect("canonicalize tempdir");
+        let profiles_dir = canonical_root.join("nono").join("profiles");
+
+        // A extends B; B extends A. Two-hop indirect cycle — guards against
+        // any cycle-detection variant that only catches direct self-refs.
+        seed_user_profile(&profiles_dir, "indirect-a", Some(&["indirect-b"]))
+            .expect("seed indirect-a");
+        seed_user_profile(&profiles_dir, "indirect-b", Some(&["indirect-a"]))
+            .expect("seed indirect-b");
+
+        let result = crate::profile::load_profile("indirect-a");
+        let err = result.expect_err("indirect cycle must fail-closed, not stack-overflow");
+        assert!(
+            matches!(err, nono::NonoError::ProfileInheritance(_)),
+            "indirect cycle must surface ProfileInheritance error; got {:?}",
+            err
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("circular") || msg.contains("cycle"),
+            "error must mention cycle/circular: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_profile_extends_linear_chain_succeeds() {
+        use tempfile::tempdir;
+
+        let _guard = match crate::test_env::ENV_LOCK.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        let config_root = tempdir().expect("config tempdir");
+        let _env = user_config_dir_guard(config_root.path());
+
+        let canonical_root = config_root
+            .path()
+            .canonicalize()
+            .expect("canonicalize tempdir");
+        let profiles_dir = canonical_root.join("nono").join("profiles");
+
+        // Linear chain: chain-a extends chain-b extends chain-c (no cycle).
+        // Regression guard: over-aggressive cycle detection must not reject
+        // legitimate multi-hop chains.
+        seed_user_profile(&profiles_dir, "chain-c", None).expect("seed chain-c");
+        seed_user_profile(&profiles_dir, "chain-b", Some(&["chain-c"])).expect("seed chain-b");
+        seed_user_profile(&profiles_dir, "chain-a", Some(&["chain-b"])).expect("seed chain-a");
+
+        let profile = crate::profile::load_profile("chain-a")
+            .expect("linear chain must resolve without false-positive cycle rejection");
+        assert_eq!(profile.meta.name, "chain-a");
+        // The `extends` field must be consumed by the merge pipeline.
+        assert!(
+            profile.extends.is_none(),
+            "resolved profile's extends field should be consumed (None), was {:?}",
+            profile.extends
+        );
+    }
+
     /// Regression test: verifies that all built-in profiles — regardless of
     /// their signal_mode setting — will produce Seatbelt rules that allow
     /// signaling child processes within the same sandbox.
