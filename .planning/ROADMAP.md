@@ -82,6 +82,17 @@ Carry-forward → Phase 15: detached-console-grandchild `0xC0000142 STATUS_DLL_I
   - [x] 19-03-PLAN.md — CLEAN-03 triage 10 disk-resident WIP items (per-file disposition) — 6 backfilled alive, 2 reverted to HEAD, 2 deleted, 2 new `.gitignore` patterns for WFP-service debug crumbs (complete 2026-04-18, commits `a208761`, `a4100aa`, `db4547b`, `0391e37`, `d49fda8`, `d6bf88f`)
   - [x] 19-04-PLAN.md — CLEAN-04 `is_prunable` retention predicate + `nono prune` CLI extensions (duration-form `--older-than`, `--all-exited`) + auto-sweep on `nono ps` (100-file threshold) + T-19-04-07 `NONO_CAP_FILE` structural no-op + one-shot cleanup on this host (1392 → 49, delta 1343) + `docs/session-retention.md` (complete 2026-04-18, commits `18e9768`, `a71b2bf`, `c3defb6`, `ddf408b`, `f626e24`)
 
+- [ ] **Phase 20: Upstream Parity Sync (UPST)** — Track and back-port functional changes from upstream `always-further/nono` since the fork branched. Quick-task research (commit `7180f23`, `.planning/quick/260419-cmp-upstream-036-windows-parity/COMPARISON.md`) established the fork is pinned at crate version `0.30.1` while upstream has shipped 0.31–0.37.1 — the fork is missing upstream work in keyring URIs, `--allow-gpu`, GitLab trust tokens, macOS Seatbelt refinements, Cargo version realignment, and (critically) the rustls-webpki RUSTSEC-2026-0098/0099 security upgrade landed upstream in 0.37. This phase re-establishes the Unix/macOS parity baseline without regressing the Windows-specific work in Phases 01–19.
+
+  **Depends on:** Nothing structural; should land before v2.1 ships so the security upgrade is in the release.
+
+  **Open questions** (for `/gsd-plan-phase 20` or `/gsd-discuss-phase 20`):
+  - Rebase onto `upstream/v0.37.1` vs cherry-pick individual changes vs manual port? Rebase is cleanest but risks losing Windows-specific conflict resolution history.
+  - Target tag — 0.36.0 (user's stated baseline) or 0.37.1 (latest, includes the security fix)? Recommend 0.37.1.
+  - Scope boundary — do we also refresh crate versions in `Cargo.toml` to match upstream 0.37.1, or keep them on fork-internal versioning?
+
+  **Plans:** TBD during `/gsd-plan-phase 20` — likely grouped by upstream version range (0.31–0.33, 0.34–0.35, 0.36–0.37) plus a dedicated plan for the rustls-webpki security upgrade.
+
 ## Progress Table
 
 | Phase | Milestone | Plans Complete | Status | Completed |
@@ -105,3 +116,4 @@ Carry-forward → Phase 15: detached-console-grandchild `0xC0000142 STATUS_DLL_I
 | 17. Attach-Streaming (ATCH-01) | v2.1 | 0/? | Not Planned (run `/gsd-plan-phase 17` to start) | - |
 | 18. Extended IPC (AIPC-01) | v2.1 | 0/? | Not Planned (run `/gsd-plan-phase 18` to start) | - |
 | 19. Cleanup (CLEAN-01..04) | v2.1 | 4/4 | Complete (19-01 CLEAN-01 fmt drift; 19-02 CLEAN-02 5 test flakes + query_path UNC prod fix complete-with-deviation; 19-03 CLEAN-03 10-item WIP triage; 19-04 CLEAN-04 retention + prune + auto-sweep + T-19-04-07 mitigation + 1343-file one-shot cleanup + docs; verifier passed 25/25 must-haves, commit `6597fbf`) | 2026-04-19 |
+| 20. Upstream Parity Sync (UPST) | v2.1 | 0/? | Not Planned (run `/gsd-plan-phase 20` or `/gsd-discuss-phase 20` to scope back-port work; source material at `.planning/quick/260419-cmp-upstream-036-windows-parity/COMPARISON.md`) | - |

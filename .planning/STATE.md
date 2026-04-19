@@ -99,6 +99,7 @@ Progress: [████████░░]  80% (8/10 v2.1 requirements validate
 
 ### Roadmap Evolution
 
+- 2026-04-19: Phase 20 (Upstream Parity Sync, UPST) added after Phase 19 completion. Research quick-task `260419-cmp-upstream-036-windows-parity/COMPARISON.md` (commit `7180f23`) established the fork is pinned at crate version `0.30.1` while upstream has shipped 0.31–0.37.1. Phase 20 back-ports missing Unix/macOS functionality (keyring URIs, `--allow-gpu`, GitLab trust tokens, macOS Seatbelt refinements) and, critically, the rustls-webpki RUSTSEC-2026-0098/0099 security upgrade landed upstream in 0.37. Plans TBD during `/gsd-plan-phase 20` — likely grouped by upstream version range + dedicated security-upgrade plan.
 - 2026-04-17: Phase 14 (v1.0 Fix Pass) added after Phase 13 UAT surfaced three blocking gaps — detached console-child STATUS_DLL_INIT_FAILED (blocks 4 UAT items), setup help-text drift (blocks P07-HV-2), P09-HV-1 runbook flag bug. Phase 14 plans: 3 (one per gap; plan 03 also re-runs the blocked UAT items and finishes Phase 13 Task 3 upstream promotion).
 
 ### Research Flags (open)
