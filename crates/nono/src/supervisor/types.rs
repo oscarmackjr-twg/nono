@@ -668,9 +668,15 @@ mod tests {
         let grant = ResourceGrant::socket_protocol_info_blob(bytes.clone(), SocketRole::Connect);
         let json = serde_json::to_string(&grant).expect("serialize");
         let decoded: ResourceGrant = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(decoded.transfer, ResourceTransferKind::SocketProtocolInfoBlob);
+        assert_eq!(
+            decoded.transfer,
+            ResourceTransferKind::SocketProtocolInfoBlob
+        );
         assert_eq!(decoded.resource_kind, GrantedResourceKind::Socket);
-        assert_eq!(decoded.protocol_info_blob.as_deref(), Some(bytes.as_slice()));
+        assert_eq!(
+            decoded.protocol_info_blob.as_deref(),
+            Some(bytes.as_slice())
+        );
         assert!(decoded.raw_handle.is_none());
     }
 }

@@ -1,7 +1,10 @@
 use super::*;
 use nono::supervisor::policy;
-use nono::supervisor::socket::{broker_event_to_process, broker_mutex_to_process};
-use nono::supervisor::{HandleKind, HandleTarget};
+use nono::supervisor::socket::{
+    bind_aipc_pipe, broker_event_to_process, broker_mutex_to_process, broker_pipe_to_process,
+    broker_socket_to_process, broker_target_pid,
+};
+use nono::supervisor::{HandleKind, HandleTarget, PipeDirection, SocketProtocol, SocketRole};
 use std::io::{Read, Write};
 use std::mem::ManuallyDrop;
 use std::os::windows::ffi::OsStrExt;
@@ -11,6 +14,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, LocalFree, BOOL, HANDLE, INVALID_HANDLE_VALUE,
+};
+use windows_sys::Win32::Networking::WinSock::{
+    closesocket, WSASocketW, WSAStartup, AF_INET, INVALID_SOCKET, IPPROTO_TCP, IPPROTO_UDP,
+    SOCK_DGRAM, SOCK_STREAM, WSADATA, WSA_FLAG_OVERLAPPED,
 };
 use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
 use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
@@ -1295,6 +1302,201 @@ fn handle_event_request(
     grant.map(Some)
 }
 
+/// Handle a HandleKind::Pipe request: validate target shape + direction
+/// (decoded from `access_mask` — GENERIC_READ vs GENERIC_WRITE bits), create
+/// the named pipe in the canonical `\\.\pipe\nono-aipc-<user_session_id>-<name>`
+/// namespace using `user_session_id` (Phase 17 latent-bug carry-forward —
+/// MUST NOT use `self.session_id`), and broker the supervisor-side handle into
+/// the child via `broker_pipe_to_process` with `dwOptions = 0` (MAP DOWN to
+/// the validated direction).
+///
+/// Per CONTEXT.md D-05 default allowlist: read OR write (not both). ReadWrite
+/// requires profile widening (Plan 18-03). Plan 18-02 ships with default-only
+/// enforcement.
+///
+/// Per CONTEXT.md D-10: the supervisor closes its source HANDLE as the call
+/// returns, AFTER the broker has duplicated it into the child.
+fn handle_pipe_request(
+    request: &nono::CapabilityRequest,
+    target_process: nono::BrokerTargetProcess,
+    user_session_id: &str,
+) -> Result<Option<nono::supervisor::ResourceGrant>> {
+    let raw_name = match request.target.as_ref() {
+        Some(HandleTarget::PipeName { name }) => name,
+        _ => {
+            return Err(NonoError::SandboxInit(
+                "AIPC Pipe request: target shape does not match kind Pipe".to_string(),
+            ))
+        }
+    };
+    validate_aipc_object_name(raw_name)?;
+
+    // Decode direction from access_mask: GENERIC_READ-only -> Read,
+    // GENERIC_WRITE-only -> Write, both -> ReadWrite, anything else -> err.
+    let read_bit = request.access_mask & policy::GENERIC_READ != 0;
+    let write_bit = request.access_mask & policy::GENERIC_WRITE != 0;
+    let no_extra_bits = request.access_mask & !(policy::GENERIC_READ | policy::GENERIC_WRITE) == 0;
+    let direction = match (read_bit, write_bit, no_extra_bits) {
+        (true, false, true) => PipeDirection::Read,
+        (false, true, true) => PipeDirection::Write,
+        (true, true, true) => PipeDirection::ReadWrite,
+        _ => {
+            return Err(NonoError::SandboxInit(format!(
+                "pipe access_mask 0x{:08x} not a valid combination of GENERIC_READ/GENERIC_WRITE",
+                request.access_mask
+            )))
+        }
+    };
+
+    // Default per D-05: read OR write (not both); ReadWrite requires profile
+    // widening (Plan 18-03 layers the profile-widening lookup on top). Plan
+    // 18-02 ships with default-only enforcement.
+    if matches!(direction, PipeDirection::ReadWrite) {
+        return Err(NonoError::SandboxInit(
+            "pipe direction ReadWrite not in default allowlist (profile widening required)"
+                .to_string(),
+        ));
+    }
+
+    // Phase 17 latent-bug carry-forward: namespace prefix MUST use
+    // `user_session_id` (the user-facing 16-hex), NOT `self.session_id` (the
+    // supervisor correlation `supervised-PID-NANOS`). Three pre-existing bugs
+    // of exactly this shape were fixed in Phase 17 commit 7db6595.
+    let canonical = format!("\\\\.\\pipe\\nono-aipc-{}-{}", user_session_id, raw_name);
+    let handle = bind_aipc_pipe(&canonical, direction)?;
+    let grant = broker_pipe_to_process(handle, target_process, direction);
+    // D-10: supervisor closes its source after broker call.
+    // SAFETY: `handle` is a live HANDLE returned by bind_aipc_pipe above and
+    // has not been wrapped or freed elsewhere.
+    unsafe {
+        CloseHandle(handle);
+    }
+    grant.map(Some)
+}
+
+/// Handle a HandleKind::Socket request: validate target shape + role + port,
+/// open a fresh supervisor-owned SOCKET via `WSASocketW`, and broker it into
+/// the child via `broker_socket_to_process` (which uses `WSADuplicateSocketW`
+/// to serialize the socket capability into a target-PID-bound
+/// `WSAPROTOCOL_INFOW` blob).
+///
+/// Per CONTEXT.md `<specifics>` line 167 + RESEARCH Landmines § Socket:
+/// privileged ports (`<= 1023`) are unconditionally denied. Cannot be widened
+/// by profile in v2.1.
+///
+/// Per CONTEXT.md D-05: default allowlist allows Connect role only. Bind and
+/// Listen require profile widening (Plan 18-03 wires the lookup; Plan 18-02
+/// hard-codes Connect-only).
+///
+/// Per CONTEXT.md D-10 + RESEARCH Landmines § Socket: the supervisor MUST
+/// hold its source SOCKET open until AFTER `send_response` returns. This
+/// helper closes the source AFTER `broker_socket_to_process` returns the
+/// serialized blob; the kernel keeps the underlying socket alive until ALL
+/// descriptors close (the duplicated descriptor only materializes when the
+/// child calls `WSASocketW(FROM_PROTOCOL_INFO, ...)`).
+///
+/// `_user_session_id` is not used for sockets — the namespace is the network
+/// endpoint, not a `Local\` kernel-object name. Kept in signature for symmetry
+/// with `handle_pipe_request` and `handle_event_request`.
+fn handle_socket_request(
+    request: &nono::CapabilityRequest,
+    target_process: nono::BrokerTargetProcess,
+    _user_session_id: &str,
+) -> Result<Option<nono::supervisor::ResourceGrant>> {
+    let (protocol, host, port, role) = match request.target.as_ref() {
+        Some(HandleTarget::SocketEndpoint {
+            protocol,
+            host,
+            port,
+            role,
+        }) => (*protocol, host.as_str(), *port, *role),
+        _ => {
+            return Err(NonoError::SandboxInit(
+                "AIPC Socket request: target shape does not match kind Socket".to_string(),
+            ))
+        }
+    };
+
+    // Privileged-port check — UNCONDITIONAL deny (RESEARCH Landmines § Socket;
+    // CONTEXT.md `<specifics>` line 167). Cannot be widened by profile in v2.1.
+    if port <= policy::PRIVILEGED_PORT_MAX {
+        return Err(NonoError::SandboxInit(format!(
+            "privileged port {port} not allowed (port must be > {})",
+            policy::PRIVILEGED_PORT_MAX
+        )));
+    }
+
+    // Role validation — Plan 18-02 default allowlist: Connect only.
+    // Plan 18-03 wires the profile-widening lookup; for now hard-coded.
+    if !matches!(role, SocketRole::Connect) {
+        return Err(NonoError::SandboxInit(format!(
+            "socket role {role:?} not in default allowlist (profile widening required)"
+        )));
+    }
+
+    // Sanitize host — reject control bytes / NUL / overly long. Plan 18-02
+    // doesn't resolve the host (deferred); for connect role, the child uses
+    // the brokered SOCKET's own connect call against the validated endpoint
+    // baked into the audit log via the original CapabilityRequest.target.
+    if host.is_empty() || host.len() > 253 {
+        return Err(NonoError::SandboxInit(format!(
+            "socket host invalid length: {}",
+            host.len()
+        )));
+    }
+    for ch in host.chars() {
+        if ch.is_control() || ch == '\0' {
+            return Err(NonoError::SandboxInit(
+                "socket host contains control char".to_string(),
+            ));
+        }
+    }
+
+    // Initialize Winsock (idempotent — WSAStartup is reference-counted).
+    // SAFETY: WSAStartup with version 2.2 (0x0202) is the standard Winsock
+    // initialization; wsadata points to writable storage.
+    let mut wsadata: WSADATA = unsafe { std::mem::zeroed() };
+    let _ = unsafe { WSAStartup(0x0202, &mut wsadata) };
+
+    let (sock_type, ipproto) = match protocol {
+        SocketProtocol::Tcp => (SOCK_STREAM, IPPROTO_TCP),
+        SocketProtocol::Udp => (SOCK_DGRAM, IPPROTO_UDP),
+    };
+    // SAFETY: WSASocketW with NULL protocol_info creates a fresh socket.
+    // AF_INET / SOCK_STREAM / SOCK_DGRAM / IPPROTO_TCP / IPPROTO_UDP are
+    // well-defined Winsock constants. The returned SOCKET is owned by the
+    // supervisor for the duration of the broker call; closesocket happens
+    // after the broker returns.
+    let sock = unsafe {
+        WSASocketW(
+            AF_INET as i32,
+            sock_type,
+            ipproto,
+            std::ptr::null(),
+            0,
+            WSA_FLAG_OVERLAPPED,
+        )
+    };
+    if sock == INVALID_SOCKET {
+        return Err(NonoError::SandboxInit(format!(
+            "WSASocketW failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    let target_pid = broker_target_pid(&target_process);
+    let grant = broker_socket_to_process(sock, target_process, target_pid, role);
+    // D-10 + RESEARCH Landmines § Socket: supervisor closes the source
+    // AFTER broker returns the serialized WSAPROTOCOL_INFOW blob. The kernel
+    // keeps the underlying socket alive until ALL descriptors close, and the
+    // duplicated descriptor materializes when the child calls
+    // WSASocketW(FROM_PROTOCOL_INFO, ...).
+    // SAFETY: `sock` is a live SOCKET returned by WSASocketW above; the
+    // broker call above only borrows it for the WSADuplicateSocketW call.
+    let _ = unsafe { closesocket(sock) };
+    grant.map(Some)
+}
+
 /// Handle a HandleKind::Mutex request — same shape as `handle_event_request`
 /// with `CreateMutexW` + `broker_mutex_to_process` and the Mutex default
 /// mask. See `handle_event_request` for the Phase 17 carry-forward and D-10
@@ -1511,15 +1713,20 @@ pub(super) fn handle_windows_supervisor_message(
                     HandleKind::Mutex => {
                         handle_mutex_request(&request, target_process, user_session_id)
                     }
-                    HandleKind::Socket | HandleKind::Pipe | HandleKind::JobObject => {
-                        // Plans 18-02 (Socket/Pipe) and 18-03 (JobObject) wire
-                        // these arms. For now return a structured Denied so
-                        // the dispatcher is total over all HandleKind variants.
-                        let kind_name = format!("{:?}", request.kind);
+                    HandleKind::Pipe => {
+                        handle_pipe_request(&request, target_process, user_session_id)
+                    }
+                    HandleKind::Socket => {
+                        handle_socket_request(&request, target_process, user_session_id)
+                    }
+                    HandleKind::JobObject => {
+                        // Plan 18-03 wires this arm with the containment-job
+                        // runtime guard + profile widening. For now return a
+                        // structured Denied so the dispatcher is total over
+                        // all HandleKind variants.
                         let decision = nono::ApprovalDecision::Denied {
-                            reason: format!(
-                                "{kind_name} brokering not yet implemented in this build"
-                            ),
+                            reason: "JobObject brokering not yet implemented in this build"
+                                .to_string(),
                         };
                         audit_log.push(audit_entry_with_redacted_token(
                             &request,
@@ -2304,6 +2511,365 @@ mod capability_handler_tests {
         assert!(
             !json.contains(sensitive),
             "audit JSON must not contain the raw mutex-kind session token: {json}"
+        );
+
+        let resp = child.recv_response().expect("drain");
+        if let nono::supervisor::SupervisorResponse::Decision { grant, .. } = resp {
+            close_grant_handle_if_any(&grant);
+        }
+    }
+
+    // Phase 18 AIPC-01 Plan 18-02 Task 3 — dispatcher tests for the new
+    // Pipe + Socket HandleKind variants (target-shape validation, role-based
+    // socket validation, privileged-port unconditional reject, broker
+    // dispatch, token redaction).
+
+    #[test]
+    fn handle_brokers_pipe_with_read_direction() {
+        let backend = CountingGrantBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        let token = "testtoken12345678";
+        let req = make_request_aipc(
+            token,
+            "pipe-grant-001",
+            HandleKind::Pipe,
+            Some(HandleTarget::PipeName {
+                name: "test-stream".to_string(),
+            }),
+            policy::GENERIC_READ,
+        );
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(req),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            token,
+            "testaipc12345678",
+        )
+        .expect("dispatch");
+
+        let response = child.recv_response().expect("response");
+        match response {
+            nono::supervisor::SupervisorResponse::Decision {
+                decision, grant, ..
+            } => {
+                assert!(decision.is_granted(), "got {decision:?}");
+                assert!(grant.is_some(), "Granted decision must carry a grant");
+                let g = grant.as_ref().unwrap();
+                assert_eq!(
+                    g.transfer,
+                    nono::supervisor::ResourceTransferKind::DuplicatedWindowsHandle
+                );
+                assert_eq!(g.resource_kind, nono::supervisor::GrantedResourceKind::Pipe);
+                assert_eq!(g.access, nono::AccessMode::Read);
+                close_grant_handle_if_any(&grant);
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+        assert_eq!(backend.calls(), 1);
+        assert_eq!(audit_log.len(), 1);
+        assert_eq!(audit_log[0].request.kind, HandleKind::Pipe);
+    }
+
+    #[test]
+    fn handle_denies_pipe_with_invalid_target_shape() {
+        let backend = CountingGrantBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        let token = "testtoken12345678";
+        // Mismatched: kind=Pipe but target=EventName.
+        let req = make_request_aipc(
+            token,
+            "pipe-shape-001",
+            HandleKind::Pipe,
+            Some(HandleTarget::EventName {
+                name: "wrong-shape".to_string(),
+            }),
+            policy::GENERIC_READ,
+        );
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(req),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            token,
+            "testaipc12345678",
+        )
+        .expect("dispatch");
+
+        // Backend WAS consulted (mask is 0 valid; shape check happens inside
+        // handle_pipe_request which runs only after Granted). The grant call
+        // returns Err which is logged via tracing; the audit decision still
+        // shows Granted with grant=None. This matches the Plan 18-01 broker
+        // failure handling pattern.
+        assert_eq!(backend.calls(), 1);
+        assert_eq!(audit_log.len(), 1);
+        // The audit decision is still Granted (the backend granted) but the
+        // grant Option is None because the broker call returned Err. The
+        // child receives a Granted response with grant=None.
+        let response = child.recv_response().expect("drain");
+        match response {
+            nono::supervisor::SupervisorResponse::Decision { grant, .. } => {
+                assert!(
+                    grant.is_none(),
+                    "shape-mismatch broker failure must produce grant=None"
+                );
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn handle_brokers_socket_with_connect_role() {
+        let backend = CountingGrantBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        let token = "testtoken12345678";
+        let req = make_request_aipc(
+            token,
+            "sock-grant-001",
+            HandleKind::Socket,
+            Some(HandleTarget::SocketEndpoint {
+                protocol: SocketProtocol::Tcp,
+                host: "127.0.0.1".to_string(),
+                port: 8080,
+                role: SocketRole::Connect,
+            }),
+            0, // sockets don't use mask — role-based validation
+        );
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(req),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            token,
+            "testaipc12345678",
+        )
+        .expect("dispatch");
+
+        let response = child.recv_response().expect("response");
+        match response {
+            nono::supervisor::SupervisorResponse::Decision {
+                decision, grant, ..
+            } => {
+                assert!(decision.is_granted(), "got {decision:?}");
+                let g = grant.as_ref().expect("Granted decision must carry a grant");
+                assert_eq!(
+                    g.transfer,
+                    nono::supervisor::ResourceTransferKind::SocketProtocolInfoBlob
+                );
+                assert_eq!(
+                    g.resource_kind,
+                    nono::supervisor::GrantedResourceKind::Socket
+                );
+                let blob = g.protocol_info_blob.as_ref().expect("blob present");
+                assert_eq!(
+                    blob.len(),
+                    std::mem::size_of::<windows_sys::Win32::Networking::WinSock::WSAPROTOCOL_INFOW>(
+                    ),
+                    "blob length must match WSAPROTOCOL_INFOW size"
+                );
+                assert!(
+                    g.raw_handle.is_none(),
+                    "socket grants don't carry raw_handle"
+                );
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+        assert_eq!(backend.calls(), 1);
+        assert_eq!(audit_log.len(), 1);
+        assert_eq!(audit_log[0].request.kind, HandleKind::Socket);
+    }
+
+    #[test]
+    fn handle_denies_socket_with_privileged_port() {
+        let backend = CountingGrantBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        let token = "testtoken12345678";
+        let req = make_request_aipc(
+            token,
+            "sock-priv-port-001",
+            HandleKind::Socket,
+            Some(HandleTarget::SocketEndpoint {
+                protocol: SocketProtocol::Tcp,
+                host: "127.0.0.1".to_string(),
+                port: 80, // privileged
+                role: SocketRole::Connect,
+            }),
+            0,
+        );
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(req),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            token,
+            "testaipc12345678",
+        )
+        .expect("dispatch");
+
+        // Backend WAS consulted (port check happens inside the broker helper,
+        // not before backend dispatch). The audit log shows Granted by the
+        // backend but grant=None because the broker rejected.
+        assert_eq!(backend.calls(), 1);
+        assert_eq!(audit_log.len(), 1);
+        let response = child.recv_response().expect("drain");
+        match response {
+            nono::supervisor::SupervisorResponse::Decision { grant, .. } => {
+                assert!(
+                    grant.is_none(),
+                    "privileged-port rejection must produce grant=None"
+                );
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn handle_denies_socket_bind_role_without_profile_widening() {
+        let backend = CountingGrantBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        let token = "testtoken12345678";
+        let req = make_request_aipc(
+            token,
+            "sock-bind-role-001",
+            HandleKind::Socket,
+            Some(HandleTarget::SocketEndpoint {
+                protocol: SocketProtocol::Tcp,
+                host: "127.0.0.1".to_string(),
+                port: 8080,
+                role: SocketRole::Bind, // not in default allowlist
+            }),
+            0,
+        );
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(req),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            token,
+            "testaipc12345678",
+        )
+        .expect("dispatch");
+
+        assert_eq!(backend.calls(), 1);
+        assert_eq!(audit_log.len(), 1);
+        let response = child.recv_response().expect("drain");
+        match response {
+            nono::supervisor::SupervisorResponse::Decision { grant, .. } => {
+                assert!(
+                    grant.is_none(),
+                    "Bind role rejection must produce grant=None (profile widening required)"
+                );
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn handle_redacts_token_for_pipe_kind() {
+        let backend = CountingGrantBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        let sensitive = "pipe-secret-tok-do-not-log";
+        let req = make_request_aipc(
+            sensitive,
+            "pipe-redact-001",
+            HandleKind::Pipe,
+            Some(HandleTarget::PipeName {
+                name: "redact-pipe".to_string(),
+            }),
+            policy::GENERIC_READ,
+        );
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(req),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            sensitive,
+            "testaipc12345678",
+        )
+        .expect("dispatch");
+
+        assert_eq!(audit_log.len(), 1);
+        assert_eq!(audit_log[0].request.session_token, "");
+        let json = serde_json::to_string(&audit_log[0]).expect("serialize");
+        assert!(
+            !json.contains(sensitive),
+            "audit JSON must not contain the raw pipe-kind session token: {json}"
+        );
+
+        let resp = child.recv_response().expect("drain");
+        if let nono::supervisor::SupervisorResponse::Decision { grant, .. } = resp {
+            close_grant_handle_if_any(&grant);
+        }
+    }
+
+    #[test]
+    fn handle_redacts_token_for_socket_kind() {
+        let backend = CountingGrantBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        let sensitive = "sock-secret-tok-do-not-log";
+        let req = make_request_aipc(
+            sensitive,
+            "sock-redact-001",
+            HandleKind::Socket,
+            Some(HandleTarget::SocketEndpoint {
+                protocol: SocketProtocol::Tcp,
+                host: "127.0.0.1".to_string(),
+                port: 8080,
+                role: SocketRole::Connect,
+            }),
+            0,
+        );
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(req),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            sensitive,
+            "testaipc12345678",
+        )
+        .expect("dispatch");
+
+        assert_eq!(audit_log.len(), 1);
+        assert_eq!(audit_log[0].request.session_token, "");
+        let json = serde_json::to_string(&audit_log[0]).expect("serialize");
+        assert!(
+            !json.contains(sensitive),
+            "audit JSON must not contain the raw socket-kind session token: {json}"
         );
 
         let resp = child.recv_response().expect("drain");

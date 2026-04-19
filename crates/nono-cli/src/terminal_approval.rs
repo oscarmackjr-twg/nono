@@ -5,7 +5,7 @@
 //! for `nono run`.
 
 use nono::supervisor::policy;
-use nono::supervisor::{HandleKind, HandleTarget};
+use nono::supervisor::{HandleKind, HandleTarget, SocketProtocol, SocketRole};
 use nono::{AccessMode, ApprovalBackend, ApprovalDecision, CapabilityRequest, NonoError, Result};
 use std::io::{BufRead, IsTerminal, Write};
 
@@ -192,6 +192,23 @@ fn format_mutex_access(mask: u32) -> &'static str {
     }
 }
 
+/// Render the per-bit Pipe access_mask as a human-readable direction label
+/// per D-04 (Phase 18-02). The mask is `GENERIC_READ` and/or `GENERIC_WRITE`;
+/// any other bits surface as `(none)` (the dispatcher's pipe helper rejects
+/// invalid combinations earlier, so this branch is only reached on valid
+/// requests).
+#[allow(dead_code)]
+fn format_pipe_direction(mask: u32) -> &'static str {
+    let read = mask & policy::GENERIC_READ != 0;
+    let write = mask & policy::GENERIC_WRITE != 0;
+    match (read, write) {
+        (true, true) => "read+write",
+        (true, false) => "read",
+        (false, true) => "write",
+        (false, false) => "(none)",
+    }
+}
+
 /// Render the per-handle-type approval prompt per CONTEXT.md D-04
 /// (Phase 18 AIPC-01).
 ///
@@ -240,11 +257,40 @@ pub(crate) fn format_capability_prompt(
                 "[nono] Grant mutex access? name={name_display} access={access_display} reason=\"{reason_display}\" [y/N]"
             )
         }
-        // Plans 18-02 and 18-03 replace the placeholders below with the
-        // D-04-locked templates for Socket / Pipe / JobObject. The helper
-        // stays total over all HandleKind variants so the dispatcher never
-        // panics on an unrecognized request shape.
-        (HandleKind::Socket, _) | (HandleKind::Pipe, _) | (HandleKind::JobObject, _) => {
+        (HandleKind::Pipe, HandleTarget::PipeName { name }) => {
+            let name_display = sanitize_for_terminal(name);
+            let direction = format_pipe_direction(access_mask);
+            format!(
+                "[nono] Grant pipe access? name={name_display} direction={direction} reason=\"{reason_display}\" [y/N]"
+            )
+        }
+        (
+            HandleKind::Socket,
+            HandleTarget::SocketEndpoint {
+                protocol,
+                host,
+                port,
+                role,
+            },
+        ) => {
+            let host_display = sanitize_for_terminal(host);
+            let proto = match protocol {
+                SocketProtocol::Tcp => "tcp",
+                SocketProtocol::Udp => "udp",
+            };
+            let role_display = match role {
+                SocketRole::Connect => "connect",
+                SocketRole::Bind => "bind",
+                SocketRole::Listen => "listen",
+            };
+            format!(
+                "[nono] Grant socket access? proto={proto} host={host_display} port={port} role={role_display} reason=\"{reason_display}\" [y/N]"
+            )
+        }
+        // Plan 18-03 replaces the JobObject placeholder with the D-04-locked
+        // template. The helper stays total over all HandleKind variants so
+        // the dispatcher never panics on an unrecognized request shape.
+        (HandleKind::JobObject, _) => {
             format!(
                 "[nono] Grant {kind:?} access? (unsupported in this build) reason=\"{reason_display}\" [y/N]"
             )
@@ -505,20 +551,69 @@ mod tests {
 
     #[test]
     fn prompt_falls_back_for_unsupported_kind() {
-        let target = HandleTarget::SocketEndpoint {
-            protocol: nono::supervisor::SocketProtocol::Tcp,
-            host: "example.com".to_string(),
-            port: 8080,
-            role: nono::supervisor::SocketRole::Connect,
+        // Plan 18-02 wires Socket and Pipe; only JobObject remains a
+        // placeholder until Plan 18-03.
+        let target = HandleTarget::JobObjectName {
+            name: "test-job".to_string(),
         };
-        let prompt = format_capability_prompt(HandleKind::Socket, &target, 0, Some("test"));
-        // Plan 18-02 will replace this branch with the live Socket template;
-        // until then the helper returns a SAFE placeholder so the dispatcher
-        // never panics on a not-yet-wired kind.
+        let prompt = format_capability_prompt(HandleKind::JobObject, &target, 0, Some("test"));
         assert!(
             prompt.contains("unsupported in this build"),
-            "expected placeholder fallback: {prompt}"
+            "expected placeholder fallback for JobObject: {prompt}"
         );
         assert!(prompt.contains("reason=\"test\""), "prompt: {prompt}");
+    }
+
+    // Phase 18 AIPC-01 Plan 18-02 Task 3 — format_capability_prompt tests
+    // for the new live Pipe and Socket branches.
+
+    #[test]
+    fn format_capability_prompt_pipe_kind() {
+        let target = HandleTarget::PipeName {
+            name: "test-stream".to_string(),
+        };
+        let prompt = format_capability_prompt(
+            HandleKind::Pipe,
+            &target,
+            policy::GENERIC_READ,
+            Some("agent op"),
+        );
+        assert_eq!(
+            prompt,
+            r#"[nono] Grant pipe access? name=test-stream direction=read reason="agent op" [y/N]"#
+        );
+    }
+
+    #[test]
+    fn format_capability_prompt_socket_kind_connect() {
+        let target = HandleTarget::SocketEndpoint {
+            protocol: SocketProtocol::Tcp,
+            host: "example.com".to_string(),
+            port: 8080,
+            role: SocketRole::Connect,
+        };
+        let prompt = format_capability_prompt(HandleKind::Socket, &target, 0, Some("agent fetch"));
+        assert_eq!(
+            prompt,
+            r#"[nono] Grant socket access? proto=tcp host=example.com port=8080 role=connect reason="agent fetch" [y/N]"#
+        );
+    }
+
+    #[test]
+    fn prompt_sanitizes_socket_host_string() {
+        let target = HandleTarget::SocketEndpoint {
+            protocol: SocketProtocol::Udp,
+            host: "evil\x1b[31mhost\x1b[0m".to_string(),
+            port: 9000,
+            role: SocketRole::Connect,
+        };
+        let prompt = format_capability_prompt(HandleKind::Socket, &target, 0, Some("dns"));
+        assert!(!prompt.contains('\x1b'), "ANSI byte leaked: {prompt}");
+        assert!(
+            prompt.contains("evilhost"),
+            "literal host missing: {prompt}"
+        );
+        assert!(prompt.contains("proto=udp"), "proto missing: {prompt}");
+        assert!(prompt.contains("role=connect"), "role missing: {prompt}");
     }
 }

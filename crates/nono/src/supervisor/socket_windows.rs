@@ -1414,10 +1414,7 @@ mod tests {
         // Use the per-process PID + a SHA-derived suffix to avoid collisions
         // between concurrent test invocations within the same process. The
         // canonical AIPC namespace prefix is `\\.\pipe\nono-aipc-<id>-<name>`.
-        format!(
-            r"\\.\pipe\nono-aipc-test{}-{suffix}",
-            std::process::id()
-        )
+        format!(r"\\.\pipe\nono-aipc-test{}-{suffix}", std::process::id())
     }
 
     #[test]
@@ -1429,12 +1426,9 @@ mod tests {
         let handle = bind_aipc_pipe(&name, PipeDirection::Read).expect("bind aipc pipe");
         assert_ne!(handle, INVALID_HANDLE_VALUE);
 
-        let grant = broker_pipe_to_process(
-            handle,
-            BrokerTargetProcess::current(),
-            PipeDirection::Read,
-        )
-        .expect("broker pipe with read direction");
+        let grant =
+            broker_pipe_to_process(handle, BrokerTargetProcess::current(), PipeDirection::Read)
+                .expect("broker pipe with read direction");
         assert_eq!(
             grant.transfer,
             ResourceTransferKind::DuplicatedWindowsHandle
@@ -1500,7 +1494,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     fn test_broker_socket_to_process_serializes_proto_info_blob() {
         use windows_sys::Win32::Networking::WinSock::{
-            closesocket, WSAStartup, WSASocketW, AF_INET, IPPROTO_TCP, SOCK_STREAM, WSADATA,
+            closesocket, WSASocketW, WSAStartup, AF_INET, IPPROTO_TCP, SOCK_STREAM, WSADATA,
             WSA_FLAG_OVERLAPPED,
         };
 
@@ -1523,7 +1517,8 @@ mod tests {
             )
         };
         assert_ne!(
-            sock, INVALID_SOCKET,
+            sock,
+            INVALID_SOCKET,
             "WSASocketW failed: {}",
             std::io::Error::last_os_error()
         );
