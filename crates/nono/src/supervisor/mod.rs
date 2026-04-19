@@ -27,6 +27,7 @@
 //! - Peer authentication via `SO_PEERCRED` (Linux) / `LOCAL_PEERPID` (macOS)
 //! - Path comparison uses [`Path::starts_with()`], never string operations
 
+pub mod policy;
 #[cfg(not(target_os = "windows"))]
 pub mod socket;
 #[cfg(target_os = "windows")]
@@ -40,6 +41,8 @@ pub use socket::SupervisorSocket;
 pub use types::{
     ApprovalDecision, AuditEntry, CapabilityRequest, GrantedResourceKind, ResourceGrant,
     ResourceTransferKind, SupervisorMessage, SupervisorResponse, UrlOpenRequest,
+    // Phase 18 additions:
+    HandleKind, HandleTarget, PipeDirection, SocketProtocol, SocketRole,
 };
 
 use crate::error::Result;
