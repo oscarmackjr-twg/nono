@@ -53,22 +53,25 @@ Each request goes through the existing capability pipe, gets server-side validat
 ### Access-Mask Allowlist Defaults
 
 - **D-05:** **Hard-coded supervisor defaults + profile override.** The supervisor ships with conservative per-type defaults baked in:
-  - **Socket:** TCP/UDP `connect` only; `bind`/`listen` require profile opt-in. User-allocated ports only (≥ 1024).
+  - **Socket:** sockets have NO per-handle access mask in Winsock — `WSADuplicateSocketW` carries the socket's full state via a `WSAPROTOCOL_INFOW` blob (single-use, target-PID-bound). The "access" enforcement is therefore *role-based at request time*: the supervisor validates `(protocol, role, port)` against the allowlist before opening/duplicating the socket. Default allowlist: TCP/UDP `connect` only; `bind`/`listen` require profile opt-in. User-allocated ports only (≥ 1024).
   - **Named pipe:** read OR write (not both); `DUPLICATE_SAME_ACCESS` mapped down to one direction.
-  - **Job Object:** `JOB_OBJECT_QUERY` only. `JOB_OBJECT_SET_*` and `JOB_OBJECT_TERMINATE` require profile opt-in (these are highly privileged — TERMINATE on the supervisor's own Job Object would let the child kill the supervisor).
+  - **Job Object:** `JOB_OBJECT_QUERY` only. `JOB_OBJECT_SET_*` and `JOB_OBJECT_TERMINATE` require profile opt-in (these are highly privileged — TERMINATE on the supervisor's own Job Object would let the child kill the supervisor). **Additional runtime guard:** the supervisor MUST refuse to broker its own `containment_job` handle regardless of profile widening — this is a structural protection layered on top of the access-mask allowlist (the profile-author footgun is a real one; the runtime guard makes the worst case impossible).
   - **Event:** `SYNCHRONIZE | EVENT_MODIFY_STATE` (Wait + Signal). No `EVENT_ALL_ACCESS`.
-  - **Mutex:** `SYNCHRONIZE | MUTEX_MODIFY_STATE` (Wait + Release). No `MUTEX_ALL_ACCESS`.
+  - **Mutex:** `SYNCHRONIZE | MUTEX_MODIFY_STATE` (Wait + Release). No `MUTEX_ALL_ACCESS`. Note: `MUTEX_MODIFY_STATE = 0x0001` is documented by Microsoft as "Reserved for future use" — `ReleaseMutex` works against handles opened with `SYNCHRONIZE` alone today. Keep the bit in the default mask for forward-compat symmetry with EVENT_MODIFY_STATE; document the no-op-today reality in the policy module.
   Defaults live in a single `policy::aipc::default_allowlist()` constant function in `crates/nono/src/supervisor/policy.rs` (new file or new module) so they're reviewable in one place.
-- **D-06:** **Profile override schema.** Profiles can widen via a `[capabilities.aipc]` TOML block in profile.toml:
-  ```toml
-  [capabilities.aipc]
-  socket = ["connect", "bind", "listen"]   # widens default `connect` only
-  pipe = ["read", "write", "read+write"]   # widens default single-direction
-  job_object = ["query"]                   # explicit (default is also `query` only — useful for documentation)
-  event = ["wait", "signal", "both"]
-  mutex = ["wait", "release", "both"]
+- **D-06:** **Profile override schema.** Profiles are JSON (loader is `serde_json::from_str`; built-in profiles live in `crates/nono-cli/data/policy.json`). Profiles can widen via a `capabilities.aipc` JSON object on each profile entry (and the JSON-schema at `crates/nono-cli/data/nono-profile.schema.json` extended in lockstep):
+  ```json
+  "capabilities": {
+    "aipc": {
+      "socket": ["connect", "bind", "listen"],
+      "pipe": ["read", "write", "read+write"],
+      "job_object": ["query"],
+      "event": ["wait", "signal", "both"],
+      "mutex": ["wait", "release", "both"]
+    }
+  }
   ```
-  Built-in profiles (claude-code, codex, opencode, openclaw, swival) get `[capabilities.aipc]` blocks tuned to their actual needs. Default-deny still applies for any handle type whose access mask is not in either the hard-coded default OR the profile override. Profile override is ADDITIVE — it widens, never narrows the default-deny. (Narrowing the default would require a different mechanism; out of scope for v2.1.)
+  Built-in profiles (claude-code, codex, opencode, openclaw, swival) get `capabilities.aipc` blocks tuned to their actual needs. Default-deny still applies for any handle type whose access mask is not in either the hard-coded default OR the profile override. Profile override is ADDITIVE — it widens, never narrows the default-deny. (Narrowing the default would require a different mechanism; out of scope for v2.1.)
 - **D-07:** **Server-side enforcement is load-bearing.** Client-declared access masks are untrusted (the child SDK stamps a mask onto its request, but the supervisor re-validates server-side against the resolved per-handle-type allowlist). REQUIREMENTS.md line 157 mandate. The supervisor returns `Denied { reason: "access mask <m> not in allowlist for <kind>" }` for any request where the requested mask is not a subset of the resolved allowlist. The reason string is verbose-on-purpose for debuggability; not a security-sensitive surface (the allowlist is publicly known via profile.toml).
 
 ### CLI / SDK Surface
@@ -81,7 +84,7 @@ Each request goes through the existing capability pipe, gets server-side validat
   - `request_mutex(name, access, reason) -> Result<RawHandle>`
   Each method constructs a `CapabilityRequest` with the appropriate `kind: HandleKind` + `target: HandleTarget` + `access_mask: u32`, sends it over the existing `\\.\pipe\nono-cap-<session_id>` capability pipe (Phase 11 infrastructure), and returns the raw handle once the supervisor brokers it via `DuplicateHandle` (or `WSADuplicateSocket` for sockets).
   Zero new `--request-*` or `--allow-*` CLI flags. Zero changes to `nono run` / `nono shell` / `nono wrap` argument shape. Matches Phase 11's locked-by-design pattern.
-- **D-09:** **Cross-platform behavior — fail at request time, not parse time.** Per REQUIREMENTS.md line 163: "Unix builds either reject `--request-handle` at parse time or degrade gracefully." Since D-08 is SDK-only (no CLI flags), there's no parse-time rejection surface. Instead: the SDK methods are gated `#[cfg(target_os = "windows")]` for the actual brokering path; on non-Windows builds they exist but immediately return `NonoError::PlatformNotSupported("AIPC handle brokering is Windows-only on v2.1; Unix has SCM_RIGHTS file-descriptor passing as the natural equivalent (separate cross-platform requirement, future milestone)")`. This lets cross-platform Rust code compile against the SDK without `#[cfg]` everywhere; the runtime fail-closed message tells operators why their call failed.
+- **D-09:** **Cross-platform behavior — fail at request time, not parse time.** Per REQUIREMENTS.md line 163: "Unix builds either reject `--request-handle` at parse time or degrade gracefully." Since D-08 is SDK-only (no CLI flags), there's no parse-time rejection surface. Instead: the SDK methods are gated `#[cfg(target_os = "windows")]` for the actual brokering path; on non-Windows builds they exist but immediately return `NonoError::UnsupportedPlatform("AIPC handle brokering is Windows-only on v2.1; Unix has SCM_RIGHTS file-descriptor passing as the natural equivalent for sockets/pipes (separate cross-platform requirement, future milestone). Events, mutexes, and Job Objects have no direct Unix analog.")`. (The variant is `UnsupportedPlatform`, not `PlatformNotSupported` — confirmed by reading `crates/nono/src/error.rs:39-40`.) This lets cross-platform Rust code compile against the SDK without `#[cfg]` everywhere; the runtime fail-closed message tells operators why their call failed.
 
 ### Handle Lifetime & Audit
 
@@ -166,6 +169,7 @@ Each request goes through the existing capability pipe, gets server-side validat
 - **Job Object name namespace** similar to pipe: prefix `Local\nono-aipc-<session_id>-<name>` to scope per-session.
 - **Event/Mutex name namespace** similar: `Local\nono-aipc-<session_id>-<name>`.
 - **Reason field cap**: 256 bytes (UTF-8). Same as Phase 11's `reason` field. Longer reasons get truncated with a `...[truncated]` suffix in the audit log.
+- **Phase 17 latent-bug carry-forward**: AIPC-01 namespace prefixes (`\\.\pipe\nono-aipc-<session_id>-<name>`, `Local\nono-aipc-<session_id>-<name>`) MUST use `WindowsSupervisorRuntime.user_session_id` (the user-facing 16-hex), NOT `self.session_id` (the supervisor correlation `supervised-PID-NANOS`). Three pre-existing bugs of exactly this shape were fixed in Phase 17 commit `7db6595` (`start_logging`, `start_data_pipe_server`, `create_process_containment` job-name). Plan acceptance criteria must include grep-checks asserting `user_session_id` (not `self.session_id`) appears at every new pipe/Local-namespace name construction site.
 
 </specifics>
 
