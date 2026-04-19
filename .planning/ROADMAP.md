@@ -116,4 +116,4 @@ Carry-forward → Phase 15: detached-console-grandchild `0xC0000142 STATUS_DLL_I
 | 17. Attach-Streaming (ATCH-01) | v2.1 | 0/? | Not Planned (run `/gsd-plan-phase 17` to start) | - |
 | 18. Extended IPC (AIPC-01) | v2.1 | 0/? | Not Planned (run `/gsd-plan-phase 18` to start) | - |
 | 19. Cleanup (CLEAN-01..04) | v2.1 | 4/4 | Complete (19-01 CLEAN-01 fmt drift; 19-02 CLEAN-02 5 test flakes + query_path UNC prod fix complete-with-deviation; 19-03 CLEAN-03 10-item WIP triage; 19-04 CLEAN-04 retention + prune + auto-sweep + T-19-04-07 mitigation + 1343-file one-shot cleanup + docs; verifier passed 25/25 must-haves, commit `6597fbf`) | 2026-04-19 |
-| 20. Upstream Parity Sync (UPST) | v2.1 | 0/? | Not Planned (run `/gsd-plan-phase 20` or `/gsd-discuss-phase 20` to scope back-port work; source material at `.planning/quick/260419-cmp-upstream-036-windows-parity/COMPARISON.md`) | - |
+| 20. Upstream Parity Sync (UPST) | v2.1 | 1/4 | In Progress (20-01 UPST-01 complete 2026-04-19: rustls-webpki 0.103.12 + workspace 0.37.1 realignment + UPST-01..04 REQUIREMENTS anchors, commits `198270e`, `835c43f`, `540dca9`; wave 1 plans 20-02/20-03/20-04 unblocked) | - |

@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: Resource Limits, Extended IPC, Attach-Streaming & Cleanup
-status: Phase 20 planned (4 plans — 20-01 security wave 0, 20-02/20-03 wave 1 parallel, 20-04 wave 2 sequential on 20-03 due to cli.rs overlap); ready to execute
-stopped_at: Phase 20 plans 20-01/02/03/04 written + plan-checker passed after revision loop (iter 1: 3 blockers+7 warnings, iter 2: 1 blocker on D-21 exception clauses in 20-04, iter 3: direct edit cleared). Ready for `/gsd-execute-phase 20`
-last_updated: "2026-04-18T23:15:00.000Z"
-last_activity: 2026-04-18 — Phase 20 planning complete. 4 plans written covering UPST-01..04: 20-01 rustls-webpki + crate version bump (wave 0, sequential), 20-02 profile extends cycle fix + claude-code token refresh (wave 1), 20-03 keyring:// URI manual-port + env-var filtering + command_blocking_deprecation backport (wave 1), 20-04 --allow-gpu + NVIDIA allowlist + GitLab ID tokens (wave 2, deps on 20-03 due to shared cli.rs). D-21 Windows-invariance enforced strictly across all plans (no sandbox/windows.rs edits authorized).
+status: Phase 20 plan 20-01 complete (3 DCO-signed commits); wave 1 (20-02, 20-03, 20-04) unblocked — may rebase on post-20-01 HEAD
+stopped_at: Phase 20 plan 20-01 executed end-to-end. 3 commits on windows-squash (`198270e` REQUIREMENTS UPST-01..04, `835c43f` workspace 0.37.1 version bump, `540dca9` rustls-webpki 0.103.12 cherry-pick of upstream 8876d89). cargo audit clears RUSTSEC-2026-0098 and RUSTSEC-2026-0099. Phase 19 deferred flakes carry forward unchanged (19 env_vars.rs + 1-2 trust_scan tempdir-race); D-21 Windows-invariance held structurally (zero *_windows.rs touched).
+last_updated: "2026-04-18T23:58:00.000Z"
+last_activity: 2026-04-19 — Phase 20 plan 20-01 complete. RUSTSEC-2026-0098/0099 cleared via rustls-webpki 0.103.10 → 0.103.12 upgrade (cherry-pick of upstream 8876d89); workspace crate versions realigned 0.30.1 → 0.37.1 across nono, nono-cli, nono-proxy, and nono-ffi (bindings/c); UPST-01..04 requirement IDs added to REQUIREMENTS.md. Plan 20-01 SUMMARY: .planning/phases/20-upstream-parity-sync/20-01-SUMMARY.md
 progress:
   total_phases: 20
   completed_phases: 15
-  total_plans: 44
-  completed_plans: 44
+  total_plans: 45
+  completed_plans: 45
   percent: 95
 ---
 
@@ -89,6 +89,7 @@ Progress: [████████░░]  80% (8/10 v2.1 requirements validate
 
 ### Key Decisions (v2.1)
 
+- **Phase 20 Plan 20-01 cherry-pick clean path:** Upstream commit `8876d89` (rustls-webpki 0.103.12) cherry-picked cleanly onto `windows-squash` (auto-merged `Cargo.lock`, 2-line diff). No manual `cargo update` fallback needed. Workspace crate versions bumped 0.30.1 → 0.37.1 across all 4 members (nono, nono-cli, nono-proxy, nono-ffi) with internal path-dep pins in lockstep. Amended commit body adds `Upstream-commit: 8876d89` + `Co-Authored-By: Advaith Sujith` + `Signed-off-by: oscarmackjr-twg` trailers; establishes the commit-provenance template for later Phase 20 plans. D-21 Windows-invariance held structurally — zero `*_windows.rs` or `target_os = "windows"` code changed. cargo audit confirms both RUSTSEC-2026-0098 and RUSTSEC-2026-0099 cleared. Commits: `198270e`, `835c43f`, `540dca9` (2026-04-19).
 - **Phase 19 CLEAN-01 fmt-only commit:** Single `style(19-CLEAN-01):` commit on 3 files (`config/mod.rs`, `restricted_token.rs`, `profile/mod.rs`), no logic changes. `cargo fmt --all -- --check` is now green on the whole workspace (2026-04-18).
 - **Phase 19 CLEAN-01 smoke deliberately excludes `make ci`:** CLEAN-02's 5 pending test flakes would keep `make test` red for reasons unrelated to fmt; CLEAN-01 smoke is restricted to `cargo fmt --all -- --check` as specified by the plan (2026-04-18).
 - **Phase 19 CLEAN-02 hypothesis D-07 (parallel env-var contamination) was wrong:** diagnosis revealed all 5 tests were deterministic Windows platform bugs of 4 distinct flavors — JSON escape when embedding backslash paths, non-absolute Unix-shaped XDG paths in env guards, UNC `\\?\` prefix mismatch between canonicalized and policy-expanded paths (a genuine production bug in `query_path`), and a Unix-only path literal colliding with a correct production `debug_assert!(path.is_absolute())`. None needed `lock_env() + EnvVarGuard`; each fix was file-local and cfg-gated or helper-routed (2026-04-18).
