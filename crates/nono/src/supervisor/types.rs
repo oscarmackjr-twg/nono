@@ -323,6 +323,30 @@ impl ResourceGrant {
         }
     }
 
+    /// Build Windows-side metadata for a duplicated Job Object handle
+    /// (Phase 18-03).
+    ///
+    /// `access` is set to `AccessMode::ReadWrite` as a sentinel for non-file
+    /// kinds where `AccessMode` is semantically inert; the meaningful access
+    /// information for Job Objects is carried by the supervisor-validated
+    /// `mask` (`JOB_OBJECT_QUERY` by default per CONTEXT.md D-05).
+    ///
+    /// Per CONTEXT.md D-05 footnote runtime guard: callers MUST refuse to
+    /// broker the supervisor's own `containment_job` HANDLE regardless of
+    /// `mask`. The structural guard lives in `handle_job_object_request`
+    /// (CompareObjectHandles); this constructor trusts that the caller has
+    /// already passed that gate.
+    #[must_use]
+    pub fn duplicated_windows_job_object_handle(raw_handle: u64, _mask: u32) -> Self {
+        Self {
+            transfer: ResourceTransferKind::DuplicatedWindowsHandle,
+            resource_kind: GrantedResourceKind::JobObject,
+            access: AccessMode::ReadWrite,
+            raw_handle: Some(raw_handle),
+            protocol_info_blob: None,
+        }
+    }
+
     /// Build Windows-side metadata for a duplicated named-pipe handle
     /// transferred inline (Phase 18-02).
     ///

@@ -1,8 +1,8 @@
 use super::*;
 use nono::supervisor::policy;
 use nono::supervisor::socket::{
-    bind_aipc_pipe, broker_event_to_process, broker_mutex_to_process, broker_pipe_to_process,
-    broker_socket_to_process, broker_target_pid,
+    bind_aipc_pipe, broker_event_to_process, broker_job_object_to_process, broker_mutex_to_process,
+    broker_pipe_to_process, broker_socket_to_process, broker_target_pid,
 };
 use nono::supervisor::{HandleKind, HandleTarget, PipeDirection, SocketProtocol, SocketRole};
 use std::io::{Read, Write};
@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, LocalFree, BOOL, HANDLE, INVALID_HANDLE_VALUE,
+    CloseHandle, CompareObjectHandles, GetLastError, LocalFree, BOOL, HANDLE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Networking::WinSock::{
     closesocket, WSASocketW, WSAStartup, AF_INET, INVALID_SOCKET, IPPROTO_TCP, IPPROTO_UDP,
@@ -30,6 +30,7 @@ use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
+use windows_sys::Win32::System::JobObjects::OpenJobObjectW;
 use windows_sys::Win32::System::Threading::{CreateEventW, CreateMutexW};
 use windows_sys::Win32::System::Threading::{
     GetExitCodeProcess, TerminateProcess, WaitForSingleObject,
@@ -404,8 +405,22 @@ impl WindowsSupervisorRuntime {
         let session_id = self.session_id.clone();
         let user_session_id = self.user_session_id.clone();
         let backend = self.approval_backend.clone();
+        // Phase 18 Plan 18-03: pass the supervisor's own containment Job
+        // HANDLE through to the capability pipe server thread for the
+        // containment-Job runtime guard in `handle_job_object_request`. The
+        // HANDLE is owned by `ProcessContainment` (close-on-drop); the runtime
+        // and the thread closure both BORROW it for the lifetime of the
+        // session. SendableHandle wraps a raw HANDLE for Send/Sync.
+        let runtime_containment_job = SendableHandle(self.containment_job);
 
         std::thread::spawn(move || {
+            // Disjoint capture safety: bind the SendableHandle wrapper to a
+            // local so the move closure captures the wrapper (Send + Sync via
+            // the unsafe impls on SendableHandle), not the inner *mut c_void
+            // (which is NOT Send). Without this binding, Rust 2021 disjoint
+            // capture would detect the `runtime_containment_job.0` access
+            // below and capture only the inner field, triggering an E0277.
+            let runtime_containment_job_local: SendableHandle = runtime_containment_job;
             let mut sock = match nono::SupervisorSocket::bind_low_integrity(&rendezvous_path) {
                 Ok(s) => s,
                 Err(e) => {
@@ -469,6 +484,7 @@ impl WindowsSupervisorRuntime {
                             &mut local_audit,
                             &session_token,
                             &user_session_id,
+                            runtime_containment_job_local.0,
                         ) {
                             tracing::warn!(
                                 session_id = %session_id,
@@ -1549,6 +1565,115 @@ fn handle_mutex_request(
     grant.map(Some)
 }
 
+/// Handle a HandleKind::JobObject request: validate target shape + mask, open
+/// the kernel-object name in the canonical
+/// `Local\nono-aipc-<user_session_id>-<name>` namespace using `user_session_id`
+/// (Phase 17 latent-bug carry-forward — MUST NOT use `self.session_id`), fire
+/// the **containment-Job runtime guard** (CONTEXT.md D-05 footnote — refuse to
+/// broker the supervisor's own `containment_job` HANDLE regardless of mask),
+/// and broker it into the child via `broker_job_object_to_process`.
+///
+/// The runtime guard is the load-bearing structural defense for T-18-03-01:
+/// even if a profile widens `job_object` to include `terminate`, the
+/// supervisor still refuses to broker its OWN containment Job — brokering
+/// that handle would let the child kill the supervisor process tree.
+/// `CompareObjectHandles` (Win10 1607+) compares two HANDLEs at the
+/// kernel-object level: opening the same Job Object name twice returns
+/// distinct HANDLE values that BOTH resolve to the same kernel object, so
+/// numeric `==` is insufficient.
+///
+/// Per CONTEXT.md D-10: the supervisor closes its source HANDLE as the call
+/// returns, AFTER the broker has duplicated it into the child.
+fn handle_job_object_request(
+    request: &nono::CapabilityRequest,
+    target_process: nono::BrokerTargetProcess,
+    user_session_id: &str,
+    runtime_containment_job: HANDLE,
+) -> Result<Option<nono::supervisor::ResourceGrant>> {
+    let raw_name = match request.target.as_ref() {
+        Some(HandleTarget::JobObjectName { name }) => name,
+        _ => {
+            return Err(NonoError::SandboxInit(
+                "AIPC JobObject request: target shape does not match kind JobObject".to_string(),
+            ))
+        }
+    };
+    validate_aipc_object_name(raw_name)?;
+
+    // Mask validation against the resolved per-type allowlist.
+    let resolved = resolved_mask_for_kind(HandleKind::JobObject);
+    if !policy::mask_is_allowed(HandleKind::JobObject, request.access_mask, resolved) {
+        return Err(NonoError::SandboxInit(format!(
+            "access mask 0x{:08x} not in allowlist for JobObject (resolved: 0x{:08x})",
+            request.access_mask, resolved
+        )));
+    }
+
+    // Phase 17 latent-bug carry-forward: namespace prefix MUST use
+    // `user_session_id` (the user-facing 16-hex), NOT `self.session_id` (the
+    // supervisor correlation `supervised-PID-NANOS`). Three pre-existing bugs
+    // of exactly this shape were fixed in Phase 17 commit 7db6595.
+    let canonical = format!("Local\\nono-aipc-{}-{}", user_session_id, raw_name);
+    let wide: Vec<u16> = std::ffi::OsStr::new(&canonical)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: `wide.as_ptr()` is a null-terminated UTF-16 string in
+    // stack-owned storage that outlives the FFI call. `OpenJobObjectW`
+    // returns NULL on failure (no UB on bad arguments). We open with
+    // `bInheritHandles = FALSE`. We open with `JOB_OBJECT_ALL_ACCESS`
+    // (defined in `nono::supervisor::policy` because windows-sys 0.59 does
+    // not export the constant) server-side; `DuplicateHandle` then MAPs
+    // DOWN to the validated mask (T-18-03-01 mitigation).
+    let job: HANDLE = unsafe { OpenJobObjectW(policy::JOB_OBJECT_ALL_ACCESS, 0, wide.as_ptr()) };
+    if job.is_null() {
+        return Err(NonoError::SandboxInit(format!(
+            "OpenJobObjectW(\"{canonical}\") failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    // CONTEXT.md D-05 footnote runtime guard (T-18-03-01 mitigation):
+    // refuse to broker the supervisor's own `containment_job` HANDLE
+    // regardless of profile widening or the requested mask.
+    //
+    // `CompareObjectHandles` is required (NOT numeric `==`): opening the
+    // same Job Object name twice returns DIFFERENT HANDLE values that both
+    // resolve to the SAME kernel object. The Win10 1607+ API returns
+    // non-zero IFF both HANDLEs reference the same kernel object.
+    //
+    // The guard is structural: it fires before the broker call returns a
+    // duplicated handle, so even if a profile widens `job_object` to
+    // include `terminate`, the supervisor's containment Job is unreachable.
+    if !runtime_containment_job.is_null() {
+        // SAFETY: Both `job` (from OpenJobObjectW above) and
+        // `runtime_containment_job` (passed by the caller from
+        // `WindowsSupervisorRuntime.containment_job`) are live HANDLEs we
+        // own at supervisor scope. CompareObjectHandles is a leaf-safe
+        // Win32 call that returns BOOL (non-zero = same kernel object).
+        let same = unsafe { CompareObjectHandles(job, runtime_containment_job) };
+        if same != 0 {
+            // SAFETY: `job` is the HANDLE returned by OpenJobObjectW above;
+            // it is owned by the supervisor and has not been duplicated yet.
+            unsafe {
+                CloseHandle(job);
+            }
+            return Err(NonoError::SandboxInit(
+                "cannot broker the supervisor's own containment Job Object".to_string(),
+            ));
+        }
+    }
+
+    let grant = broker_job_object_to_process(job, target_process, request.access_mask);
+    // D-10: supervisor closes its source after broker call.
+    // SAFETY: `job` is a live HANDLE returned by OpenJobObjectW above and has
+    // not been wrapped or freed elsewhere.
+    unsafe {
+        CloseHandle(job);
+    }
+    grant.map(Some)
+}
+
 /// Dispatch a single supervisor message from a sandboxed child.
 ///
 /// The `expected_session_token` parameter is the 32-byte hex token generated
@@ -1556,12 +1681,13 @@ fn handle_mutex_request(
 /// the inbound `CapabilityRequest.session_token` BEFORE the approval backend
 /// is consulted. The token is NEVER logged and is redacted before any
 /// `AuditEntry` is constructed.
-// Note: 8 parameters is intentional — packing the dispatcher state into a
+// Note: 9 parameters is intentional — packing the dispatcher state into a
 // struct would obscure the per-call ownership semantics of the borrowed
 // `seen_request_ids` and `audit_log` mut refs vs the shared session
-// token + user_session_id strings. Phase 18 adds `user_session_id` to the
-// existing 7-arg signature for the namespace-prefix construction in the
-// Event/Mutex broker arms (D-21 carry-forward).
+// token + user_session_id strings. Phase 18 Plan 18-03 added
+// `runtime_containment_job` for the Job Object containment-Job runtime guard
+// (CONTEXT.md D-05 footnote — refuse to broker the supervisor's own
+// containment Job regardless of profile widening).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn handle_windows_supervisor_message(
     sock: &mut nono::SupervisorSocket,
@@ -1572,6 +1698,7 @@ pub(super) fn handle_windows_supervisor_message(
     audit_log: &mut Vec<AuditEntry>,
     expected_session_token: &str,
     user_session_id: &str,
+    runtime_containment_job: HANDLE,
 ) -> Result<()> {
     match msg {
         nono::supervisor::SupervisorMessage::Request(request) => {
@@ -1719,29 +1846,12 @@ pub(super) fn handle_windows_supervisor_message(
                     HandleKind::Socket => {
                         handle_socket_request(&request, target_process, user_session_id)
                     }
-                    HandleKind::JobObject => {
-                        // Plan 18-03 wires this arm with the containment-job
-                        // runtime guard + profile widening. For now return a
-                        // structured Denied so the dispatcher is total over
-                        // all HandleKind variants.
-                        let decision = nono::ApprovalDecision::Denied {
-                            reason: "JobObject brokering not yet implemented in this build"
-                                .to_string(),
-                        };
-                        audit_log.push(audit_entry_with_redacted_token(
-                            &request,
-                            &decision,
-                            approval_backend.backend_name(),
-                            started_at,
-                        ));
-                        return sock.send_response(
-                            &nono::supervisor::SupervisorResponse::Decision {
-                                request_id: request.request_id,
-                                decision,
-                                grant: None,
-                            },
-                        );
-                    }
+                    HandleKind::JobObject => handle_job_object_request(
+                        &request,
+                        target_process,
+                        user_session_id,
+                        runtime_containment_job,
+                    ),
                 };
                 match result {
                     Ok(g) => g,
@@ -1926,6 +2036,7 @@ mod capability_handler_tests {
             &mut audit_log,
             "expected-token",
             "testaipc12345678",
+            std::ptr::null_mut(),
         )
         .expect("handle");
 
@@ -1966,6 +2077,7 @@ mod capability_handler_tests {
             &mut audit_log,
             "right",
             "testaipc12345678",
+            std::ptr::null_mut(),
         )
         .expect("handle");
 
@@ -1993,6 +2105,7 @@ mod capability_handler_tests {
             &mut audit_log,
             "the-token",
             "testaipc12345678",
+            std::ptr::null_mut(),
         )
         .expect("handle");
 
@@ -2027,6 +2140,7 @@ mod capability_handler_tests {
             &mut audit_log,
             sensitive_token,
             "testaipc12345678",
+            std::ptr::null_mut(),
         )
         .expect("handle");
 
@@ -2058,6 +2172,7 @@ mod capability_handler_tests {
             &mut audit_log,
             "the-token",
             "testaipc12345678",
+            std::ptr::null_mut(),
         )
         .expect("first handle");
 
@@ -2071,6 +2186,7 @@ mod capability_handler_tests {
             &mut audit_log,
             "the-token",
             "testaipc12345678",
+            std::ptr::null_mut(),
         )
         .expect("second handle");
 
@@ -2113,6 +2229,7 @@ mod capability_handler_tests {
             &mut audit_log,
             sensitive,
             "testaipc12345678",
+            std::ptr::null_mut(),
         )
         .expect("handle");
 
@@ -2150,6 +2267,7 @@ mod capability_handler_tests {
             &mut audit_log,
             "right",
             "testaipc12345678",
+            std::ptr::null_mut(),
         )
         .expect("handle");
 
@@ -2214,6 +2332,7 @@ mod capability_handler_tests {
             &mut audit_log,
             token,
             "testaipc12345678",
+            std::ptr::null_mut(),
         )
         .expect("dispatch");
 
@@ -2276,6 +2395,7 @@ mod capability_handler_tests {
             &mut audit_log,
             token,
             "testaipc12345678",
+            std::ptr::null_mut(),
         )
         .expect("dispatch");
 
@@ -2325,6 +2445,7 @@ mod capability_handler_tests {
             &mut audit_log,
             token,
             "testaipc12345678",
+            std::ptr::null_mut(),
         )
         .expect("dispatch");
 
@@ -2375,6 +2496,7 @@ mod capability_handler_tests {
             &mut audit_log,
             token,
             "testaipc12345678",
+            std::ptr::null_mut(),
         )
         .expect("dispatch");
         assert_eq!(backend.calls(), 0);
@@ -2418,6 +2540,7 @@ mod capability_handler_tests {
             &mut audit_log,
             token,
             "testaipc12345678",
+            std::ptr::null_mut(),
         )
         .expect("dispatch");
 
@@ -2458,6 +2581,7 @@ mod capability_handler_tests {
             &mut audit_log,
             sensitive,
             "testaipc12345678",
+            std::ptr::null_mut(),
         )
         .expect("dispatch");
 
@@ -2502,6 +2626,7 @@ mod capability_handler_tests {
             &mut audit_log,
             sensitive,
             "testaipc12345678",
+            std::ptr::null_mut(),
         )
         .expect("dispatch");
 
@@ -2550,6 +2675,7 @@ mod capability_handler_tests {
             &mut audit_log,
             token,
             "testaipc12345678",
+            std::ptr::null_mut(),
         )
         .expect("dispatch");
 
@@ -2603,6 +2729,7 @@ mod capability_handler_tests {
             &mut audit_log,
             token,
             "testaipc12345678",
+            std::ptr::null_mut(),
         )
         .expect("dispatch");
 
@@ -2657,6 +2784,7 @@ mod capability_handler_tests {
             &mut audit_log,
             token,
             "testaipc12345678",
+            std::ptr::null_mut(),
         )
         .expect("dispatch");
 
@@ -2723,6 +2851,7 @@ mod capability_handler_tests {
             &mut audit_log,
             token,
             "testaipc12345678",
+            std::ptr::null_mut(),
         )
         .expect("dispatch");
 
@@ -2772,6 +2901,7 @@ mod capability_handler_tests {
             &mut audit_log,
             token,
             "testaipc12345678",
+            std::ptr::null_mut(),
         )
         .expect("dispatch");
 
@@ -2815,6 +2945,7 @@ mod capability_handler_tests {
             &mut audit_log,
             sensitive,
             "testaipc12345678",
+            std::ptr::null_mut(),
         )
         .expect("dispatch");
 
@@ -2861,6 +2992,7 @@ mod capability_handler_tests {
             &mut audit_log,
             sensitive,
             "testaipc12345678",
+            std::ptr::null_mut(),
         )
         .expect("dispatch");
 
@@ -2875,6 +3007,290 @@ mod capability_handler_tests {
         let resp = child.recv_response().expect("drain");
         if let nono::supervisor::SupervisorResponse::Decision { grant, .. } = resp {
             close_grant_handle_if_any(&grant);
+        }
+    }
+
+    // Phase 18 AIPC-01 Plan 18-03 Task 1 — JobObject dispatcher tests
+    // (target-shape validation, mask-upgrade denial, containment-Job runtime
+    // guard via CompareObjectHandles, token redaction).
+
+    #[test]
+    fn handle_brokers_job_object_with_query_mask() {
+        let backend = CountingGrantBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        // Pre-create the kernel-object name the dispatcher will canonicalize
+        // so OpenJobObjectW succeeds. The dispatcher computes
+        // `Local\nono-aipc-<user_session_id>-<raw_name>`; pre-create with the
+        // matching canonical name. We pre-create with a raw name distinct from
+        // the runtime containment job to ensure the runtime guard does NOT
+        // fire on this granted-path test.
+        let canonical = "Local\\nono-aipc-testaipc12345678-test-orch";
+        let wide: Vec<u16> = std::ffi::OsStr::new(canonical)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: Anonymous Job Object scaffolded with an explicit named
+        // canonical so the dispatcher's `OpenJobObjectW` handshake resolves.
+        let pre_created: HANDLE = unsafe {
+            windows_sys::Win32::System::JobObjects::CreateJobObjectW(
+                std::ptr::null_mut(),
+                wide.as_ptr(),
+            )
+        };
+        assert!(
+            !pre_created.is_null(),
+            "CreateJobObjectW failed: {}",
+            std::io::Error::last_os_error()
+        );
+
+        let token = "testtoken12345678";
+        let req = make_request_aipc(
+            token,
+            "job-grant-001",
+            HandleKind::JobObject,
+            Some(HandleTarget::JobObjectName {
+                name: "test-orch".to_string(),
+            }),
+            policy::JOB_OBJECT_DEFAULT_MASK,
+        );
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(req),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            token,
+            "testaipc12345678",
+            std::ptr::null_mut(), // no containment job — guard does not fire
+        )
+        .expect("dispatch");
+
+        let response = child.recv_response().expect("response");
+        match response {
+            nono::supervisor::SupervisorResponse::Decision {
+                decision, grant, ..
+            } => {
+                assert!(decision.is_granted(), "got {decision:?}");
+                assert!(grant.is_some(), "Granted decision must carry a grant");
+                let g = grant.as_ref().unwrap();
+                assert_eq!(
+                    g.resource_kind,
+                    nono::supervisor::GrantedResourceKind::JobObject
+                );
+                close_grant_handle_if_any(&grant);
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+        assert_eq!(backend.calls(), 1);
+        assert_eq!(audit_log.len(), 1);
+        assert_eq!(audit_log[0].request.kind, HandleKind::JobObject);
+
+        // SAFETY: pre_created is a live HANDLE returned by CreateJobObjectW.
+        unsafe {
+            CloseHandle(pre_created);
+        }
+    }
+
+    #[test]
+    fn handle_denies_job_object_with_terminate_mask_no_profile_widening() {
+        let backend = CountingGrantBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        let token = "testtoken12345678";
+        // TERMINATE bit not in default JOB_OBJECT_DEFAULT_MASK (=QUERY only).
+        let req = make_request_aipc(
+            token,
+            "job-deny-001",
+            HandleKind::JobObject,
+            Some(HandleTarget::JobObjectName {
+                name: "job-overreach".to_string(),
+            }),
+            policy::JOB_OBJECT_TERMINATE,
+        );
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(req),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            token,
+            "testaipc12345678",
+            std::ptr::null_mut(),
+        )
+        .expect("dispatch");
+
+        // Backend MUST NOT be consulted — pre-broker mask check happens
+        // BEFORE backend dispatch (Phase 18 D-07 enforcement).
+        assert_eq!(
+            backend.calls(),
+            0,
+            "backend must not be consulted on out-of-allowlist mask"
+        );
+        assert_eq!(audit_log.len(), 1);
+        assert!(audit_log[0].decision.is_denied());
+        if let nono::ApprovalDecision::Denied { reason } = &audit_log[0].decision {
+            assert!(
+                reason.contains("access mask"),
+                "unexpected reason: {reason}"
+            );
+            assert!(reason.contains("allowlist"), "unexpected reason: {reason}");
+        } else {
+            panic!("expected Denied");
+        }
+        let _ = child.recv_response().expect("drain");
+    }
+
+    #[test]
+    fn handle_denies_job_object_brokering_of_containment_job() {
+        let backend = CountingGrantBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        // Create a Job Object with a known canonical name; this stand-in
+        // simulates the supervisor's runtime.containment_job. The dispatcher
+        // will OpenJobObjectW the same canonical name; the open returns a
+        // DIFFERENT HANDLE value that resolves to the SAME kernel object.
+        // CompareObjectHandles is required (numeric == is insufficient).
+        let canonical = "Local\\nono-aipc-testaipc12345678-orch";
+        let wide: Vec<u16> = std::ffi::OsStr::new(canonical)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: Named Job Object creation; OpenJobObjectW(canonical) on the
+        // dispatcher side will resolve to the same kernel object.
+        let containment: HANDLE = unsafe {
+            windows_sys::Win32::System::JobObjects::CreateJobObjectW(
+                std::ptr::null_mut(),
+                wide.as_ptr(),
+            )
+        };
+        assert!(
+            !containment.is_null(),
+            "CreateJobObjectW for containment stand-in failed: {}",
+            std::io::Error::last_os_error()
+        );
+
+        let token = "testtoken12345678";
+        let req = make_request_aipc(
+            token,
+            "job-containment-guard-001",
+            HandleKind::JobObject,
+            Some(HandleTarget::JobObjectName {
+                name: "orch".to_string(),
+            }),
+            policy::JOB_OBJECT_DEFAULT_MASK, // mask-allowed; guard fires anyway
+        );
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(req),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            token,
+            "testaipc12345678",
+            containment, // the runtime guard target
+        )
+        .expect("dispatch");
+
+        // Backend WAS consulted (mask check passes for QUERY); the runtime
+        // guard fires INSIDE handle_job_object_request, after the backend
+        // grants. The audit decision shows Granted-by-backend but grant=None
+        // because the broker helper returned Err. This matches the
+        // broker-failure pattern from Plans 18-01/18-02.
+        assert_eq!(backend.calls(), 1);
+        assert_eq!(audit_log.len(), 1);
+        let response = child.recv_response().expect("drain");
+        match response {
+            nono::supervisor::SupervisorResponse::Decision { grant, .. } => {
+                assert!(
+                    grant.is_none(),
+                    "containment-Job runtime guard must produce grant=None"
+                );
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+
+        // SAFETY: `containment` is a live HANDLE returned by CreateJobObjectW.
+        unsafe {
+            CloseHandle(containment);
+        }
+    }
+
+    #[test]
+    fn handle_redacts_token_for_job_object_kind() {
+        let backend = CountingGrantBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        // Pre-create canonical so OpenJobObjectW succeeds; same logic as
+        // handle_brokers_job_object_with_query_mask.
+        let canonical = "Local\\nono-aipc-testaipc12345678-redact-job";
+        let wide: Vec<u16> = std::ffi::OsStr::new(canonical)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: Anonymous Job Object scaffolded with named canonical.
+        let pre_created: HANDLE = unsafe {
+            windows_sys::Win32::System::JobObjects::CreateJobObjectW(
+                std::ptr::null_mut(),
+                wide.as_ptr(),
+            )
+        };
+        assert!(
+            !pre_created.is_null(),
+            "CreateJobObjectW failed: {}",
+            std::io::Error::last_os_error()
+        );
+
+        let sensitive = "job-secret-tok-do-not-log";
+        let req = make_request_aipc(
+            sensitive,
+            "job-redact-001",
+            HandleKind::JobObject,
+            Some(HandleTarget::JobObjectName {
+                name: "redact-job".to_string(),
+            }),
+            policy::JOB_OBJECT_DEFAULT_MASK,
+        );
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(req),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            sensitive,
+            "testaipc12345678",
+            std::ptr::null_mut(),
+        )
+        .expect("dispatch");
+
+        assert_eq!(audit_log.len(), 1);
+        assert_eq!(audit_log[0].request.session_token, "");
+        let json = serde_json::to_string(&audit_log[0]).expect("serialize");
+        assert!(
+            !json.contains(sensitive),
+            "audit JSON must not contain the raw job-object-kind session token: {json}"
+        );
+
+        let resp = child.recv_response().expect("drain");
+        if let nono::supervisor::SupervisorResponse::Decision { grant, .. } = resp {
+            close_grant_handle_if_any(&grant);
+        }
+
+        // SAFETY: `pre_created` is a live HANDLE returned by CreateJobObjectW.
+        unsafe {
+            CloseHandle(pre_created);
         }
     }
 }

@@ -456,6 +456,71 @@ pub fn broker_mutex_to_process(
     ))
 }
 
+/// Duplicate a Windows Job Object handle into the target process with the
+/// caller-validated access `mask`.
+///
+/// Per CONTEXT.md D-05 footnote (Phase 18 AIPC-01): the supervisor MUST refuse
+/// to broker its own `containment_job` HANDLE regardless of profile widening or
+/// the access mask. That structural runtime guard lives in the dispatcher
+/// (`handle_job_object_request`) which uses `CompareObjectHandles`; this broker
+/// function trusts that guard has already fired BEFORE the call. The mask
+/// itself is pre-validated by the caller against the per-session AIPC
+/// allowlist via `policy::mask_is_allowed`.
+///
+/// Per CONTEXT.md D-10: caller closes the supervisor source AFTER
+/// `send_response` returns; this function does NOT close the source. The
+/// child owns the duplicated handle.
+///
+/// `dwOptions = 0` (NOT `DUPLICATE_SAME_ACCESS`) — must MAP DOWN. The supervisor
+/// opens the source Job Object with `JOB_OBJECT_ALL_ACCESS`; the child only
+/// receives the validated subset (T-18-03-01 mitigation).
+///
+/// The function is `safe` because the caller has already validated `handle`
+/// is a live Job Object HANDLE owned by this process and that it is NOT the
+/// supervisor's own containment Job (see `handle_job_object_request`);
+/// `DuplicateHandle` itself is the only FFI the function performs and the
+/// unsafe contract for that call is documented inside.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub fn broker_job_object_to_process(
+    handle: HANDLE,
+    target_process: BrokerTargetProcess,
+    mask: u32,
+) -> Result<ResourceGrant> {
+    let mut duplicated: HANDLE = std::ptr::null_mut();
+    // SAFETY: `handle` is a live Job Object HANDLE owned by the supervisor
+    // (opened via OpenJobObjectW in the dispatcher with JOB_OBJECT_ALL_ACCESS).
+    // The dispatcher additionally fired the containment-Job runtime guard
+    // (CompareObjectHandles against runtime.containment_job) BEFORE this call,
+    // so this HANDLE is guaranteed NOT to be the supervisor's own containment
+    // Job (T-18-03-01 mitigation). `target_process.raw()` was wrapped from a
+    // live process handle. `duplicated` points to writable storage. `mask`
+    // was pre-validated by the caller against the per-session allowlist via
+    // `policy::mask_is_allowed`. `dwOptions = 0` (NOT DUPLICATE_SAME_ACCESS)
+    // because we MAP DOWN — the supervisor source has JOB_OBJECT_ALL_ACCESS
+    // but the child only gets the validated subset (T-18-03-01 mitigation).
+    let ok = unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            handle,
+            target_process.raw(),
+            &mut duplicated,
+            mask,
+            0,
+            0, // dwOptions = 0 — MAP DOWN
+        )
+    };
+    if ok == 0 || duplicated.is_null() {
+        return Err(NonoError::SandboxInit(format!(
+            "DuplicateHandle (Job Object, mask=0x{mask:08x}) failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(ResourceGrant::duplicated_windows_job_object_handle(
+        duplicated as usize as u64,
+        mask,
+    ))
+}
+
 /// Duplicate a Windows named-pipe handle into the target process with access
 /// mapped DOWN from the supervisor source's `PIPE_ACCESS_DUPLEX` to the
 /// requested `direction`. The mask is `GENERIC_READ`, `GENERIC_WRITE`, or
@@ -1401,6 +1466,63 @@ mod tests {
         let msg = err.to_string();
         assert!(
             msg.contains("DuplicateHandle (mutex"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    // Phase 18 AIPC-01 Plan 18-03 Task 1 — Job Object broker unit tests.
+    // All gated `#[cfg(target_os = "windows")]`.
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_broker_job_object_to_process_duplicates_with_query_mask() {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::JobObjects::CreateJobObjectW;
+        // SAFETY: anonymous Job Object creation with NULL attributes/name.
+        let job: HANDLE = unsafe { CreateJobObjectW(std::ptr::null_mut(), std::ptr::null()) };
+        assert!(
+            !job.is_null(),
+            "CreateJobObjectW failed: {}",
+            std::io::Error::last_os_error()
+        );
+
+        let grant = broker_job_object_to_process(
+            job,
+            BrokerTargetProcess::current(),
+            crate::supervisor::policy::JOB_OBJECT_DEFAULT_MASK,
+        )
+        .expect("duplicate Job Object into current process");
+        assert_eq!(
+            grant.transfer,
+            ResourceTransferKind::DuplicatedWindowsHandle
+        );
+        assert_eq!(
+            grant.resource_kind,
+            crate::supervisor::types::GrantedResourceKind::JobObject
+        );
+        let raw = grant.raw_handle.expect("raw handle present");
+        assert_ne!(raw, 0);
+
+        // SAFETY: `raw` came from DuplicateHandle just above; `job` came from
+        // CreateJobObjectW above. Both are live HANDLEs we own.
+        unsafe {
+            CloseHandle(raw as usize as HANDLE);
+            CloseHandle(job);
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_broker_job_object_to_process_propagates_duplicate_handle_failure() {
+        let result = broker_job_object_to_process(
+            std::ptr::null_mut(),
+            BrokerTargetProcess::current(),
+            crate::supervisor::policy::JOB_OBJECT_DEFAULT_MASK,
+        );
+        let err = result.expect_err("NULL source handle must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("DuplicateHandle (Job Object,"),
             "unexpected error: {msg}"
         );
     }

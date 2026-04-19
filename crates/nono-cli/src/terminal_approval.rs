@@ -209,6 +209,33 @@ fn format_pipe_direction(mask: u32) -> &'static str {
     }
 }
 
+/// Render the per-bit Job Object access_mask as a human-readable label per
+/// D-04 (Phase 18-03). Recognized bits: `JOB_OBJECT_QUERY`,
+/// `JOB_OBJECT_SET_ATTRIBUTES`, `JOB_OBJECT_TERMINATE`,
+/// `JOB_OBJECT_ASSIGN_PROCESS`. Unrecognized combinations surface as `(none)`.
+/// Returns an owned `String` because the bit combinations multiply.
+#[allow(dead_code)]
+fn format_job_object_access(mask: u32) -> String {
+    let mut parts: Vec<&'static str> = Vec::new();
+    if mask & policy::JOB_OBJECT_QUERY != 0 {
+        parts.push("query");
+    }
+    if mask & policy::JOB_OBJECT_SET_ATTRIBUTES != 0 {
+        parts.push("set_attributes");
+    }
+    if mask & policy::JOB_OBJECT_TERMINATE != 0 {
+        parts.push("terminate");
+    }
+    if mask & policy::JOB_OBJECT_ASSIGN_PROCESS != 0 {
+        parts.push("assign_process");
+    }
+    if parts.is_empty() {
+        "(none)".to_string()
+    } else {
+        parts.join("+")
+    }
+}
+
 /// Render the per-handle-type approval prompt per CONTEXT.md D-04
 /// (Phase 18 AIPC-01).
 ///
@@ -287,12 +314,11 @@ pub(crate) fn format_capability_prompt(
                 "[nono] Grant socket access? proto={proto} host={host_display} port={port} role={role_display} reason=\"{reason_display}\" [y/N]"
             )
         }
-        // Plan 18-03 replaces the JobObject placeholder with the D-04-locked
-        // template. The helper stays total over all HandleKind variants so
-        // the dispatcher never panics on an unrecognized request shape.
-        (HandleKind::JobObject, _) => {
+        (HandleKind::JobObject, HandleTarget::JobObjectName { name }) => {
+            let name_display = sanitize_for_terminal(name);
+            let access_display = format_job_object_access(access_mask);
             format!(
-                "[nono] Grant {kind:?} access? (unsupported in this build) reason=\"{reason_display}\" [y/N]"
+                "[nono] Grant Job Object access? name={name_display} access={access_display} reason=\"{reason_display}\" [y/N]"
             )
         }
         // Mismatched (kind, target) shapes — defense-in-depth; the dispatcher
@@ -550,18 +576,57 @@ mod tests {
     }
 
     #[test]
-    fn prompt_falls_back_for_unsupported_kind() {
-        // Plan 18-02 wires Socket and Pipe; only JobObject remains a
-        // placeholder until Plan 18-03.
+    fn prompt_renders_kind_target_mismatch_safely() {
+        // After Plan 18-03 wires the JobObject branch, the only remaining
+        // catch-all `_` arm in `format_capability_prompt` fires on a
+        // (kind, target) shape mismatch — defense-in-depth for a dispatcher
+        // bug. The arm must NOT panic and must surface a clear placeholder.
         let target = HandleTarget::JobObjectName {
-            name: "test-job".to_string(),
+            name: "wrong-shape".to_string(),
         };
-        let prompt = format_capability_prompt(HandleKind::JobObject, &target, 0, Some("test"));
+        let prompt = format_capability_prompt(HandleKind::Event, &target, 0, Some("test"));
         assert!(
-            prompt.contains("unsupported in this build"),
-            "expected placeholder fallback for JobObject: {prompt}"
+            prompt.contains("kind/target mismatch"),
+            "expected catch-all fallback for kind/target mismatch: {prompt}"
         );
         assert!(prompt.contains("reason=\"test\""), "prompt: {prompt}");
+    }
+
+    #[test]
+    fn format_capability_prompt_job_object_kind() {
+        // Plan 18-03 wires the JobObject branch with the D-04-locked template.
+        let target = HandleTarget::JobObjectName {
+            name: "test-orch".to_string(),
+        };
+        let prompt = format_capability_prompt(
+            HandleKind::JobObject,
+            &target,
+            policy::JOB_OBJECT_QUERY,
+            Some("orch monitor"),
+        );
+        assert_eq!(
+            prompt,
+            r#"[nono] Grant Job Object access? name=test-orch access=query reason="orch monitor" [y/N]"#
+        );
+    }
+
+    #[test]
+    fn format_capability_prompt_job_object_kind_renders_terminate_widening() {
+        let target = HandleTarget::JobObjectName {
+            name: "agent-tree".to_string(),
+        };
+        let prompt = format_capability_prompt(
+            HandleKind::JobObject,
+            &target,
+            policy::JOB_OBJECT_QUERY | policy::JOB_OBJECT_TERMINATE,
+            Some("kill on hang"),
+        );
+        // Order is query+terminate per format_job_object_access bit order.
+        assert!(
+            prompt.contains("access=query+terminate"),
+            "expected query+terminate access label: {prompt}"
+        );
+        assert!(prompt.contains("name=agent-tree"), "prompt: {prompt}");
     }
 
     // Phase 18 AIPC-01 Plan 18-02 Task 3 — format_capability_prompt tests
