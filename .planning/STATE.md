@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: Resource Limits, Extended IPC, Attach-Streaming & Cleanup
-status: Phase 20 wave 0+1 complete (plans 20-01, 20-02, 20-03 — 3/4 plans); wave 2 plan 20-04 unblocked
-stopped_at: Phase 20 waves 0+1 executed end-to-end. Wave 0: 20-01 (3 feat commits + SUMMARY, rustls-webpki 0.103.12 + workspace 0.37.1). Wave 1 parallel: 20-02 (profile extends cycle guard end-to-end regression tests + claude.json symlink with root-containment validator; 2 fix commits + SUMMARY + merge aa018ad) and 20-03 (keyring:// URI manual port + --env-allow/--env-deny CLI flags + command_blocking_deprecation backport; 3 feat commits + SUMMARY + merge 9e69792). D-21 Windows-invariance held across all 3 plans (zero *_windows.rs touched). Post-merge gate: cargo build --workspace --all-targets exit 0; nono lib 580/580 pass; nono-cli env_vars.rs shows 19 pre-existing Phase 19 CLEAN-02 deferred windows_* failures (exact match for 20-01 baseline, no NEW failures).
-last_updated: "2026-04-19T01:30:00.000Z"
-last_activity: 2026-04-19 — Phase 20 wave 0+1 complete. 20-01 rustls-webpki 0.103.12 + workspace 0.37.1 realignment. 20-02 profile extends cycle guard + claude.json symlink (upstream c1bc439 + 97f7294). 20-03 keyring:// URI scheme (manual port of upstream 5bccbc4 + 23e9a87), --env-allow/--env-deny CLI flags (upstream 1b412a7 CLI-surface subset), command_blocking_deprecation backport (upstream 0ca641b + 4af0c3e). Wave 2 plan 20-04 (--allow-gpu + GitLab ID tokens) unblocked.
+status: Phase 20 all 4 plans complete (20-01, 20-02, 20-03, 20-04); phase awaits verifier pass
+stopped_at: Phase 20 waves 0+1+2 executed end-to-end. Wave 0: 20-01 (3 feat commits + SUMMARY, rustls-webpki 0.103.12 + workspace 0.37.1). Wave 1 parallel: 20-02 (profile extends cycle guard end-to-end regression tests + claude.json symlink with root-containment validator; 2 fix commits + SUMMARY + merge aa018ad) and 20-03 (keyring:// URI manual port + --env-allow/--env-deny CLI flags + command_blocking_deprecation backport; 3 feat commits + SUMMARY + merge 9e69792). Wave 2 sequential: 20-04 (--allow-gpu flag + CapabilitySet::gpu surface + macOS Seatbelt IOKit Metal/AGX grants + Linux NVIDIA/DRM/AMD/WSL2 + NVIDIA procfs Landlock allowlist + GitLab ID token trust signing via fail-closed url::Url::parse issuer validator; 3 feat commits f377a3e/ec73a8a/af5c124 + SUMMARY). D-21 Windows-invariance held across all 4 plans (zero *_windows.rs touched across 11 commits). Post-plan gate: cargo build --workspace exit 0; nono lib 593/593 pass; 19 pre-existing Phase 19 CLEAN-02 deferred env_vars.rs windows_* failures (exact match for 20-01 baseline, no NEW failures).
+last_updated: "2026-04-19T12:30:00.000Z"
+last_activity: 2026-04-19 — Phase 20 all 4 plans complete. 20-04 adds --allow-gpu flag (upstream cb6de49 + 4535473, D-12) with 3-platform dispatch (Linux Landlock NVIDIA+DRM+AMD+WSL2 allowlist, macOS Seatbelt IOKit Metal/AGX grants, Windows CLI-layer tracing::warn!), NVIDIA procfs + nvidia-uvm-tools Linux device allowlist (upstream b162b5c + 4df0a8e, D-13), and GitLab ID tokens for trust signing (upstream ab5a064, D-11) with url::Url::parse component-equality issuer validator guarding against iss.starts_with prefix-match anti-pattern. D-21 invariant upheld — crates/nono-cli/src/trust_intercept_windows.rs and crates/nono/src/sandbox/windows.rs byte-identical. 18 + 4 + 17 new tests green on Windows host.
 progress:
   total_phases: 20
   completed_phases: 15
-  total_plans: 47
-  completed_plans: 47
+  total_plans: 48
+  completed_plans: 48
   percent: 95
 ---
 
@@ -97,6 +97,7 @@ Progress: [████████░░]  80% (8/10 v2.1 requirements validate
 - **Phase 19 CLEAN-02 D-06 scope boundary strictly honored:** `tests/env_vars.rs` integration failures (19) and `trust_scan::tests::*` tempdir-race flakes (1–3) exist pre- and post-fix on this Windows host but are NOT in D-06's 5-test scope and were NOT fixed in this plan. Documented in 19-02-SUMMARY § Deferred Issues for potential future cleanup (2026-04-18).
 - **Phase 19 CLEAN-03 per-file disposition review:** 10 disk-resident WIP items from D-12 resolved via user-approved disposition table — 6 committed alive (`10-RESEARCH.md`, `10-UAT.md`, quick-260410-nlt PLAN, quick-260412-ajy directory's 7 files, `v1.0-INTEGRATION-REPORT.md`), 2 reverted to HEAD (11-01-PLAN.md, 11-02-PLAN.md working-tree drift), 2 deleted (`host.nono_binary.commit` and `query` debug crumbs + untracked 12-02-PLAN.md reconstruction). Two new root-anchored `.gitignore` patterns prevent recurrence of WFP-service debug crumbs. No production code touched; commits a208761, a4100aa, db4547b, 0391e37, d49fda8, d6bf88f (2026-04-18).
 - **Phase 19 CLEAN-04 retention threshold + breaking change + T-19-04-07 mitigation:** Auto-sweep threshold = 100 stale files (compile-time constant, within CONTEXT.md's 50–500 range). `--older-than <DURATION>` with require-suffix parser is a deliberate breaking change from the prior integer-days form — silently interpreting `30` as seconds vs days would be a footgun; scripts now get a migration hint. `--all-exited` is an explicit escape hatch, clap-enforced mutually-exclusive with `--older-than`. T-19-04-07 mitigation is the structural early-return `if env::var_os("NONO_CAP_FILE").is_some() { return; }` as the first statement of `auto_prune_if_needed` — a sandboxed agent calling `nono ps` cannot trigger host-side session-file deletion. Paired with unit test `auto_prune_is_noop_when_sandboxed`. One-shot cleanup on this host: BEFORE=1392, AFTER=49, DELTA=1343. Commits 18e9768, a71b2bf, c3defb6, ddf408b, f626e24 (2026-04-18).
+- **Phase 20 Plan 20-04 capability-routing deviation from upstream:** Upstream wires `--allow-gpu` through `sandbox_prepare.rs::maybe_enable_macos_gpu` + `maybe_enable_gpu` (fork 452 lines vs upstream 1585 — known-risky per CONTEXT § D-18) and through `profile/mod.rs` (Plan 20-02's exclusive scope). Fork's port routes the capability DIRECTLY through the `CapabilitySet` + sandbox backend layer: `SandboxArgs::allow_gpu` (cli.rs) → `caps.set_gpu(true)` (capability_ext.rs Rule-3 deviation) → `caps.gpu()` consumed in sandbox/linux.rs (Landlock NVIDIA+DRM+AMD+WSL2 allowlist + NVIDIA-gated procfs) + sandbox/macos.rs (IOKit Metal/AGX grants). Windows warning lives exclusively in cli.rs `#[cfg(target_os = "windows")]` branch — sandbox/windows.rs is byte-identical (D-21). Three atomic commits f377a3e (D-12), ec73a8a (D-13), af5c124 (D-11) land 6 upstream SHAs (cb6de49, 4535473, b162b5c, 4df0a8e, ab5a064) via manual port. GitLab ID token trust signing adds `validate_oidc_issuer` fail-closed URL-component-equality validator using `url::Url::parse` — explicit regression guard against `iss.starts_with` prefix-match anti-pattern (CLAUDE.md § Common Footguns #1). 9 validator tests + 8 predicate-builder tests + 18 GPU tests all green on Windows host; D-21 invariant upheld by construction across all 3 commits (2026-04-19).
 
 ### Roadmap Evolution
 
@@ -133,9 +134,9 @@ Progress: [████████░░]  80% (8/10 v2.1 requirements validate
 ## Session Continuity
 
 **Current Milestone:** v2.1 — Resource Limits, Extended IPC, Attach-Streaming & Cleanup
-**Last Activity:** 2026-04-18 — Phase 19 plan 19-04 (CLEAN-04 session retention + prune CLI extensions + auto-prune on `nono ps` + T-19-04-07 NONO_CAP_FILE structural no-op + one-shot cleanup of 1343 stale session files + user-facing docs) complete; 5 DCO-signed commits (`18e9768`, `a71b2bf`, `c3defb6`, `ddf408b`, `f626e24`) + bookkeeping on `windows-squash`
-**Stopped At:** Phase 19 plans 19-01 + 19-02 + 19-03 + 19-04 all complete on disk; awaiting verifier agent before marking phase itself complete
-**Next Steps:** Orchestrator runs the Phase 19 verifier agent to close Phase 19. Then pivot to `/gsd-plan-phase 17` (ATCH-01) or `/gsd-plan-phase 18` (AIPC-01) — both independent feature phases remain for v2.1.
+**Last Activity:** 2026-04-19 — Phase 20 plan 20-04 (--allow-gpu D-12 + NVIDIA Linux allowlist D-13 + GitLab ID tokens D-11) complete; 3 DCO-signed commits (`f377a3e`, `ec73a8a`, `af5c124`) + SUMMARY on `windows-squash`. Phase 20 all 4 plans complete.
+**Stopped At:** Phase 20 plans 20-01 + 20-02 + 20-03 + 20-04 all complete on disk; awaiting verifier agent before marking phase itself complete.
+**Next Steps:** Orchestrator runs the Phase 20 verifier agent to close Phase 20. Then pivot to `/gsd-plan-phase 17` (ATCH-01) or `/gsd-plan-phase 18` (AIPC-01) — both independent feature phases remain for v2.1.
 
 **Status of Phase 19 CLEAN items:**
 
