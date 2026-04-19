@@ -54,11 +54,11 @@ Windows security must be as structurally impossible and feature-complete as Unix
 - ✔ **RESL-02** — Memory cap on Windows Job Object (`--memory`) via `JobMemoryLimit` with `KILL_ON_JOB_CLOSE` preserved. Validated in Phase 16: Resource Limits.
 - ✔ **RESL-03** — Wall-clock timeout (`--timeout`) via supervisor-side `Instant` deadline + `TerminateJobObject` (kernel `JOB_TIME` deliberately not used since it tracks CPU not wall-clock). Validated in Phase 16: Resource Limits.
 - ✔ **RESL-04** — Process count cap (`--max-processes`) via `ActiveProcessLimit`. Validated in Phase 16: Resource Limits. `nono inspect` surfaces all four caps via the new `Limits:` block.
+- ✔ **ATCH-01** — `nono attach <id>` on Windows detached sessions streams child stdout live, accepts stdin, supports clean detach (Ctrl-]d) + re-attach, and rejects a 2nd concurrent attach with a friendly busy error. Implemented via anonymous-pipe stdio at child spawn time bridged through the supervisor (no ConPTY on the detached path — preserves the Phase 15 `0xC0000142` fix structurally). Resize via `ResizePseudoConsole` explicitly downgraded to a documented limitation per D-07 (anonymous-pipe stdio is structurally exclusive of ConPTY). Validated in Phase 17 with pragmatic-PASS verdict on the manual smoke gate; 4 deferred-by-design HUMAN-UAT items routed to `/gsd-verify-work` for later closure.
 
 ### Active (v2.1)
 
 - [ ] **AIPC-01** — extended handle brokering on the Phase 11 capability pipe: socket handles, named-pipe handles, Job Object handles, event handles, mutex handles. Each with the correct `DuplicateHandle` inheritance/security semantics and access-mask validation.
-- [ ] **ATCH-01** — full ConPTY re-attach on Windows detached sessions (read + write + resize). Closes the Phase 15 deferred item; lets `nono attach` behave like a real terminal against detached sessions.
 - [ ] **CLEAN-01** — `cargo fmt --all` the 3 pre-existing drifted files from commit `6749494` (EnvVarGuard migration); restore CI `fmt --check` to clean.
 - [ ] **CLEAN-02** — diagnose and fix 5 pre-existing Windows test flakes in `capability_ext`, `profile::builtin`, `query_ext`, `trust_keystore`. Likely env-var isolation bugs.
 - [ ] **CLEAN-03** — triage disk-resident WIP: `10-RESEARCH.md`/`10-UAT.md`, `11-01/02-PLAN.md` modifications, `12-02-PLAN.md`, `.planning/quick/260410-nlt-*`, `.planning/quick/260412-ajy-*`, `.planning/v1.0-INTEGRATION-REPORT.md`, stray root files (`host.nono_binary.commit`, `query`). Commit alive work, remove dead artifacts.
@@ -113,4 +113,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-18 — Phase 16 complete (RESL-01..04 shipped: Job Object CPU/memory/process caps + supervisor wall-clock timer + `nono inspect` Limits block). v2.1 active phases remaining: AIPC-01, ATCH-01, CLEAN-01..04.*
+*Last updated: 2026-04-19 — Phase 17 complete (ATCH-01 shipped: anonymous-pipe stdio for `nono attach` on Windows detached sessions; resize on detached path explicitly downgraded per D-07). v2.1 active phases remaining: AIPC-01.*

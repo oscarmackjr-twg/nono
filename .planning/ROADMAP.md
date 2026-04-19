@@ -58,7 +58,7 @@ Carry-forward → Phase 15: detached-console-grandchild `0xC0000142 STATUS_DLL_I
 
   **Plans:** 16-01 (CLI flags + Windows enforcement for CPU/memory/processes) + 16-02 (wall-clock timeout timer + observability). Both complete.
 
-- [ ] **Phase 17: Attach-Streaming (ATCH)** — Full ConPTY re-attach on detached Windows sessions (read + write). Resolves the Phase 15 deferred item so `nono attach` against detached sessions behaves like a real terminal. **Goal:** `nono attach <id>` against a detached Windows session streams child stdout live, accepts stdin from the attach client, supports clean detach (Ctrl-]d) + re-attach, and a second attach client receives a friendly `Session <id> is already attached` error. Resize on detached sessions is **explicitly downgraded to a documented limitation per D-07** (anonymous-pipe stdio is structurally exclusive of ConPTY; preserves the Phase 15 `0xC0000142` fix).
+- [x] **Phase 17: Attach-Streaming (ATCH)** — Anonymous-pipe stdio bridges in the Windows detached supervisor: `nono attach <id>` now streams child stdout live, accepts stdin from the attach client, supports clean detach (Ctrl-]d) + re-attach, and a second attach client receives a friendly `Session <id> is already attached` error. Resize on detached sessions is **explicitly downgraded to a documented limitation per D-07** (anonymous-pipe stdio is structurally exclusive of ConPTY; preserves the Phase 15 `0xC0000142` fix). Smoke gate executed 2026-04-19 with pragmatic-PASS verdict (G-01 PASS, G-02 PARTIAL PASS, G-03 PASS, G-04 Row 3 PASS + Row 4 environmental + Rows 1/2/5 structurally PASS); 4 deferred items routed to `17-HUMAN-UAT.md`. Surfaced 3 latent pre-Phase-17 Windows session-id bugs which were fixed in commit `7db6595` (corrupted job-name format string in `create_process_containment` + 2 `self.session_id` → `self.user_session_id` fixes in `start_logging`/`start_data_pipe_server`). Verifier passed 13/13 must-haves with `status: human_needed` (deferred items, not gaps). **Completed 2026-04-19.**
 
   **Depends on:** Phase 15 attach-pipe naming fix (commit `2c414d8`).
 
@@ -66,7 +66,7 @@ Carry-forward → Phase 15: detached-console-grandchild `0xC0000142 STATUS_DLL_I
 
   **Plans:** 2 plans.
   - [x] 17-01-PLAN.md — implementation: DetachedStdioPipes + STARTUPINFOW wiring + start_logging/start_data_pipe_server pipe branches + run_attach friendly busy-error + unit/integration tests (complete 2026-04-19, 9 commits `1e38381`..`ecfeba7`; D-02 + D-21 invariance held)
-  - [ ] 17-02-PLAN.md — manual smoke gate G-01..G-04 + REQUIREMENTS.md ATCH-01 acceptance #3 downgrade + CHANGELOG [Unreleased] entry + docs/cli/attach.md no-resize note + 13-UAT.md P17-HV-1..4 rows
+  - [x] 17-02-PLAN.md — manual smoke gate G-01..G-04 + REQUIREMENTS.md ATCH-01 acceptance #3 downgrade + CHANGELOG [Unreleased] entry + docs/cli/features/session-lifecycle.mdx no-resize note + 13-UAT.md P17-HV-1..4 rows (complete 2026-04-19, commit `ab88cf5`; pragmatic-PASS verdict per user)
 
 - [ ] **Phase 18: Extended IPC (AIPC)** — Broker socket, named-pipe, Job Object, event, and mutex handles over the Phase 11 capability pipe. Each handle type validated server-side against access-mask allowlist.
 
@@ -115,7 +115,7 @@ Carry-forward → Phase 15: detached-console-grandchild `0xC0000142 STATUS_DLL_I
 | 14. Fix Pass | v2.0 | 2/3 | Complete with carry-forward (14-02 done; 14-03 done; 14-01 escalated to Phase 15) | 2026-04-18 |
 | 15. Detached Console + ConPTY Architecture Investigation | post-v2.0 closure | 3/3 | Complete (direction-b fix; 5-row smoke gate pass; 4 UAT items promoted; carry-forward closed) | 2026-04-18 |
 | 16. Resource Limits (RESL-01..04) | v2.1 | 2/2 | Complete (RESL-01..04 shipped: CPU/memory/processes kernel-enforced, timeout via supervisor timer, `nono inspect` Limits block) | 2026-04-18 |
-| 17. Attach-Streaming (ATCH-01) | v2.1 | 0/? | Not Planned (run `/gsd-plan-phase 17` to start) | - |
+| 17. Attach-Streaming (ATCH-01) | v2.1 | 2/2 | Complete (anonymous-pipe stdio + supervisor pipe-source/sink bridges + ERROR_PIPE_BUSY friendly translation + 3 latent session-id mismatch fixes via debug `7db6595`; 4 deferred-by-design HUMAN-UAT items per pragmatic-PASS verdict) | 2026-04-19 |
 | 18. Extended IPC (AIPC-01) | v2.1 | 0/? | Not Planned (run `/gsd-plan-phase 18` to start) | - |
 | 19. Cleanup (CLEAN-01..04) | v2.1 | 4/4 | Complete (19-01 CLEAN-01 fmt drift; 19-02 CLEAN-02 5 test flakes + query_path UNC prod fix complete-with-deviation; 19-03 CLEAN-03 10-item WIP triage; 19-04 CLEAN-04 retention + prune + auto-sweep + T-19-04-07 mitigation + 1343-file one-shot cleanup + docs; verifier passed 25/25 must-haves, commit `6597fbf`) | 2026-04-19 |
 | 20. Upstream Parity Sync (UPST) | v2.1 | 4/4 | Complete (Wave 0+1+2 2026-04-19: 20-01 rustls-webpki 0.103.12 + workspace 0.37.1; 20-02 profile extends cycle guard + claude.json symlink; 20-03 keyring:// URI + env-var filter flags + command_blocking_deprecation; 20-04 --allow-gpu + NVIDIA Linux allowlist + GitLab ID tokens. Clippy follow-up `4f08f3f` fixes 2 pre-existing 20-03 unwrap_used violations. Verifier passed 38/38 must-haves, UPST-01..04 all traced; D-21 Windows-invariance held across 11 feat/fix commits — zero `*_windows.rs` touched) | 2026-04-19 |
