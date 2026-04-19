@@ -58,13 +58,15 @@ Carry-forward → Phase 15: detached-console-grandchild `0xC0000142 STATUS_DLL_I
 
   **Plans:** 16-01 (CLI flags + Windows enforcement for CPU/memory/processes) + 16-02 (wall-clock timeout timer + observability). Both complete.
 
-- [ ] **Phase 17: Attach-Streaming (ATCH)** — Full ConPTY re-attach on detached Windows sessions (read + write + resize). Resolves the Phase 15 deferred item so `nono attach` against detached sessions behaves like a real terminal.
+- [ ] **Phase 17: Attach-Streaming (ATCH)** — Full ConPTY re-attach on detached Windows sessions (read + write). Resolves the Phase 15 deferred item so `nono attach` against detached sessions behaves like a real terminal. **Goal:** `nono attach <id>` against a detached Windows session streams child stdout live, accepts stdin from the attach client, supports clean detach (Ctrl-]d) + re-attach, and a second attach client receives a friendly `Session <id> is already attached` error. Resize on detached sessions is **explicitly downgraded to a documented limitation per D-07** (anonymous-pipe stdio is structurally exclusive of ConPTY; preserves the Phase 15 `0xC0000142` fix).
 
   **Depends on:** Phase 15 attach-pipe naming fix (commit `2c414d8`).
 
-  **Open question:** Can ConPTY attach to an already-running process without breaking the loader? If not, fall back to bidirectional anonymous pipe (no resize). Investigate in plan-phase.
+  **Resolved (in CONTEXT.md):** D-01 anonymous-pipes-only on detached path; D-07 resize downgraded to documented limitation; D-21 Windows-invariance — zero changes outside `*_windows.rs` files.
 
-  **Plans:** TBD during `/gsd-plan-phase 17` (likely 2 plans: investigation + implementation + smoke gate).
+  **Plans:** 2 plans.
+  - [ ] 17-01-PLAN.md — implementation: DetachedStdioPipes + STARTUPINFOW wiring + start_logging/start_data_pipe_server pipe branches + run_attach friendly busy-error + unit/integration tests
+  - [ ] 17-02-PLAN.md — manual smoke gate G-01..G-04 + REQUIREMENTS.md ATCH-01 acceptance #3 downgrade + CHANGELOG [Unreleased] entry + docs/cli/attach.md no-resize note + 13-UAT.md P17-HV-1..4 rows
 
 - [ ] **Phase 18: Extended IPC (AIPC)** — Broker socket, named-pipe, Job Object, event, and mutex handles over the Phase 11 capability pipe. Each handle type validated server-side against access-mask allowlist.
 
