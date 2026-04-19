@@ -5,13 +5,10 @@ use super::*;
 // only in launch.rs because they are exclusively used by the new
 // DetachedStdioPipes struct + spawn_windows_child wiring.
 use windows_sys::Win32::Foundation::{
-    SetHandleInformation, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+    SetHandleInformation, BOOL, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::System::Pipes::CreatePipe;
-// STARTF_USESTDHANDLES is consumed by spawn_windows_child in Task 2; allow
-// the unused-import warning during Task 1 only — Task 2 removes the allow.
-#[allow(unused_imports)]
 use windows_sys::Win32::System::Threading::STARTF_USESTDHANDLES;
 
 impl OwnedHandle {
@@ -1126,7 +1123,7 @@ pub(super) fn spawn_windows_child(
     pty: Option<&pty_proxy::PtyPair>,
     limits: &crate::launch_runtime::ResourceLimits,
     _session_id: Option<&str>,
-) -> Result<WindowsSupervisedChild> {
+) -> Result<(WindowsSupervisedChild, Option<DetachedStdioPipes>)> {
     let env_pairs = build_child_env(config);
     let mut environment_block = build_windows_environment_block(&env_pairs);
 
@@ -1175,6 +1172,12 @@ pub(super) fn spawn_windows_child(
     let current_dir_u16 = to_u16_null_terminated(&current_dir.to_string_lossy());
 
     let mut process_info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+
+    // Phase 17: parent-end stdio handles for the Windows detached path.
+    // Allocated lazily inside the non-PTY arm of `let created = ...` below;
+    // declared here so it remains in scope for the post-CreateProcess
+    // close_child_ends() call and the eventual return.
+    let mut detached_stdio: Option<DetachedStdioPipes> = None;
 
     let created = if let Some(pty_pair) = pty {
         let mut attr_size: usize = 0;
@@ -1276,11 +1279,42 @@ pub(super) fn spawn_windows_child(
         }
         created
     } else {
+        // Phase 17 (ATCH-01): on the Windows detached path (no PTY,
+        // NONO_DETACHED_LAUNCH=1), allocate three anonymous pipe pairs and
+        // bind the child-end handles to STARTUPINFOW.hStd*. The PTY branch
+        // above is unchanged — pipe + ConPTY are mutually exclusive at the
+        // gate (RESEARCH.md A6 + supervised_runtime.rs:88-94 should_allocate_pty).
+        detached_stdio = if pty.is_none() && is_windows_detached_launch {
+            Some(DetachedStdioPipes::create()?)
+        } else {
+            None
+        };
+
         let mut startup_info: STARTUPINFOW = unsafe {
             // SAFETY: STARTUPINFOW is a plain Win32 FFI struct; zero-init is valid.
             std::mem::zeroed()
         };
         startup_info.cb = size_of::<STARTUPINFOW>() as u32;
+
+        if let Some(ref pipes) = detached_stdio {
+            // D-04 + CONTEXT.md <specifics> line 127: merge stderr into stdout
+            // for visual consistency with the PTY path. The kernel routes child
+            // fd 1 and fd 2 writes through the same pipe write end; supported
+            // by Win32 (RESEARCH.md A5). The unused stderr_write child end
+            // is still closed by close_child_ends() / Drop.
+            startup_info.dwFlags = STARTF_USESTDHANDLES;
+            startup_info.hStdInput = pipes.stdin_read;
+            startup_info.hStdOutput = pipes.stdout_write;
+            startup_info.hStdError = pipes.stdout_write;
+        }
+
+        // CRITICAL: bInheritHandles MUST be 1 when STARTF_USESTDHANDLES is set
+        // with inheritable handles (RESEARCH.md Pitfall 3 / A1). The PTY
+        // branch passes 0 (uses PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE instead)
+        // and stays at 0. Detached-stdio branch passes 1 — but only the three
+        // child-end pipe handles are inheritable; parent ends were flipped
+        // non-inheritable in DetachedStdioPipes::create() (threat T-17-08).
+        let inherit_handles: BOOL = if detached_stdio.is_some() { 1 } else { 0 };
 
         if !h_token.is_null() {
             unsafe {
@@ -1291,7 +1325,7 @@ pub(super) fn spawn_windows_child(
                     command_line.as_mut_ptr(),
                     std::ptr::null(),
                     std::ptr::null(),
-                    0,
+                    inherit_handles,
                     CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
                     environment_block.as_mut_ptr() as *mut _,
                     current_dir_u16.as_ptr(),
@@ -1307,7 +1341,7 @@ pub(super) fn spawn_windows_child(
                     command_line.as_mut_ptr(),
                     std::ptr::null(),
                     std::ptr::null(),
-                    0,
+                    inherit_handles,
                     CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
                     environment_block.as_mut_ptr() as *mut _,
                     current_dir_u16.as_ptr(),
@@ -1328,6 +1362,19 @@ pub(super) fn spawn_windows_child(
     let process = OwnedHandle(process_info.hProcess);
     let thread = OwnedHandle(process_info.hThread);
 
+    // Phase 17: close the supervisor's copy of the child-end pipe handles AFTER
+    // CreateProcess succeeded (so the child holds its own duplicates) and BEFORE
+    // ResumeThread (so the child observes EOF on stdin only when supervisor's
+    // parent-end write handle closes later). RESEARCH.md Code Example 2,
+    // Pitfall 3 ordering. No-op when detached_stdio is None.
+    if let Some(ref mut pipes) = detached_stdio {
+        // SAFETY: CreateProcess succeeded above; the child has its own duplicates
+        // of the inheritable handles. close_child_ends is idempotent.
+        unsafe {
+            pipes.close_child_ends();
+        }
+    }
+
     if let Err(err) = apply_process_handle_to_containment(containment, process.raw()) {
         terminate_suspended_process(process.raw(), "AssignProcessToJobObject failed");
         return Err(err);
@@ -1341,10 +1388,13 @@ pub(super) fn spawn_windows_child(
     }
     resume_contained_process(process.raw(), thread.raw())?;
 
-    Ok(WindowsSupervisedChild::Native {
-        process,
-        _thread: thread,
-    })
+    Ok((
+        WindowsSupervisedChild::Native {
+            process,
+            _thread: thread,
+        },
+        detached_stdio,
+    ))
 }
 
 /// Returns true when the current process is the inner detached supervisor launched by

@@ -594,7 +594,13 @@ pub fn execute_direct(
     );
     let containment = create_process_containment(session_id)?;
 
-    let mut child = spawn_windows_child(
+    // Phase 17 (Task 2): spawn_windows_child now returns
+    // (WindowsSupervisedChild, Option<DetachedStdioPipes>). The Direct
+    // execution path never goes through the detached supervisor — pty=None
+    // here means "no PTY", and is_windows_detached_launch() is false outside
+    // the inner detached supervisor process — so the second tuple element is
+    // always None for execute_direct. Discard it.
+    let (mut child, _detached_stdio) = spawn_windows_child(
         config,
         launch_program,
         &containment,
@@ -699,7 +705,13 @@ pub fn execute_supervised(
         }
     );
 
-    let mut child = spawn_windows_child(
+    // Phase 17 (Task 2): spawn_windows_child returns
+    // (WindowsSupervisedChild, Option<DetachedStdioPipes>). Task 3 wires the
+    // second tuple element into runtime.attach_detached_stdio(...) so the
+    // pipe-source / pipe-sink bridge threads can borrow the parent-end
+    // handles. Until Task 3 lands, the value is held in a local so it
+    // outlives the child and is closed cleanly on Drop at function exit.
+    let (mut child, _detached_stdio) = spawn_windows_child(
         config,
         launch_program,
         &containment,
