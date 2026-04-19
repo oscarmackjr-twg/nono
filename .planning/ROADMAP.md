@@ -65,7 +65,7 @@ Carry-forward → Phase 15: detached-console-grandchild `0xC0000142 STATUS_DLL_I
   **Resolved (in CONTEXT.md):** D-01 anonymous-pipes-only on detached path; D-07 resize downgraded to documented limitation; D-21 Windows-invariance — zero changes outside `*_windows.rs` files.
 
   **Plans:** 2 plans.
-  - [ ] 17-01-PLAN.md — implementation: DetachedStdioPipes + STARTUPINFOW wiring + start_logging/start_data_pipe_server pipe branches + run_attach friendly busy-error + unit/integration tests
+  - [x] 17-01-PLAN.md — implementation: DetachedStdioPipes + STARTUPINFOW wiring + start_logging/start_data_pipe_server pipe branches + run_attach friendly busy-error + unit/integration tests (complete 2026-04-19, 9 commits `1e38381`..`ecfeba7`; D-02 + D-21 invariance held)
   - [ ] 17-02-PLAN.md — manual smoke gate G-01..G-04 + REQUIREMENTS.md ATCH-01 acceptance #3 downgrade + CHANGELOG [Unreleased] entry + docs/cli/attach.md no-resize note + 13-UAT.md P17-HV-1..4 rows
 
 - [ ] **Phase 18: Extended IPC (AIPC)** — Broker socket, named-pipe, Job Object, event, and mutex handles over the Phase 11 capability pipe. Each handle type validated server-side against access-mask allowlist.
