@@ -877,3 +877,48 @@ mod inspect_formatting_tests {
         assert_eq!(format_duration_human(Duration::from_secs(90)), "90 seconds");
     }
 }
+
+#[cfg(all(test, target_os = "windows"))]
+mod attach_busy_translation_tests {
+    use super::translate_attach_open_error;
+    use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
+
+    #[test]
+    fn translates_pipe_busy_to_friendly_setup() {
+        let err = std::io::Error::from_raw_os_error(ERROR_PIPE_BUSY as i32);
+        let translated = translate_attach_open_error(&err, "abc123");
+        let msg = format!("{translated}");
+        assert!(msg.contains("abc123"), "expected session id in: {msg}");
+        assert!(
+            msg.contains("already attached"),
+            "expected 'already attached' in: {msg}"
+        );
+        assert!(
+            msg.contains("nono detach"),
+            "expected 'nono detach' hint in: {msg}"
+        );
+    }
+
+    #[test]
+    fn passes_through_other_errors() {
+        // ERROR_FILE_NOT_FOUND (2)
+        let err = std::io::Error::from_raw_os_error(2);
+        let translated = translate_attach_open_error(&err, "abc123");
+        let msg = format!("{translated}");
+        assert!(
+            msg.contains("Failed to connect"),
+            "expected fallback wording in: {msg}"
+        );
+    }
+
+    #[test]
+    fn passes_through_arbitrary_io_errors() {
+        let err = std::io::Error::other("foo");
+        let translated = translate_attach_open_error(&err, "abc123");
+        let msg = format!("{translated}");
+        assert!(
+            msg.contains("Failed to connect"),
+            "expected fallback wording in: {msg}"
+        );
+    }
+}
