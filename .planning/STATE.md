@@ -131,6 +131,7 @@ Progress: [████████░░]  80% (8/10 v2.1 requirements validate
 | 260417-kem | Fix EnvVarGuard migration - migrate 48 flagged tests to EnvVarGuard | 2026-04-17 | 6749494 | [260417-kem-fix-envvarguard-migration-migrate-48-fla](./quick/260417-kem-fix-envvarguard-migration-migrate-48-fla/) |
 | 260417-wla | Fix Windows CreateProcess ERROR_INVALID_HANDLE from temp-drop use-after-close in spawn_windows_child | 2026-04-17 | eb4730c | [260417-wla-fix-windows-createprocess-handle-uaf](./quick/260417-wla-fix-windows-createprocess-handle-uaf/) |
 | 260419-cad | Add Phase 20 entries for UPST-01..04 to CHANGELOG [Unreleased] | 2026-04-19 | 21401fd | [260419-cad-changelog-phase-20-upst](./quick/260419-cad-changelog-phase-20-upst/) |
+| 260419-dud | Document Phase 20 user-facing surfaces in docs/cli/ + crates/nono README version pin | 2026-04-19 | d2e18c3 | [260419-dud-docs-phase-20-flags-uri](./quick/260419-dud-docs-phase-20-flags-uri/) |
 
 ## Session Continuity
 
