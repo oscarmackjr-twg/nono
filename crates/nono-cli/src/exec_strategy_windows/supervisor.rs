@@ -2619,96 +2619,19 @@ mod capability_handler_tests {
         let _ = child.recv_response().expect("drain");
     }
 
-    #[test]
-    fn handle_redacts_token_for_event_kind() {
-        let backend = CountingGrantBackend::new();
-        let (mut supervisor, mut child) = new_pair();
-        let mut seen = HashSet::new();
-        let mut audit_log = Vec::new();
-
-        let sensitive = "evt-secret-tok-do-not-log";
-        let req = make_request_aipc(
-            sensitive,
-            "evt-redact-001",
-            HandleKind::Event,
-            Some(HandleTarget::EventName {
-                name: "redact-event".to_string(),
-            }),
-            policy::EVENT_DEFAULT_MASK,
-        );
-        handle_windows_supervisor_message(
-            &mut supervisor,
-            nono::supervisor::SupervisorMessage::Request(req),
-            &backend,
-            nono::BrokerTargetProcess::current(),
-            &mut seen,
-            &mut audit_log,
-            sensitive,
-            "testaipc12345678",
-            std::ptr::null_mut(),
-            &AipcResolvedAllowlist::default(),
-        )
-        .expect("dispatch");
-
-        assert_eq!(audit_log.len(), 1);
-        assert_eq!(audit_log[0].request.session_token, "");
-        let json = serde_json::to_string(&audit_log[0]).expect("serialize");
-        assert!(
-            !json.contains(sensitive),
-            "audit JSON must not contain the raw event-kind session token: {json}"
-        );
-
-        // Drain + close any handle to avoid kernel-object leak.
-        let resp = child.recv_response().expect("drain");
-        if let nono::supervisor::SupervisorResponse::Decision { grant, .. } = resp {
-            close_grant_handle_if_any(&grant);
-        }
-    }
-
-    #[test]
-    fn handle_redacts_token_for_mutex_kind() {
-        let backend = CountingGrantBackend::new();
-        let (mut supervisor, mut child) = new_pair();
-        let mut seen = HashSet::new();
-        let mut audit_log = Vec::new();
-
-        let sensitive = "mtx-secret-tok-do-not-log";
-        let req = make_request_aipc(
-            sensitive,
-            "mtx-redact-001",
-            HandleKind::Mutex,
-            Some(HandleTarget::MutexName {
-                name: "redact-mutex".to_string(),
-            }),
-            policy::MUTEX_DEFAULT_MASK,
-        );
-        handle_windows_supervisor_message(
-            &mut supervisor,
-            nono::supervisor::SupervisorMessage::Request(req),
-            &backend,
-            nono::BrokerTargetProcess::current(),
-            &mut seen,
-            &mut audit_log,
-            sensitive,
-            "testaipc12345678",
-            std::ptr::null_mut(),
-            &AipcResolvedAllowlist::default(),
-        )
-        .expect("dispatch");
-
-        assert_eq!(audit_log.len(), 1);
-        assert_eq!(audit_log[0].request.session_token, "");
-        let json = serde_json::to_string(&audit_log[0]).expect("serialize");
-        assert!(
-            !json.contains(sensitive),
-            "audit JSON must not contain the raw mutex-kind session token: {json}"
-        );
-
-        let resp = child.recv_response().expect("drain");
-        if let nono::supervisor::SupervisorResponse::Decision { grant, .. } = resp {
-            close_grant_handle_if_any(&grant);
-        }
-    }
+    // Phase 18 AIPC-01 Plan 18-03 Task 3 — per-kind redaction tests
+    // (`handle_redacts_token_for_event_kind`,
+    //  `handle_redacts_token_for_mutex_kind` from 18-01;
+    //  `handle_redacts_token_for_pipe_kind`,
+    //  `handle_redacts_token_for_socket_kind` from 18-02;
+    //  `handle_redacts_token_for_job_object_kind` from 18-03 Task 1)
+    // are SUBSUMED by `handle_redacts_token_in_audit_for_all_handle_kinds`
+    // below, which iterates over ALL 6 HandleKind values in a single test.
+    // The Phase 11 `handle_redacts_token_in_audit_entry_json` /
+    // `handle_redacts_token_in_serialized_audit` /
+    // `handle_redacts_token_on_mismatch_audit` tests are KEPT — they cover
+    // orthogonal token-leak surfaces (mismatch path, base-token path)
+    // and are not subsumed by the parameterized test.
 
     // Phase 18 AIPC-01 Plan 18-02 Task 3 — dispatcher tests for the new
     // Pipe + Socket HandleKind variants (target-shape validation, role-based
@@ -2990,98 +2913,10 @@ mod capability_handler_tests {
         }
     }
 
-    #[test]
-    fn handle_redacts_token_for_pipe_kind() {
-        let backend = CountingGrantBackend::new();
-        let (mut supervisor, mut child) = new_pair();
-        let mut seen = HashSet::new();
-        let mut audit_log = Vec::new();
-
-        let sensitive = "pipe-secret-tok-do-not-log";
-        let req = make_request_aipc(
-            sensitive,
-            "pipe-redact-001",
-            HandleKind::Pipe,
-            Some(HandleTarget::PipeName {
-                name: "redact-pipe".to_string(),
-            }),
-            policy::GENERIC_READ,
-        );
-        handle_windows_supervisor_message(
-            &mut supervisor,
-            nono::supervisor::SupervisorMessage::Request(req),
-            &backend,
-            nono::BrokerTargetProcess::current(),
-            &mut seen,
-            &mut audit_log,
-            sensitive,
-            "testaipc12345678",
-            std::ptr::null_mut(),
-            &AipcResolvedAllowlist::default(),
-        )
-        .expect("dispatch");
-
-        assert_eq!(audit_log.len(), 1);
-        assert_eq!(audit_log[0].request.session_token, "");
-        let json = serde_json::to_string(&audit_log[0]).expect("serialize");
-        assert!(
-            !json.contains(sensitive),
-            "audit JSON must not contain the raw pipe-kind session token: {json}"
-        );
-
-        let resp = child.recv_response().expect("drain");
-        if let nono::supervisor::SupervisorResponse::Decision { grant, .. } = resp {
-            close_grant_handle_if_any(&grant);
-        }
-    }
-
-    #[test]
-    fn handle_redacts_token_for_socket_kind() {
-        let backend = CountingGrantBackend::new();
-        let (mut supervisor, mut child) = new_pair();
-        let mut seen = HashSet::new();
-        let mut audit_log = Vec::new();
-
-        let sensitive = "sock-secret-tok-do-not-log";
-        let req = make_request_aipc(
-            sensitive,
-            "sock-redact-001",
-            HandleKind::Socket,
-            Some(HandleTarget::SocketEndpoint {
-                protocol: SocketProtocol::Tcp,
-                host: "127.0.0.1".to_string(),
-                port: 8080,
-                role: SocketRole::Connect,
-            }),
-            0,
-        );
-        handle_windows_supervisor_message(
-            &mut supervisor,
-            nono::supervisor::SupervisorMessage::Request(req),
-            &backend,
-            nono::BrokerTargetProcess::current(),
-            &mut seen,
-            &mut audit_log,
-            sensitive,
-            "testaipc12345678",
-            std::ptr::null_mut(),
-            &AipcResolvedAllowlist::default(),
-        )
-        .expect("dispatch");
-
-        assert_eq!(audit_log.len(), 1);
-        assert_eq!(audit_log[0].request.session_token, "");
-        let json = serde_json::to_string(&audit_log[0]).expect("serialize");
-        assert!(
-            !json.contains(sensitive),
-            "audit JSON must not contain the raw socket-kind session token: {json}"
-        );
-
-        let resp = child.recv_response().expect("drain");
-        if let nono::supervisor::SupervisorResponse::Decision { grant, .. } = resp {
-            close_grant_handle_if_any(&grant);
-        }
-    }
+    // (`handle_redacts_token_for_pipe_kind` and
+    //  `handle_redacts_token_for_socket_kind` from Plan 18-02 Task 3
+    //  are subsumed by `handle_redacts_token_in_audit_for_all_handle_kinds`
+    //  below.)
 
     // Phase 18 AIPC-01 Plan 18-03 Task 1 — JobObject dispatcher tests
     // (target-shape validation, mask-upgrade denial, containment-Job runtime
@@ -3301,75 +3136,9 @@ mod capability_handler_tests {
         }
     }
 
-    #[test]
-    fn handle_redacts_token_for_job_object_kind() {
-        let backend = CountingGrantBackend::new();
-        let (mut supervisor, mut child) = new_pair();
-        let mut seen = HashSet::new();
-        let mut audit_log = Vec::new();
-
-        // Pre-create canonical so OpenJobObjectW succeeds; same logic as
-        // handle_brokers_job_object_with_query_mask.
-        let canonical = "Local\\nono-aipc-testaipc12345678-redact-job";
-        let wide: Vec<u16> = std::ffi::OsStr::new(canonical)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-        // SAFETY: Anonymous Job Object scaffolded with named canonical.
-        let pre_created: HANDLE = unsafe {
-            windows_sys::Win32::System::JobObjects::CreateJobObjectW(
-                std::ptr::null_mut(),
-                wide.as_ptr(),
-            )
-        };
-        assert!(
-            !pre_created.is_null(),
-            "CreateJobObjectW failed: {}",
-            std::io::Error::last_os_error()
-        );
-
-        let sensitive = "job-secret-tok-do-not-log";
-        let req = make_request_aipc(
-            sensitive,
-            "job-redact-001",
-            HandleKind::JobObject,
-            Some(HandleTarget::JobObjectName {
-                name: "redact-job".to_string(),
-            }),
-            policy::JOB_OBJECT_DEFAULT_MASK,
-        );
-        handle_windows_supervisor_message(
-            &mut supervisor,
-            nono::supervisor::SupervisorMessage::Request(req),
-            &backend,
-            nono::BrokerTargetProcess::current(),
-            &mut seen,
-            &mut audit_log,
-            sensitive,
-            "testaipc12345678",
-            std::ptr::null_mut(),
-            &AipcResolvedAllowlist::default(),
-        )
-        .expect("dispatch");
-
-        assert_eq!(audit_log.len(), 1);
-        assert_eq!(audit_log[0].request.session_token, "");
-        let json = serde_json::to_string(&audit_log[0]).expect("serialize");
-        assert!(
-            !json.contains(sensitive),
-            "audit JSON must not contain the raw job-object-kind session token: {json}"
-        );
-
-        let resp = child.recv_response().expect("drain");
-        if let nono::supervisor::SupervisorResponse::Decision { grant, .. } = resp {
-            close_grant_handle_if_any(&grant);
-        }
-
-        // SAFETY: `pre_created` is a live HANDLE returned by CreateJobObjectW.
-        unsafe {
-            CloseHandle(pre_created);
-        }
-    }
+    // (`handle_redacts_token_for_job_object_kind` from Plan 18-03 Task 1
+    //  is subsumed by `handle_redacts_token_in_audit_for_all_handle_kinds`
+    //  below.)
 
     // Phase 18 AIPC-01 Plan 18-03 Task 2 — profile-widening dispatcher tests
     // (regression: default-only profiles still deny widened paths;
@@ -3506,6 +3275,133 @@ mod capability_handler_tests {
         // SAFETY: `containment` is a live HANDLE returned by CreateJobObjectW.
         unsafe {
             CloseHandle(containment);
+        }
+    }
+
+    // Phase 18 AIPC-01 Plan 18-03 Task 3 — parameterized token-redaction
+    // test covering all 6 HandleKind shapes (replaces the 5 per-kind
+    // redaction tests added in Plans 18-01 / 18-02 / 18-03 Task 1).
+    //
+    // SECURITY GUARD (T-18-03-05): the literal `cases` Vec MUST contain
+    // exactly 6 entries — one per `HandleKind` discriminator. Adding a
+    // 7th HandleKind in a future phase WITHOUT extending this array
+    // creates a silent gap in the audit-redaction suite. The grep
+    // acceptance criterion in the plan checks `HandleKind::` literal
+    // count == 6 inside this test as the cheapest defense.
+    #[test]
+    fn handle_redacts_token_in_audit_for_all_handle_kinds() {
+        let sensitive_token = "super-secret-token-do-not-log-12345";
+        let cases: Vec<(HandleKind, HandleTarget, u32)> = vec![
+            (
+                HandleKind::File,
+                HandleTarget::FilePath {
+                    path: std::path::PathBuf::from("/tmp/redact-file"),
+                },
+                0,
+            ),
+            (
+                HandleKind::Event,
+                HandleTarget::EventName {
+                    name: "redact-evt".to_string(),
+                },
+                policy::EVENT_DEFAULT_MASK,
+            ),
+            (
+                HandleKind::Mutex,
+                HandleTarget::MutexName {
+                    name: "redact-mtx".to_string(),
+                },
+                policy::MUTEX_DEFAULT_MASK,
+            ),
+            (
+                HandleKind::Pipe,
+                HandleTarget::PipeName {
+                    name: "redact-pip".to_string(),
+                },
+                policy::GENERIC_READ,
+            ),
+            (
+                HandleKind::Socket,
+                HandleTarget::SocketEndpoint {
+                    protocol: SocketProtocol::Tcp,
+                    host: "127.0.0.1".to_string(),
+                    port: 8080,
+                    role: SocketRole::Connect,
+                },
+                0,
+            ),
+            (
+                HandleKind::JobObject,
+                HandleTarget::JobObjectName {
+                    name: "redact-job".to_string(),
+                },
+                policy::JOB_OBJECT_QUERY,
+            ),
+        ];
+
+        // Hard guard against future drift: this assertion catches a
+        // silent gap if a new HandleKind is added without extending the
+        // cases array. The grep acceptance criterion catches the same
+        // class of regression at CI/code-review time.
+        assert_eq!(
+            cases.len(),
+            6,
+            "parameterized redaction test must cover all 6 HandleKind variants — \
+             adding a new HandleKind requires extending the cases Vec"
+        );
+
+        // Use a deny-all backend so the dispatcher reaches the audit-emit
+        // path without actually brokering kernel objects (avoids
+        // OpenJobObjectW / CreateNamedPipeW / WSASocketW side effects in
+        // a redaction-focused test).
+        for (kind, target, access_mask) in cases {
+            let backend = CountingDenyBackend::new();
+            let (mut supervisor, mut child) = new_pair();
+            let mut seen = HashSet::new();
+            let mut audit_log = Vec::new();
+            let req = make_request_aipc(
+                sensitive_token,
+                &format!("redact-{kind:?}-001"),
+                kind,
+                Some(target.clone()),
+                access_mask,
+            );
+            handle_windows_supervisor_message(
+                &mut supervisor,
+                nono::supervisor::SupervisorMessage::Request(req),
+                &backend,
+                nono::BrokerTargetProcess::current(),
+                &mut seen,
+                &mut audit_log,
+                sensitive_token,
+                "testaipc12345678",
+                std::ptr::null_mut(),
+                &AipcResolvedAllowlist::default(),
+            )
+            .expect("dispatch");
+
+            assert_eq!(
+                audit_log.len(),
+                1,
+                "kind {kind:?}: expected exactly 1 audit entry"
+            );
+            assert_eq!(
+                audit_log[0].request.session_token, "",
+                "kind {kind:?}: session_token must be redacted in audit entry"
+            );
+            assert_eq!(
+                audit_log[0].request.kind, kind,
+                "kind {kind:?}: audit entry kind must match request kind"
+            );
+            let json = serde_json::to_string(&audit_log[0]).expect("serialize");
+            assert!(
+                !json.contains(sensitive_token),
+                "kind {kind:?}: audit JSON must not contain raw session token. JSON: {json}"
+            );
+
+            // Drain the response from the child side so the pipe does not
+            // fill across iterations.
+            let _ = child.recv_response().expect("drain");
         }
     }
 }
