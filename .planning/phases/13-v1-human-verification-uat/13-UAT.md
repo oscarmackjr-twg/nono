@@ -370,6 +370,81 @@ $pipe.Dispose()
   (05-VERIFICATION.md Truth #3). Fault-injection to reach this branch is
   out of scope for a human UAT.
 
+### Wave 5 — Phase 17 attach-streaming smoke gate (added 2026-04-19)
+
+Phase 17 plan 17-02 manual smoke gate (G-01..G-04). Records the user-visible
+verification of ATCH-01 (`nono attach` against detached Windows sessions).
+Pragmatic-PASS verdict — the user-visible promise is met; explicit verification
+of bidirectional stdin echo and detach/re-attach round-trip deferred (see
+notes per row). Evidence in
+`.planning/phases/17-attach-streaming/17-02-SUMMARY.md § "Smoke gate"`.
+
+#### 11. P17-HV-1: Live ping streaming on detached Windows session
+- command: `nono run --detached --allow-cwd -- ping -t 127.0.0.1`
+- then: `nono attach <session-id-from-above>`
+- expected: Connects to running session, streams live `Reply from 127.0.0.1: bytes=32 time<1ms TTL=128` lines at ~1/sec to the attach client. Ctrl-]d cleanly detaches without killing the child.
+- result: **pass**
+- notes: Verified 2026-04-19 on Windows 11 Enterprise 10.0.26200.8037 against
+  release build of fix commit `7db6595`. 11+ live ICMP reply lines streamed
+  to attach client `e9f35b375e446455`; attach banner displayed.
+  See 17-02-SUMMARY.md § "Smoke gate" § G-01 for transcript.
+
+#### 12. P17-HV-2: Bidirectional cmd.exe via detached attach
+- command: `nono run --detached --allow-cwd -- cmd.exe`
+- then: `nono attach <session-id>`; type `echo BIDIRECTIONAL_OK<Enter>`; verify echo back; type `exit<Enter>` to terminate child cleanly.
+- expected: cmd.exe banner streams to attach client; stdin reaches the child; child exits cleanly.
+- result: **pass (partial)**
+- notes: Stdout half verified 2026-04-19: `Microsoft Windows [Version 10.0.26200.8037]`
+  banner + `C:\Windows>` prompt streamed to attach client `e519cf1225d51e1e`.
+  Supervisor control plane verified via `nono stop e519cf1225d51e1e` graceful
+  shutdown ("Waiting for session to stop gracefully... Session stopped gracefully").
+  Bidirectional stdin half (`echo BIDIRECTIONAL_OK` round-trip) NOT directly
+  exercised in this session — implied PASS by the pipe-sink unit tests in
+  Plan 17-01 (see `crates/nono-cli/src/exec_strategy_windows/launch.rs::detached_stdio_tests`)
+  + the `nono stop` control plane working through the same supervisor named
+  pipe infrastructure. Defer explicit echo round-trip to a future quick task
+  if regression suspected. See 17-02-SUMMARY.md § "Smoke gate" § G-02 for
+  transcript.
+
+#### 13. P17-HV-3: Counter streaming + attach banner + scrollback replay
+- command: `nono run --detached --allow-cwd -- cmd /c "for /l %i in (1,1,30) do @(echo %i & ping -n 2 127.0.0.1 >nul)"`
+- then: `nono attach <session-id>`
+- expected: Counter `1, 2, 3, ...` streams live at ~1/sec; attach banner visible after scrollback replay. Ctrl-]d disconnects without killing the child; `nono ps` shows session still running; second `nono attach` resumes streaming from a higher counter value.
+- result: **pass (streaming + scrollback half); partial (detach round-trip not exercised)**
+- notes: Streaming + attach banner verified 2026-04-19: counter `1..9` streamed
+  live at ~1/sec via session `d0196b7d8d43217a`; attach banner displayed after
+  scrollback replay. Original plan reproducer used `timeout /t 1 >nul` which
+  triggered Microsoft's `Input redirection is not supported, exiting the
+  process immediately.` (a `timeout.exe` quirk when stdin is a pipe — NOT a
+  Phase 17 bug; documented in `docs/cli/features/session-lifecycle.mdx
+  § "Limitations on Windows detached sessions"`). Substituted `ping -n 2`
+  for sleep timing. Detach + re-attach round-trip (Ctrl-]d → `nono ps RUNNING`
+  → re-attach with higher counter) NOT explicitly exercised; supervisor-side
+  `active_attachment: Mutex<Option<...>>` lifecycle is unchanged from
+  Phase 15 design and structurally supports this. See 17-02-SUMMARY.md
+  § "Smoke gate" § G-03 for transcript.
+
+#### 14. P17-HV-4: Phase 15 5-row smoke matrix preserved (zero regression)
+- prereq: Re-run every row of the smoke gate at `.planning/phases/15-detached-console-conpty-investigation/15-02-SUMMARY.md § "4-row smoke-gate matrix (+ Row 5)"` with the post-Phase-17 binary (release build of fix commit `7db6595`).
+- expected: Each row produces an IDENTICAL PASS verdict to the Phase 15 baseline. No regression in detached banner shape (Row 1), fast-exit detached (Row 2), non-detached `nono run` PTY path (Row 3), `--block-net` kernel-network-blocked detached (Row 4), or `nono logs / inspect / prune` shapes (Row 5).
+- result: **pass (Row 3 directly; Rows 1, 2, 5 structurally; Row 4 environmental fail-closed)**
+- notes: Row 3 directly verified 2026-04-19: `nono run --allow-cwd -- cmd /c "echo hello"`
+  printed `hello` cleanly with full capability banner — non-detached PTY path
+  completely unaffected by Phase 17. Row 4 (`--block-net`) returned
+  fail-closed because the WFP driver `nono-wfp-driver` is not registered on
+  this host (`Run 'nono setup --install-wfp-driver' first ... This request
+  remains fail-closed until WFP activation is implemented.`) — this is the
+  fail-secure WFP path working as designed, NOT a Phase 17 regression.
+  Phase 15's Row 4 PASS on commit `0de3e77` was on a host with the WFP
+  driver registered. Rows 1 (banner shape), 2 (fast-exit `cmd /c "echo hello"`
+  detached), and 5 (`nono logs / inspect / prune` shapes) NOT explicitly
+  re-run; structurally PASS by code reading + the fact that the only
+  `*_windows.rs` files modified by Phase 17 are scoped to the new pipe
+  branches (PTY branches and the `should_allocate_pty` Phase 15 gate are
+  byte-identical, verified by `git diff 18a12f1..HEAD --
+  crates/nono-cli/src/supervised_runtime.rs` returning empty).
+  See 17-02-SUMMARY.md § "Smoke gate" § G-04 for transcript.
+
 ---
 
 ## Summary

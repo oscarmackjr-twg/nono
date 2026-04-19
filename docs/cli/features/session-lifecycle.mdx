@@ -135,6 +135,31 @@ The sequence must contain at least two key presses to avoid accidental detach.
 
 Detaching only disconnects the client. It does **not** stop the supervisor or the sandboxed process.
 
+## Limitations on Windows detached sessions
+
+**No terminal resize.** Detached sessions on Windows (`nono run --detached ...`) use anonymous-pipe stdio for child I/O — they do **not** allocate a Windows pseudo-console (ConPTY). This is a structural consequence of the Phase 15 `0xC0000142` fix and cannot be relaxed without re-introducing the loader-failure cascade.
+
+The practical effect: `ResizePseudoConsole` cannot be invoked on the detached path, so terminal-resize events from your local terminal are **not** propagated to the child process. Most CLI tools work correctly under the default 80×24 geometry, but full-screen TUI applications (`vim`, `htop`, `less` in alternate-screen mode) may render incorrectly.
+
+**Tools that require a console-attached stdin will exit immediately.** Microsoft's `timeout.exe`, `choice.exe`, and a handful of other utilities check whether stdin is an interactive console; when it's a pipe (always true under `nono attach` against a detached session), they error out with `Input redirection is not supported, exiting the process immediately.` and exit. This is a Windows tool quirk, not a nono bug — substitute timing-via-`ping`, `Start-Sleep` (via PowerShell), or any tool that doesn't probe stdin shape.
+
+**`cmd.exe` may print a UNC-path warning on launch.** When `--allow-cwd` is paired with a directory whose canonicalized form uses the `\\?\` extended-length prefix, `cmd.exe` prints:
+
+```text
+'\\?\C:\path\to\dir'
+CMD.EXE was started with the above path as the current directory.
+UNC paths are not supported.  Defaulting to Windows directory.
+```
+
+It then continues normally with `C:\Windows` as the working directory. This is `cmd.exe`'s pre-existing limitation; there is no workaround inside cmd. Use `pwsh` / `powershell` if you need the canonicalized path honored as the CWD.
+
+**Workarounds:**
+- For full TUI fidelity on Windows, use `nono shell` (interactive PTY-attached shell) or non-detached `nono run -- <command>` (foreground PTY) — both allocate a real ConPTY because they're not on the detached path.
+- For tools that honor the `COLUMNS` / `LINES` environment variables (rare on Windows), set them in your invocation before launching the child.
+- For sleep/timing inside detached `cmd.exe` scripts, use `ping -n N 127.0.0.1 >nul` (`N-1` second delay) instead of `timeout /t N`.
+
+This limitation is tracked under requirement ATCH-01 (see `.planning/REQUIREMENTS.md`) with the resize-propagation acceptance criterion (#3) explicitly downgraded per Phase 17 design decision D-07 (`.planning/phases/17-attach-streaming/17-CONTEXT.md`). Linux and macOS detached sessions are unaffected — they continue to use a Unix PTY and propagate resize via `SIGWINCH`.
+
 ## Stopping a Session
 
 Use `nono stop` when you want the session to terminate cleanly:

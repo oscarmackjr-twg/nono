@@ -190,7 +190,7 @@ Context: Phase 15 deferred `nono attach` output streaming for detached Windows s
 **Acceptance:**
 1. `nono run --detached -- cmd /c "for /l %i in (1,1,10) do @(echo %i & timeout /t 1)"` followed by `nono attach <id>` streams the output live.
 2. `nono attach <id>` on a detached shell (`nono run --detached -- cmd.exe`) allows bidirectional use: stdin writes reach the child.
-3. Terminal resize (Ctrl+Alt+F11, drag-to-resize) propagates to the child via `ResizePseudoConsole`.
+3. ~~Terminal resize (Ctrl+Alt+F11, drag-to-resize) propagates to the child via `ResizePseudoConsole`.~~ **[DOWNGRADED — Phase 17 D-07]** Resize propagation is structurally infeasible on the detached path because anonymous-pipe stdio (D-01, preserves the Phase 15 `0xC0000142` fix) precludes ConPTY allocation. Documented limitation; users requiring full TUI fidelity (`vim`, `htop`, `less`) on Windows use `nono shell` or non-detached `nono run`. See `.planning/phases/17-attach-streaming/17-02-SUMMARY.md § "Acceptance #3 downgrade rationale"` for the full deviation record.
 4. Detach sequence (default or `--detach-sequence`) cleanly unparents the ConPTY without killing the child.
 5. No regression on the 5-row Phase 15 smoke gate.
 
