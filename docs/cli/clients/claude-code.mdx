@@ -43,6 +43,14 @@ The built-in profile provides:
 - **Automatic hook installation** for sandbox-aware error handling
 - **OAuth2 login support** via supervised URL opening (allows `claude /login` to work)
 
+### Token refresh via `.claude.json` symlink
+
+When nono installs the Claude Code hook (via `nono setup` or on first `nono run --profile claude-code`), it also creates a `~/.claude.json` → `~/.claude/claude.json` symlink so Claude Code's token-refresh writes land inside the sandboxed `~/.claude` tree. If a regular `~/.claude.json` file already exists, it is moved into the target path first, then the symlink is created over it.
+
+The symlink target is canonicalized and validated with `Path::starts_with` to ensure the resolved path stays inside the expected config root — hostile symlink targets (e.g., `../../etc/shadow`) are rejected fail-closed.
+
+On Windows, symlink creation requires Developer Mode or an elevated prompt. If the host lacks privilege, nono fails open on this step: it emits a `tracing::warn!` and continues hook installation, leaving the regular file in place. Token refresh works in both cases; the symlink is purely a convenience that keeps the refresh target inside the single `~/.claude` allow-grant.
+
 ## Custom Profile
 
 If you need different permissions, create a custom profile at `~/.config/nono/profiles/claude-code.json`:

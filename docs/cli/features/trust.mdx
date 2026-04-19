@@ -336,6 +336,55 @@ jobs:
 
 This policy declares: only trust files signed by a GitHub Actions workflow in `my-org/my-repo`, from the `main` branch.
 
+## GitLab CI/CD Integration
+
+nono also supports GitLab ID tokens for keyless signing on GitLab-hosted pipelines. The flow mirrors GitHub Actions: the runner exposes an ambient OIDC token, `nono trust sign --keyless` exchanges it for a Fulcio certificate, and the resulting bundle is verified against a `gitlab.com` issuer pin in your trust policy.
+
+### Signing Workflow
+
+```yaml
+# .gitlab-ci.yml
+sign-files:
+  image: rust:1.77
+  id_tokens:
+    SIGSTORE_ID_TOKEN:
+      aud: sigstore
+  script:
+    - cargo install nono-cli
+    - |
+      for f in SKILLS.md CLAUDE.md; do
+        [ -f "$f" ] && nono trust sign "$f" --keyless
+      done
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+```
+
+### Trust Policy for GitLab-Signed Files
+
+```json
+{
+  "version": 1,
+  "includes": ["SKILLS*", "CLAUDE*", "AGENT*"],
+  "publishers": [
+    {
+      "name": "my-org-gitlab-ci",
+      "issuer": "https://gitlab.com",
+      "repository": "my-org/my-repo",
+      "workflow": ".gitlab-ci.yml",
+      "ref_pattern": "refs/heads/main"
+    }
+  ],
+  "blocklist": { "digests": [] },
+  "enforcement": "deny"
+}
+```
+
+For **self-hosted GitLab**, set `issuer` to your instance URL (e.g., `"https://gitlab.example.com"`). The issuer validator compares URL components (scheme, host, port, path) using `url::Url::parse`, not string prefix-match, so `https://gitlab.example.com.evil.com` is rejected even if it starts with your expected hostname.
+
+<Note>
+  The issuer URL is matched fail-closed: a component-equality mismatch (scheme, host, port, or path) rejects the certificate. This prevents prefix-match and subdomain-hijack attacks where an attacker-controlled issuer shares a prefix with a trusted one.
+</Note>
+
 ## Signing Modes
 
 There are two signing modes:
