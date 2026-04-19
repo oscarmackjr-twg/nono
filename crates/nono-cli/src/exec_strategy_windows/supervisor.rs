@@ -506,18 +506,42 @@ impl WindowsSupervisorRuntime {
             .as_ref()
             .map(|p| p.output_read as usize)
             .unwrap_or(0);
+        // Phase 17: pipe-source branch reads from the parent-end stdout
+        // handle (anonymous pipe). stderr is merged into stdout at spawn time
+        // (D-04 / CONTEXT.md <specifics>) so a single source handle covers
+        // both child fd 1 and fd 2.
+        let stdout_read = self
+            .detached_stdio
+            .as_ref()
+            .map(|s| s.stdout_read as usize)
+            .unwrap_or(0);
         let active_attachment = self.active_attachment.clone();
 
-        if pty_output_read == 0 {
-            // Windows detached supervisors skip PTY allocation to avoid
-            // PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE + DETACHED_PROCESS → 0xC0000142.
-            // `nono attach` streaming for detached sessions is a v2.1+ enhancement.
+        // Three mutually-exclusive cases (the supervised_runtime.rs:88-94
+        // should_allocate_pty gate ensures pty_output_read != 0 XOR
+        // stdout_read != 0 — they are never both nonzero on the supervised
+        // path).
+        if pty_output_read == 0 && stdout_read == 0 {
+            // Phase 17 D-06: no source wired. Streaming requires either a
+            // PTY or anonymous-pipe stdio; without either there is nothing
+            // to relay. (Pre-Phase-17 wording was "v2.1+ feature; using
+            // log-only streaming for now".)
             tracing::info!(
                 session_id = %session_id,
-                "No PTY on supervised session — child output is not streamed through the supervisor (nono attach output relay is a v2.1+ feature on Windows detached sessions)"
+                "Detached supervisor: child stdout/stderr streamed to log + attach client via anonymous pipes (resize not supported on detached path; use 'nono shell' or non-detached 'nono run' for full TUI fidelity)"
             );
             return Ok(());
         }
+
+        // Pick the source HANDLE: PTY output or detached-stdio stdout
+        // (mutually exclusive). Capture the resolved value into the closure
+        // so the bridge thread reads from a single handle regardless of
+        // which path is wired.
+        let source_handle: usize = if pty_output_read != 0 {
+            pty_output_read
+        } else {
+            stdout_read
+        };
 
         std::thread::spawn(move || {
             let log_path = match crate::session::session_log_path(&session_id) {
@@ -544,21 +568,30 @@ impl WindowsSupervisorRuntime {
                 }
             };
 
-            let mut pty_file =
-                ManuallyDrop::new(unsafe { std::fs::File::from_raw_handle(pty_output_read as _) });
+            // SAFETY: source_handle was obtained from either self.pty.output_read
+            // (lifetime tied to runtime.pty) or self.detached_stdio.stdout_read
+            // (lifetime tied to runtime.detached_stdio); both fields outlive
+            // this thread because the runtime is dropped only after the child
+            // exits and this loop observes EOF. ManuallyDrop prevents
+            // double-close — the runtime owns the handle.
+            let mut source_file =
+                ManuallyDrop::new(unsafe { std::fs::File::from_raw_handle(source_handle as _) });
 
             let mut buf = [0u8; 4096];
-            while let Ok(n) = pty_file.read(&mut buf) {
+            while let Ok(n) = source_file.read(&mut buf) {
                 if n == 0 {
                     break;
                 }
 
-                // Write to log file
+                // Best-effort log write — never `?`-propagate inside the
+                // bridge thread (Pitfall 1). The log file is the load-bearing
+                // path; failures here would otherwise kill the bridge.
                 let _ = log_file.write_all(&buf[..n]);
                 let _ = log_file.flush();
 
-                // On Windows, writing to a named pipe that has no listener will block
-                // if we try to write to it directly. We use a shared handle for the active attachment.
+                // On Windows, writing to a named pipe that has no listener
+                // will block if we try to write to it directly. We use a
+                // shared handle for the active attachment.
                 let attachment_handle = {
                     let lock = active_attachment.lock().unwrap_or_else(|p| p.into_inner());
                     *lock
@@ -566,8 +599,12 @@ impl WindowsSupervisorRuntime {
 
                 if let Some(sendable) = attachment_handle {
                     let mut written = 0;
-                    // SAFETY: sendable.0 is a valid named pipe handle while it's in active_attachment.
-                    // We use the raw Win32 WriteFile to avoid taking ownership or blocking too long.
+                    // SAFETY: sendable.0 is a valid named-pipe HANDLE while
+                    // it remains in active_attachment; the pipe-sink branch
+                    // clears the slot on disconnect. Raw FFI WriteFile (vs
+                    // File::write_all) avoids ownership conflicts and lets
+                    // us discard ERROR_NO_DATA / ERROR_BROKEN_PIPE without
+                    // killing the bridge (Pitfall 1).
                     unsafe {
                         windows_sys::Win32::Storage::FileSystem::WriteFile(
                             sendable.0,
