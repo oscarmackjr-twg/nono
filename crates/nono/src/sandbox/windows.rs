@@ -1753,29 +1753,49 @@ mod tests {
     }
 
     #[test]
-    fn apply_rejects_unsupported_single_file_grant() {
+    fn apply_accepts_single_file_grant_and_labels_low_integrity() {
+        // Phase 21: single-file grants in all three access modes are now enforced
+        // via per-file mandatory-label ACE. This test replaces the pre-phase-21
+        // rejection test (apply_rejects_unsupported_single_file_grant).
         let dir = tempdir().expect("tempdir");
         let file = dir.path().join("note.txt");
         std::fs::write(&file, "x").expect("write file");
         let mut caps = CapabilitySet::new();
         caps.add_fs(FsCapability::new_file(&file, AccessMode::Read).expect("file cap"));
-        let err = apply(&caps).expect_err("single-file grant must be rejected");
-        assert!(matches!(err, NonoError::UnsupportedPlatform(_)));
-        // message must be explicit, not generic
-        let msg = err.to_string();
-        assert!(
-            msg.contains("single-file") || msg.contains("SingleFile"),
-            "expected named error message, got: {msg}"
+        apply(&caps).expect("Phase 21: single-file read grant must be accepted");
+        let (rid, mask) = low_integrity_label_and_mask(&file)
+            .expect("Phase 21: apply() must leave a mandatory-label ACE on the granted file");
+        assert_eq!(
+            rid, SECURITY_MANDATORY_LOW_RID as u32,
+            "label RID must be SECURITY_MANDATORY_LOW_RID; got 0x{rid:X}"
+        );
+        assert_eq!(
+            mask,
+            SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP,
+            "Read mode label mask must be NO_WRITE_UP | NO_EXECUTE_UP; got 0x{mask:X}"
         );
     }
 
     #[test]
-    fn apply_rejects_unsupported_write_only_directory_grant() {
+    fn apply_accepts_write_only_directory_grant_and_labels_low_integrity() {
+        // Phase 21: write-only directory grants are now enforced via directory-scope
+        // mandatory-label ACE with the NO_READ_UP mask. This test replaces the
+        // pre-phase-21 rejection test (apply_rejects_unsupported_write_only_directory_grant).
         let dir = tempdir().expect("tempdir");
         let mut caps = CapabilitySet::new();
         caps.add_fs(FsCapability::new_dir(dir.path(), AccessMode::Write).expect("dir cap"));
-        let err = apply(&caps).expect_err("write-only directory grant must be rejected");
-        assert!(matches!(err, NonoError::UnsupportedPlatform(_)));
+        apply(&caps).expect("Phase 21: write-only directory grant must be accepted");
+        let (rid, mask) = low_integrity_label_and_mask(dir.path())
+            .expect("Phase 21: apply() must leave a mandatory-label ACE on the granted directory");
+        assert_eq!(
+            rid, SECURITY_MANDATORY_LOW_RID as u32,
+            "label RID must be SECURITY_MANDATORY_LOW_RID; got 0x{rid:X}"
+        );
+        assert_eq!(
+            mask,
+            SYSTEM_MANDATORY_LABEL_NO_READ_UP | SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP,
+            "Write mode label mask must be NO_READ_UP | NO_EXECUTE_UP; got 0x{mask:X}"
+        );
     }
 
     #[test]
@@ -1806,23 +1826,28 @@ mod tests {
 
     #[test]
     fn apply_error_message_remains_explicit_for_unsupported_subset() {
-        // The error must name the specific unsupported feature, not emit a generic string
-        let dir = tempdir().expect("tempdir");
-        let file = dir.path().join("note.txt");
-        std::fs::write(&file, "x").expect("write file");
-        let mut caps = CapabilitySet::new();
-        caps.add_fs(FsCapability::new_file(&file, AccessMode::Read).expect("file cap"));
-        let err = apply(&caps).expect_err("must reject");
+        // Phase 21: single-file grants are now supported. The original unsupported-
+        // subset assertion was repointed from FsCapability::new_file to
+        // set_ipc_mode(IpcMode::Full) — a still-unsupported shape that is orthogonal
+        // to apply_rejects_capability_expansion_shape (which covers enable_extensions)
+        // and apply_rejects_non_default_ipc_mode (which asserts only the error
+        // *variant*, not the message content). This test's contribution is the
+        // message-quality assertion: the error string must name the specific
+        // unsupported feature, not emit a generic stub.
+        let caps = CapabilitySet::new().set_ipc_mode(IpcMode::Full);
+        let err = apply(&caps).expect_err("non-default IPC mode must be rejected");
+        assert!(matches!(err, NonoError::UnsupportedPlatform(_)));
         let msg = err.to_string();
         // Must not be the old generic stub message
         assert!(
             !msg.contains("library-wide `Sandbox::apply()` contract remains partial"),
             "error is still the old stub: {msg}"
         );
-        // Must contain a recognizable feature name
+        // Must contain a recognizable feature name — "IPC mode" per the
+        // Windows apply() branch for non-default IpcMode.
         assert!(
-            msg.contains("single-file") || msg.contains("not support"),
-            "expected named feature in error, got: {msg}"
+            msg.contains("IPC mode") || msg.contains("ipc mode"),
+            "expected named IPC-mode feature in error, got: {msg}"
         );
     }
 
