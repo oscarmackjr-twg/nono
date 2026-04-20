@@ -811,4 +811,389 @@ mod tests {
             supervisor_thread.join().expect("supervisor thread");
         }
     }
+
+    /// Windows-only smoke tests that round-trip the SDK against the REAL
+    /// Plan 18-01..18-03 broker pipeline via `BrokerTargetProcess::current()`.
+    ///
+    /// These tests create a real source kernel object, run the actual
+    /// `broker_*_to_process` function from `socket_windows.rs`, respond on
+    /// the loopback `SupervisorSocket::pair()`, call the SDK method, assert
+    /// the returned handle is valid, and close the duplicated handle.
+    ///
+    /// **Scope lock (see T-18-04-01 disposition):** these tests cover the
+    /// SDK ↔ broker wire-format alignment ONLY. The supervisor-side policy
+    /// gates (discriminator validation D-03, per-type mask validation D-07,
+    /// constant-time token check Phase 11 D-01, name canonicalization,
+    /// CONIN$ approval prompt) are covered by
+    /// `crates/nono-cli/src/exec_strategy_windows/supervisor.rs`'s
+    /// `capability_handler_tests` family (Plans 18-01..18-03) and the
+    /// standalone integration suite in
+    /// `crates/nono-cli/tests/aipc_handle_brokering_integration.rs`.
+    /// Do NOT add "what if the mask is invalid?" tests here — those
+    /// belong in the dispatcher test suite.
+    ///
+    /// The Job Object test creates a fresh Job (NOT the supervisor's
+    /// containment Job) so Plan 18-03's CompareObjectHandles runtime
+    /// guard is NOT exercised here — that guard is tested by the
+    /// containment-Job hijack test in `capability_handler_tests`.
+    #[cfg(target_os = "windows")]
+    #[allow(clippy::disallowed_methods)]
+    mod windows_real_broker_smoke_tests {
+        use super::*;
+        use crate::supervisor::socket::{
+            bind_aipc_pipe, broker_event_to_process, broker_job_object_to_process,
+            broker_mutex_to_process, broker_pipe_to_process, broker_socket_to_process,
+            BrokerTargetProcess,
+        };
+        use crate::supervisor::types::{
+            ApprovalDecision, PipeDirection, SocketRole, SupervisorMessage, SupervisorResponse,
+        };
+        use std::thread;
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+
+        // Re-use the env-save/restore helper from the sibling module.
+        use super::windows_loopback_tests::with_test_session_token;
+
+        /// Transport a raw Windows `HANDLE` (`*mut c_void`) across thread
+        /// boundaries by casting to `usize` (which is `Send`) and casting
+        /// back inside the spawned thread.
+        ///
+        /// Cleaner than a `SendableHandle` newtype because rustc's closure-
+        /// capture inference treats `source_sendable.0` as a raw pointer
+        /// value within the closure body; the pointer-to-usize round-trip
+        /// bypasses that inference while preserving the HANDLE's bit pattern
+        /// (per the Win32 contract that HANDLE values are kernel-object
+        /// indices representable as pointer-sized integers).
+        #[inline]
+        fn handle_as_usize(h: HANDLE) -> usize {
+            h as usize
+        }
+        #[inline]
+        fn usize_as_handle(n: usize) -> HANDLE {
+            n as HANDLE
+        }
+
+        /// Convert a Rust `&str` to a UTF-16 null-terminated `Vec<u16>` for
+        /// Windows W-suffixed APIs.
+        fn wide(s: &str) -> Vec<u16> {
+            s.encode_utf16().chain(std::iter::once(0)).collect()
+        }
+
+        #[test]
+        fn sdk_request_event_round_trips_through_real_broker() {
+            use windows_sys::Win32::System::Threading::CreateEventW;
+            let event_name = wide(&format!(
+                r"Local\nono-aipc-sdk-smoke-event-{}",
+                std::process::id()
+            ));
+            // SAFETY: CreateEventW with NULL attributes, manual-reset = TRUE,
+            // initial-state = FALSE, and a unique name returns either a valid
+            // event HANDLE or NULL on failure. We assert non-null below.
+            let source: HANDLE =
+                unsafe { CreateEventW(std::ptr::null_mut(), 1, 0, event_name.as_ptr()) };
+            assert!(
+                !source.is_null(),
+                "CreateEventW failed: {}",
+                std::io::Error::last_os_error()
+            );
+
+            let (mut server, mut client) = SupervisorSocket::pair().expect("pair");
+            let source_usize = handle_as_usize(source);
+
+            let supervisor_thread = thread::spawn(move || {
+                let msg = server.recv_message().expect("recv");
+                let req = match msg {
+                    SupervisorMessage::Request(r) => r,
+                    other => panic!("wrong variant: {other:?}"),
+                };
+                let source = usize_as_handle(source_usize);
+                let target = BrokerTargetProcess::current();
+                let grant = broker_event_to_process(
+                    source,
+                    target,
+                    crate::supervisor::policy::EVENT_DEFAULT_MASK,
+                )
+                .expect("broker");
+                server
+                    .send_response(&SupervisorResponse::Decision {
+                        request_id: req.request_id,
+                        decision: ApprovalDecision::Granted,
+                        grant: Some(grant),
+                    })
+                    .expect("send");
+                // SAFETY: `source` is a live HANDLE; the broker does NOT
+                // close it (CONTEXT.md D-10 — caller closes after
+                // send_response returns). CloseHandle on a valid HANDLE is
+                // safe.
+                let _ = unsafe { CloseHandle(source) };
+            });
+
+            with_test_session_token("smokesdktoken1234", || {
+                let result = request_event(
+                    &mut client,
+                    "smoke-test-event",
+                    crate::supervisor::policy::EVENT_DEFAULT_MASK,
+                    Some("real broker smoke"),
+                );
+                let dup_handle = result.expect("granted");
+                assert_ne!(dup_handle, 0, "duplicated handle should be non-null");
+                // SAFETY: `dup_handle` is a duplicated HANDLE owned by this
+                // process (BrokerTargetProcess::current() = this process).
+                // CloseHandle on a valid HANDLE is safe.
+                let _ = unsafe { CloseHandle(dup_handle as HANDLE) };
+            });
+
+            supervisor_thread.join().expect("supervisor thread");
+        }
+
+        #[test]
+        fn sdk_request_mutex_round_trips_through_real_broker() {
+            use windows_sys::Win32::System::Threading::CreateMutexW;
+            let mutex_name = wide(&format!(
+                r"Local\nono-aipc-sdk-smoke-mutex-{}",
+                std::process::id()
+            ));
+            // SAFETY: CreateMutexW with NULL attributes, initial-owner = FALSE,
+            // and a unique name returns either a valid HANDLE or NULL.
+            let source: HANDLE =
+                unsafe { CreateMutexW(std::ptr::null_mut(), 0, mutex_name.as_ptr()) };
+            assert!(
+                !source.is_null(),
+                "CreateMutexW failed: {}",
+                std::io::Error::last_os_error()
+            );
+
+            let (mut server, mut client) = SupervisorSocket::pair().expect("pair");
+            let source_usize = handle_as_usize(source);
+
+            let supervisor_thread = thread::spawn(move || {
+                let msg = server.recv_message().expect("recv");
+                let req = match msg {
+                    SupervisorMessage::Request(r) => r,
+                    other => panic!("wrong variant: {other:?}"),
+                };
+                let source = usize_as_handle(source_usize);
+                let target = BrokerTargetProcess::current();
+                let grant = broker_mutex_to_process(
+                    source,
+                    target,
+                    crate::supervisor::policy::MUTEX_DEFAULT_MASK,
+                )
+                .expect("broker");
+                server
+                    .send_response(&SupervisorResponse::Decision {
+                        request_id: req.request_id,
+                        decision: ApprovalDecision::Granted,
+                        grant: Some(grant),
+                    })
+                    .expect("send");
+                // SAFETY: `source` is a live HANDLE; broker does NOT close it.
+                let _ = unsafe { CloseHandle(source) };
+            });
+
+            with_test_session_token("smokesdktoken1234", || {
+                let result = request_mutex(
+                    &mut client,
+                    "smoke-test-mutex",
+                    crate::supervisor::policy::MUTEX_DEFAULT_MASK,
+                    Some("real broker smoke"),
+                );
+                let dup_handle = result.expect("granted");
+                assert_ne!(dup_handle, 0, "duplicated handle should be non-null");
+                // SAFETY: `dup_handle` is a live HANDLE owned by this process.
+                let _ = unsafe { CloseHandle(dup_handle as HANDLE) };
+            });
+
+            supervisor_thread.join().expect("supervisor thread");
+        }
+
+        #[test]
+        fn sdk_request_pipe_round_trips_through_real_broker() {
+            let canonical = format!(r"\\.\pipe\nono-aipc-sdk-smoke-pipe-{}", std::process::id());
+            let source = bind_aipc_pipe(&canonical, PipeDirection::Read).expect("bind_aipc_pipe");
+
+            let (mut server, mut client) = SupervisorSocket::pair().expect("pair");
+            let source_usize = handle_as_usize(source);
+
+            let supervisor_thread = thread::spawn(move || {
+                let msg = server.recv_message().expect("recv");
+                let req = match msg {
+                    SupervisorMessage::Request(r) => r,
+                    other => panic!("wrong variant: {other:?}"),
+                };
+                let source = usize_as_handle(source_usize);
+                let target = BrokerTargetProcess::current();
+                let grant =
+                    broker_pipe_to_process(source, target, PipeDirection::Read).expect("broker");
+                server
+                    .send_response(&SupervisorResponse::Decision {
+                        request_id: req.request_id,
+                        decision: ApprovalDecision::Granted,
+                        grant: Some(grant),
+                    })
+                    .expect("send");
+                // SAFETY: `source` is a live HANDLE; broker does NOT close it.
+                let _ = unsafe { CloseHandle(source) };
+            });
+
+            with_test_session_token("smokesdktoken1234", || {
+                let result = request_pipe(
+                    &mut client,
+                    "smoke-test-pipe",
+                    PipeDirection::Read,
+                    Some("real broker smoke"),
+                );
+                let dup_handle = result.expect("granted");
+                assert_ne!(dup_handle, 0, "duplicated handle should be non-null");
+                // SAFETY: `dup_handle` is a live HANDLE owned by this process.
+                let _ = unsafe { CloseHandle(dup_handle as HANDLE) };
+            });
+
+            supervisor_thread.join().expect("supervisor thread");
+        }
+
+        #[test]
+        fn sdk_request_job_object_round_trips_through_real_broker() {
+            use windows_sys::Win32::System::JobObjects::CreateJobObjectW;
+            let job_name = wide(&format!(
+                r"Local\nono-aipc-sdk-smoke-job-{}",
+                std::process::id()
+            ));
+            // SAFETY: CreateJobObjectW with NULL attributes + a unique name
+            // returns either a valid HANDLE or NULL on failure. This creates a
+            // FRESH Job Object (not the containment Job), so Plan 18-03's
+            // CompareObjectHandles runtime guard does NOT fire here.
+            let source: HANDLE =
+                unsafe { CreateJobObjectW(std::ptr::null_mut(), job_name.as_ptr()) };
+            assert!(
+                !source.is_null(),
+                "CreateJobObjectW failed: {}",
+                std::io::Error::last_os_error()
+            );
+
+            let (mut server, mut client) = SupervisorSocket::pair().expect("pair");
+            let source_usize = handle_as_usize(source);
+
+            let supervisor_thread = thread::spawn(move || {
+                let msg = server.recv_message().expect("recv");
+                let req = match msg {
+                    SupervisorMessage::Request(r) => r,
+                    other => panic!("wrong variant: {other:?}"),
+                };
+                let source = usize_as_handle(source_usize);
+                let target = BrokerTargetProcess::current();
+                let grant = broker_job_object_to_process(
+                    source,
+                    target,
+                    crate::supervisor::policy::JOB_OBJECT_DEFAULT_MASK,
+                )
+                .expect("broker");
+                server
+                    .send_response(&SupervisorResponse::Decision {
+                        request_id: req.request_id,
+                        decision: ApprovalDecision::Granted,
+                        grant: Some(grant),
+                    })
+                    .expect("send");
+                // SAFETY: `source` is a live HANDLE; broker does NOT close it.
+                let _ = unsafe { CloseHandle(source) };
+            });
+
+            with_test_session_token("smokesdktoken1234", || {
+                let result = request_job_object(
+                    &mut client,
+                    "smoke-test-job",
+                    crate::supervisor::policy::JOB_OBJECT_DEFAULT_MASK,
+                    Some("real broker smoke"),
+                );
+                let dup_handle = result.expect("granted");
+                assert_ne!(dup_handle, 0, "duplicated handle should be non-null");
+                // SAFETY: `dup_handle` is a live HANDLE owned by this process.
+                let _ = unsafe { CloseHandle(dup_handle as HANDLE) };
+            });
+
+            supervisor_thread.join().expect("supervisor thread");
+        }
+
+        #[test]
+        fn sdk_request_socket_round_trips_through_real_broker() {
+            use windows_sys::Win32::Networking::WinSock::{
+                closesocket, WSASocketW, WSAStartup, AF_INET, INVALID_SOCKET, IPPROTO_TCP,
+                SOCK_STREAM, WSADATA, WSA_FLAG_OVERLAPPED,
+            };
+
+            // SAFETY: WSAStartup with version 2.2 (0x0202) is reference-
+            // counted + idempotent per the Winsock API contract.
+            let mut wsa: WSADATA = unsafe { std::mem::zeroed() };
+            let _ = unsafe { WSAStartup(0x0202, &mut wsa) };
+
+            // SAFETY: WSASocketW with NULL protocol_info creates a fresh
+            // source socket. AF_INET / SOCK_STREAM / IPPROTO_TCP are
+            // well-defined Winsock constants; WSA_FLAG_OVERLAPPED is the
+            // standard flag for brokered sockets.
+            let source = unsafe {
+                WSASocketW(
+                    AF_INET as i32,
+                    SOCK_STREAM,
+                    IPPROTO_TCP,
+                    std::ptr::null(),
+                    0,
+                    WSA_FLAG_OVERLAPPED,
+                )
+            };
+            assert_ne!(source, INVALID_SOCKET, "WSASocketW must succeed");
+
+            let (mut server, mut client) = SupervisorSocket::pair().expect("pair");
+
+            let supervisor_thread = thread::spawn(move || {
+                let msg = server.recv_message().expect("recv");
+                let req = match msg {
+                    SupervisorMessage::Request(r) => r,
+                    other => panic!("wrong variant: {other:?}"),
+                };
+                let target = BrokerTargetProcess::current();
+                let grant = broker_socket_to_process(
+                    source,
+                    target,
+                    std::process::id(),
+                    SocketRole::Connect,
+                )
+                .expect("broker");
+                server
+                    .send_response(&SupervisorResponse::Decision {
+                        request_id: req.request_id,
+                        decision: ApprovalDecision::Granted,
+                        grant: Some(grant),
+                    })
+                    .expect("send");
+                // SAFETY: closesocket is a leaf-safe Winsock call on a live
+                // SOCKET returned by WSASocketW above.
+                let _ = unsafe { closesocket(source) };
+            });
+
+            with_test_session_token("smokesdktoken1234", || {
+                let result = request_socket(
+                    &mut client,
+                    "127.0.0.1",
+                    12345,
+                    SocketProtocol::Tcp,
+                    SocketRole::Connect,
+                    0,
+                    Some("real broker smoke"),
+                );
+                let reconstructed = result.expect("granted should return RawSocket");
+                assert_ne!(reconstructed, 0, "reconstructed SOCKET should be non-zero");
+                assert_ne!(
+                    reconstructed, INVALID_SOCKET as u64 as RawSocket,
+                    "reconstructed SOCKET should not be INVALID_SOCKET"
+                );
+                // SAFETY: `reconstructed` is a live SOCKET owned by this
+                // process (BrokerTargetProcess::current() = this process so
+                // WSASocketW(FROM_PROTOCOL_INFO) succeeded against this PID).
+                let _ = unsafe { closesocket(reconstructed as usize) };
+            });
+
+            supervisor_thread.join().expect("supervisor thread");
+        }
+    }
 }
