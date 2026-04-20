@@ -1689,6 +1689,73 @@ mod tests {
     }
 
     #[test]
+    fn compile_filesystem_policy_emits_rule_for_single_file_read_grant() {
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("note.txt");
+        std::fs::write(&file, "x").expect("write file");
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability::new_file(&file, AccessMode::Read).expect("file cap"));
+        let policy = compile_filesystem_policy(&caps);
+        assert_eq!(
+            policy.unsupported.len(),
+            0,
+            "single-file read grant must not emit unsupported entry"
+        );
+        assert_eq!(
+            policy.rules.len(),
+            1,
+            "single-file read grant must emit one rule"
+        );
+        let rule = &policy.rules[0];
+        assert!(rule.is_file, "rule must carry is_file=true");
+        assert_eq!(rule.access, AccessMode::Read);
+    }
+
+    #[test]
+    fn compile_filesystem_policy_emits_rule_for_single_file_write_grant() {
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("note.txt");
+        std::fs::write(&file, "x").expect("write file");
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability::new_file(&file, AccessMode::Write).expect("file cap"));
+        let policy = compile_filesystem_policy(&caps);
+        assert_eq!(policy.unsupported.len(), 0);
+        assert_eq!(policy.rules.len(), 1);
+        assert!(policy.rules[0].is_file);
+        assert_eq!(policy.rules[0].access, AccessMode::Write);
+    }
+
+    #[test]
+    fn compile_filesystem_policy_emits_rule_for_single_file_read_write_grant() {
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("note.txt");
+        std::fs::write(&file, "x").expect("write file");
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability::new_file(&file, AccessMode::ReadWrite).expect("file cap"));
+        let policy = compile_filesystem_policy(&caps);
+        assert_eq!(policy.unsupported.len(), 0);
+        assert_eq!(policy.rules.len(), 1);
+        assert!(policy.rules[0].is_file);
+        assert_eq!(policy.rules[0].access, AccessMode::ReadWrite);
+    }
+
+    #[test]
+    fn compile_filesystem_policy_emits_rule_for_write_only_directory_grant() {
+        let dir = tempdir().expect("tempdir");
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability::new_dir(dir.path(), AccessMode::Write).expect("dir cap"));
+        let policy = compile_filesystem_policy(&caps);
+        assert_eq!(
+            policy.unsupported.len(),
+            0,
+            "write-only dir grant must not emit unsupported entry"
+        );
+        assert_eq!(policy.rules.len(), 1);
+        assert!(!policy.rules[0].is_file);
+        assert_eq!(policy.rules[0].access, AccessMode::Write);
+    }
+
+    #[test]
     fn apply_rejects_unsupported_single_file_grant() {
         let dir = tempdir().expect("tempdir");
         let file = dir.path().join("note.txt");
