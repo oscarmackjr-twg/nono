@@ -185,3 +185,36 @@ pub enum NonoError {
 
 /// Result type alias for nono operations
 pub type Result<T> = std::result::Result<T, NonoError>;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn label_apply_failed_display_includes_path_hresult_and_hint() {
+        let err = NonoError::LabelApplyFailed {
+            path: PathBuf::from(r"C:\Users\test\.gitconfig"),
+            hresult: 5,
+            hint: "Ensure the target file is writable by the current user.".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains(r"C:\Users\test\.gitconfig"), "Display missing path: {msg}");
+        assert!(msg.contains("0x00000005"), "Display missing hex HRESULT: {msg}");
+        assert!(msg.contains("writable by the current user"), "Display missing hint: {msg}");
+    }
+
+    #[test]
+    fn label_apply_failed_is_propagatable_via_result_alias() {
+        fn producer() -> Result<()> {
+            Err(NonoError::LabelApplyFailed {
+                path: PathBuf::from("/tmp/x"),
+                hresult: 0xDEADBEEF,
+                hint: "test".into(),
+            })
+        }
+        let err = producer().expect_err("must error");
+        assert!(matches!(err, NonoError::LabelApplyFailed { .. }));
+    }
+}
