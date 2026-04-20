@@ -133,8 +133,9 @@ pub fn load_trusted_root_from_str(json: &str) -> Result<TrustedRoot> {
 /// # Errors
 ///
 /// Returns `NonoError::TrustPolicy` if the embedded root cannot be loaded.
-pub fn load_production_trusted_root() -> Result<TrustedRoot> {
+pub async fn load_production_trusted_root() -> Result<TrustedRoot> {
     TrustedRoot::production()
+        .await
         .map_err(|e| NonoError::TrustPolicy(format!("failed to load production trusted root: {e}")))
 }
 
@@ -425,7 +426,7 @@ pub fn verify_bundle_subject_name(bundle: &Bundle, expected_path: &Path) -> Resu
         .map(|n| n.to_string_lossy())
         .unwrap_or_default();
 
-    if subject_name != expected_name.as_ref() {
+    if subject_name.as_str() != AsRef::<str>::as_ref(&expected_name) {
         return Err(NonoError::TrustVerification {
             path: expected_path.display().to_string(),
             reason: format!(
@@ -872,9 +873,9 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn load_production_trusted_root_succeeds() {
-        let root = load_production_trusted_root();
+    #[tokio::test]
+    async fn load_production_trusted_root_succeeds() {
+        let root = load_production_trusted_root().await;
         assert!(root.is_ok());
     }
 
@@ -909,11 +910,11 @@ mod tests {
     // verify_bundle_with_digest
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn verify_bundle_with_invalid_digest() {
+    #[tokio::test]
+    async fn verify_bundle_with_invalid_digest() {
         let json = make_public_key_bundle_json("key");
         let bundle = Bundle::from_json(&json).unwrap();
-        let root = load_production_trusted_root().unwrap();
+        let root = load_production_trusted_root().await.unwrap();
         let policy = VerificationPolicy::default();
         let result =
             verify_bundle_with_digest("not-hex!", &bundle, &root, &policy, Path::new("test"));

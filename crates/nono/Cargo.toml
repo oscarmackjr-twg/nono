@@ -35,7 +35,7 @@ libc = "0.2"
 keyring = "3"
 
 # Sigstore bundle verification
-sigstore-verify = { version = "0.6", default-features = false }
+sigstore-verify = { version = "0.6.5", default-features = false, features = ["tuf"] }
 x509-cert = { version = "0.2", default-features = false }
 der = { version = "0.7", default-features = false }
 
@@ -60,3 +60,4 @@ prettyplease = "0.2"
 [dev-dependencies]
 tempfile.workspace = true
 jsonschema = "0.45"
+tokio = { version = "1", features = ["rt", "macros"] }
