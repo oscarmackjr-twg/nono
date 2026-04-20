@@ -391,6 +391,7 @@ struct ProcessContainment {
 #[derive(Debug)]
 struct OwnedHandle(HANDLE);
 
+mod labels_guard;
 mod launch;
 mod network;
 mod restricted_token;
