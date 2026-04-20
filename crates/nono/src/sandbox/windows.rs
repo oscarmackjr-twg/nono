@@ -1818,6 +1818,158 @@ mod tests {
     }
 
     #[test]
+    fn single_file_grant_does_not_label_parent_directory() {
+        // Phase 21 Plan 21-05 silent-degradation regression test (CONTEXT.md § specifics).
+        // Guards the I-01 fail-closed invariant: single-file grants must NEVER silently
+        // degrade into a parent-directory grant. Future refactors that accidentally
+        // route single-file grants through a parent-directory label path will fail this
+        // test — the parent directory's integrity-label RID must be unchanged across
+        // apply(), while the granted file's RID must transition to SECURITY_MANDATORY_LOW_RID.
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("only-this.txt");
+        std::fs::write(&file, "x").expect("write file");
+        let parent_label_before = low_integrity_label_rid(dir.path());
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability::new_file(&file, AccessMode::Read).expect("file cap"));
+        apply(&caps).expect("apply");
+        let parent_label_after = low_integrity_label_rid(dir.path());
+        assert_eq!(
+            parent_label_before, parent_label_after,
+            "single-file grant must not mutate parent directory's label"
+        );
+        // File itself should now be Low IL.
+        assert_eq!(
+            low_integrity_label_rid(&file),
+            Some(SECURITY_MANDATORY_LOW_RID as u32),
+            "granted file must carry Low IL label after apply"
+        );
+    }
+
+    #[test]
+    fn apply_labels_single_file_write_mode_with_correct_mask() {
+        // Phase 21 Plan 21-05 per-mode mask integration test for Write mode on a FILE
+        // (Read mode on a file is covered by apply_accepts_single_file_grant_and_labels_low_integrity;
+        // Write mode on a DIRECTORY is covered by apply_accepts_write_only_directory_grant_and_labels_low_integrity).
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("note.txt");
+        std::fs::write(&file, "x").expect("write file");
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability::new_file(&file, AccessMode::Write).expect("file cap"));
+        apply(&caps).expect("Phase 21: single-file write grant must be accepted");
+        let (rid, mask) = low_integrity_label_and_mask(&file)
+            .expect("Phase 21: apply() must leave a mandatory-label ACE on the granted file");
+        assert_eq!(rid, SECURITY_MANDATORY_LOW_RID as u32);
+        assert_eq!(
+            mask,
+            SYSTEM_MANDATORY_LABEL_NO_READ_UP | SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP,
+            "Write mode mask must be NO_READ_UP | NO_EXECUTE_UP per D-01; got 0x{mask:X}"
+        );
+    }
+
+    #[test]
+    fn apply_labels_single_file_read_write_mode_with_correct_mask() {
+        // Phase 21 Plan 21-05 per-mode mask integration test for ReadWrite mode on a FILE.
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("note.txt");
+        std::fs::write(&file, "x").expect("write file");
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability::new_file(&file, AccessMode::ReadWrite).expect("file cap"));
+        apply(&caps).expect("Phase 21: single-file read-write grant must be accepted");
+        let (rid, mask) = low_integrity_label_and_mask(&file)
+            .expect("Phase 21: apply() must leave a mandatory-label ACE on the granted file");
+        assert_eq!(rid, SECURITY_MANDATORY_LOW_RID as u32);
+        assert_eq!(
+            mask, SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP,
+            "ReadWrite mode mask must be NO_EXECUTE_UP only per D-01; got 0x{mask:X}"
+        );
+    }
+
+    #[test]
+    fn compile_filesystem_policy_accepts_git_config_shape() {
+        // Phase 21 motivator regression: the `claude-code` profile's `git_config`
+        // group grants read access to 5 single files. Pre-phase-21 this tripped
+        // 5 x WindowsUnsupportedIssueKind::SingleFileGrant. Post-phase-21 these
+        // compile to 5 WindowsFilesystemRule entries, enabling the Phase 18 UAT
+        // Path B + Path C to run. Mirrors crates/nono-cli/data/policy.json
+        // § git_config (lines 501-512) but anchored at tempdir for test isolation.
+        let dir = tempdir().expect("tempdir");
+        let files = [
+            dir.path().join(".gitconfig"),
+            dir.path().join(".gitignore_global"),
+            dir.path().join(".config_git_config"),
+            dir.path().join(".config_git_ignore"),
+            dir.path().join(".config_git_attributes"),
+        ];
+        for f in &files {
+            std::fs::write(f, "x").expect("write file");
+        }
+        let mut caps = CapabilitySet::new();
+        for f in &files {
+            caps.add_fs(FsCapability::new_file(f, AccessMode::Read).expect("file cap"));
+        }
+        let policy = compile_filesystem_policy(&caps);
+        assert_eq!(
+            policy.unsupported.len(),
+            0,
+            "git_config-shaped CapabilitySet must not emit any unsupported entries; got: {:?}",
+            policy.unsupported
+        );
+        assert_eq!(
+            policy.rules.len(),
+            5,
+            "git_config-shaped CapabilitySet must emit exactly 5 rules; got {} rules: {:?}",
+            policy.rules.len(),
+            policy.rules
+        );
+        for rule in &policy.rules {
+            assert!(
+                rule.is_file,
+                "every git_config rule must carry is_file=true"
+            );
+            assert_eq!(rule.access, AccessMode::Read);
+        }
+    }
+
+    #[test]
+    fn apply_labels_multiple_single_file_grants_all_succeed() {
+        // Phase 21 end-to-end motivator regression: the full `git_config`-shaped apply
+        // path, proving all 5 files are labeled Low IL with the Read-mode mask.
+        let dir = tempdir().expect("tempdir");
+        let files = [
+            dir.path().join(".gitconfig"),
+            dir.path().join(".gitignore_global"),
+            dir.path().join(".config_git_config"),
+            dir.path().join(".config_git_ignore"),
+            dir.path().join(".config_git_attributes"),
+        ];
+        for f in &files {
+            std::fs::write(f, "x").expect("write file");
+        }
+        let mut caps = CapabilitySet::new();
+        for f in &files {
+            caps.add_fs(FsCapability::new_file(f, AccessMode::Read).expect("file cap"));
+        }
+        apply(&caps).expect("Phase 21: 5 single-file grants must all succeed");
+        for f in &files {
+            let (rid, mask) = low_integrity_label_and_mask(f).unwrap_or_else(|| {
+                panic!("file {} must be Low-IL labeled after apply()", f.display())
+            });
+            assert_eq!(
+                rid,
+                SECURITY_MANDATORY_LOW_RID as u32,
+                "rid mismatch for {}",
+                f.display()
+            );
+            assert_eq!(
+                mask,
+                SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP,
+                "mask mismatch for {}; got 0x{mask:X}",
+                f.display()
+            );
+        }
+    }
+
+    #[test]
     fn apply_accepts_port_level_wfp_caps() {
         // Phase 09 removed the PortConnectAllowlist / PortBindAllowlist /
         // LocalhostPortAllowlist unsupported markers from compile_network_policy().
