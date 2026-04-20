@@ -53,6 +53,25 @@ pub fn apply(caps: &CapabilitySet) -> Result<()> {
         )));
     }
 
+    // 1b. Phase 21: apply a SYSTEM_MANDATORY_LABEL_ACE (Low IL RID + mode-derived
+    // mask) to each compiled filesystem rule. Fail-closed (I-01) — any label
+    // application error aborts `apply()` with `NonoError::LabelApplyFailed`
+    // carrying the exact path + Win32 HRESULT + actionable hint. Never silently
+    // degrades to a broader grant.
+    //
+    // Order: apply labels BEFORE the network/signal/ipc checks so a later
+    // validation failure (e.g., WFP service absent) does not leave behind
+    // partially-labeled files. CAVEAT: if the labels-applied loop returns Err
+    // partway through, the files already labeled in this invocation are NOT
+    // reverted here — revert-on-error is handled by the RAII guard in
+    // `exec_strategy_windows/` (Plan 21-04). This library-level `apply()` is
+    // the bare primitive, intentionally stateless; the CLI always wraps the
+    // call site in a guard.
+    for rule in &fs_policy.rules {
+        let mask = label_mask_for_access_mode(rule.access);
+        try_set_mandatory_label(&rule.path, mask)?;
+    }
+
     // 2. Network shape validation
     let net_policy = compile_network_policy(caps);
     if !net_policy.unsupported.is_empty() {
