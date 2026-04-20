@@ -3,6 +3,12 @@ title: AIPC UAT Cookbook
 description: Copy-paste recipes for validating Phase 18 AIPC handle-brokering on Windows, including the 5 SDK request_* methods and CONIN$ approval-prompt rendering
 ---
 
+> **⚠️ Blocked on Phase 21 (Windows Single-File Filesystem Grants) — as of 2026-04-20**
+>
+> **Path B and Path C cannot be completed right now.** The `claude-code` profile pulls in the `git_config` policy group whose members (`.gitconfig`, `.config/git/ignore`, etc.) are single-file grants. The Windows filesystem backend currently rejects these with `WindowsUnsupportedIssueKind::SingleFileGrant` before the sandbox launches, so the demo never runs and no CONIN$ prompts appear. Resume Path B/C once Phase 21 ships.
+>
+> **Path A (unit + integration tests) is NOT affected** — it exercises the SDK surface via an in-process test transport and runs to completion today.
+
 This cookbook is for manually validating Phase 18 (AIPC-01) on a Windows host. Every command is copy-paste — no prior Rust or nono experience needed.
 
 What gets validated:
@@ -99,7 +105,7 @@ use nono::supervisor::{
 
 fn main() -> nono::Result<()> {
     let pipe_path = std::env::var("NONO_SUPERVISOR_PIPE").expect(
-        "NONO_SUPERVISOR_PIPE not set — launch this binary via `nono --profile claude-code -- <demo.exe>`",
+        "NONO_SUPERVISOR_PIPE not set — launch this binary via `nono run --profile claude-code -- <demo.exe>`",
     );
     let mut sock = SupervisorSocket::connect(Path::new(&pipe_path))?;
 
@@ -151,7 +157,7 @@ The binary lands at `target\release\aipc-demo.exe` (inside the scratch folder, n
 From the scratch folder (`$env:USERPROFILE\aipc-demo`), run:
 
 ```powershell
-C:\Users\omack\Nono\target\release\nono.exe --profile claude-code -- .\target\release\aipc-demo.exe
+C:\Users\omack\Nono\target\release\nono.exe run --profile claude-code -- .\target\release\aipc-demo.exe
 ```
 
 **Expected flow:**
@@ -194,7 +200,7 @@ Also check:
 ## Path C — If something goes wrong
 
 **Symptom:** The demo panics with `NONO_SESSION_TOKEN env var not set`.
-**Cause:** You ran the demo directly instead of through `nono.exe`. Always invoke via `nono --profile claude-code -- <demo>`.
+**Cause:** You ran the demo directly instead of through `nono.exe`. Always invoke via `nono run --profile claude-code -- <demo>`.
 
 **Symptom:** CONIN$ prompt shows `name=` but no `Local\nono-aipc-` prefix.
 **Cause:** Probable regression in the `validate_aipc_object_name` + namespace canonicalization step (see `supervisor.rs`). Log this as a blocker in the UAT.
