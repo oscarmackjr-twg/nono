@@ -34,11 +34,11 @@ use windows_sys::Win32::System::SystemServices::{
 
 const WINDOWS_PREVIEW_SUPPORTED: bool = true;
 const WINDOWS_SUPPORTED_DETAILS: &str =
-    "Windows sandbox enforcement supports directory read and directory read-write grants, \
+    "Windows sandbox enforcement supports directory and single-file grants in read, \
+     write, and read-write modes (enforced via per-path mandatory integrity labels), \
      blocked network mode, port-level network filtering (connect, bind, and localhost ports), \
-     and default signal/process/ipc modes. Single-file grants, \
-     write-only directory grants, runtime capability \
-     expansion, and platform-specific rules are not in the supported subset. \
+     and default signal/process/ipc modes. Runtime capability expansion \
+     and platform-specific rules are not in the supported subset. \
      `nono shell` is supported on Windows 10 build 17763+ via ConPTY \
      (CreatePseudoConsole); the supervisor stays alive as Job Object owner. \
      `nono wrap` is also supported.";
@@ -820,24 +820,21 @@ pub fn compile_filesystem_policy(caps: &CapabilitySet) -> WindowsFilesystemPolic
     let mut unsupported: Vec<crate::sandbox::WindowsUnsupportedIssue> = Vec::new();
 
     for cap in caps.fs_capabilities() {
-        if cap.is_file {
-            unsupported.push(crate::sandbox::WindowsUnsupportedIssue {
-                kind: crate::sandbox::WindowsUnsupportedIssueKind::SingleFileGrant,
-                path: normalize_windows_path(&cap.resolved),
-            });
-        } else if cap.access == crate::AccessMode::Write {
-            unsupported.push(crate::sandbox::WindowsUnsupportedIssue {
-                kind: crate::sandbox::WindowsUnsupportedIssueKind::WriteOnlyDirectoryGrant,
-                path: normalize_windows_path(&cap.resolved),
-            });
-        } else {
-            rules.push(WindowsFilesystemRule {
-                path: normalize_windows_path(&cap.resolved),
-                access: cap.access,
-                is_file: cap.is_file,
-                source: cap.source.clone(),
-            });
-        }
+        // Phase 21: single-file grants (any mode) and write-only directory grants
+        // are now enforced via per-path SYSTEM_MANDATORY_LABEL_ACE (see
+        // `try_set_mandatory_label` + `label_mask_for_access_mode`). All three
+        // AccessMode variants x both path kinds (file/dir) compile to a
+        // WindowsFilesystemRule; no branch emits `unsupported`.
+        //
+        // The WindowsUnsupportedIssueKind::SingleFileGrant and
+        // WriteOnlyDirectoryGrant variants are retained in the enum as reserved
+        // shapes for future unsupported cases (D-06 defers enum retirement).
+        rules.push(WindowsFilesystemRule {
+            path: normalize_windows_path(&cap.resolved),
+            access: cap.access,
+            is_file: cap.is_file,
+            source: cap.source.clone(),
+        });
     }
 
     rules.sort_by(|a, b| a.path.cmp(&b.path));
@@ -2062,7 +2059,11 @@ mod tests {
     }
 
     #[test]
-    fn compile_filesystem_policy_classifies_single_file_as_unsupported() {
+    fn compile_filesystem_policy_classifies_single_file_as_rule() {
+        // Phase 21: single-file grants are now enforced via per-file mandatory-label
+        // ACE (see try_set_mandatory_label). Pre-phase-21 this test asserted the
+        // grant was classified as SingleFileGrant *unsupported*; post-phase-21 the
+        // grant MUST be classified as a WindowsFilesystemRule with is_file=true.
         let dir = tempdir().expect("tempdir");
         let file = dir.path().join("note.txt");
         std::fs::write(&file, "hello").expect("write file");
@@ -2070,29 +2071,60 @@ mod tests {
         caps.add_fs(FsCapability::new_file(&file, AccessMode::Read).expect("file cap"));
 
         let policy = compile_filesystem_policy(&caps);
-        assert!(!policy.is_fully_supported());
-        assert!(policy.rules.is_empty());
-        assert_eq!(policy.unsupported.len(), 1);
-        assert_eq!(
-            policy.unsupported[0].kind,
-            crate::sandbox::WindowsUnsupportedIssueKind::SingleFileGrant
+        assert!(
+            policy.is_fully_supported(),
+            "Phase 21: single-file grants are fully supported; got: {:?}",
+            policy.unsupported
         );
+        assert!(
+            policy.unsupported.is_empty(),
+            "Phase 21: no unsupported entries expected; got: {:?}",
+            policy.unsupported
+        );
+        assert_eq!(
+            policy.rules.len(),
+            1,
+            "single-file grant must emit one rule"
+        );
+        assert!(
+            policy.rules[0].is_file,
+            "single-file grant rule must carry is_file=true"
+        );
+        assert_eq!(policy.rules[0].access, AccessMode::Read);
     }
 
     #[test]
-    fn compile_filesystem_policy_classifies_write_only_directory_as_unsupported() {
+    fn compile_filesystem_policy_classifies_write_only_directory_as_rule() {
+        // Phase 21: write-only directory grants are now enforced via directory-scope
+        // mandatory-label ACE with the NO_READ_UP mask. Pre-phase-21 this test
+        // asserted the grant was classified as WriteOnlyDirectoryGrant *unsupported*;
+        // post-phase-21 the grant MUST be classified as a WindowsFilesystemRule with
+        // is_file=false and access=Write.
         let dir = tempdir().expect("tempdir");
         let mut caps = CapabilitySet::new();
         caps.add_fs(FsCapability::new_dir(dir.path(), AccessMode::Write).expect("dir cap"));
 
         let policy = compile_filesystem_policy(&caps);
-        assert!(!policy.is_fully_supported());
-        assert!(policy.rules.is_empty());
-        assert_eq!(policy.unsupported.len(), 1);
-        assert_eq!(
-            policy.unsupported[0].kind,
-            crate::sandbox::WindowsUnsupportedIssueKind::WriteOnlyDirectoryGrant
+        assert!(
+            policy.is_fully_supported(),
+            "Phase 21: write-only dir grants are fully supported; got: {:?}",
+            policy.unsupported
         );
+        assert!(
+            policy.unsupported.is_empty(),
+            "Phase 21: no unsupported entries expected; got: {:?}",
+            policy.unsupported
+        );
+        assert_eq!(
+            policy.rules.len(),
+            1,
+            "write-only dir grant must emit one rule"
+        );
+        assert!(
+            !policy.rules[0].is_file,
+            "write-only dir grant rule must carry is_file=false"
+        );
+        assert_eq!(policy.rules[0].access, AccessMode::Write);
     }
 
     #[test]
@@ -2206,7 +2238,12 @@ mod tests {
     }
 
     #[test]
-    fn validate_launch_paths_rejects_single_file_policy_shapes_as_unsupported() {
+    fn validate_launch_paths_accepts_single_file_policy_shapes() {
+        // Phase 21: single-file grants are now enforced via per-file mandatory-label
+        // ACE (see try_set_mandatory_label). Pre-phase-21 this test asserted that
+        // validate_launch_paths rejected single-file policies as unsupported;
+        // post-phase-21 the policy is fully supported and the launch-path check
+        // succeeds as long as the executable path is covered by the rule.
         let dir = tempdir().expect("tempdir");
         let file = dir.path().join("note.txt");
         std::fs::write(&file, "hello").expect("write file");
@@ -2214,9 +2251,10 @@ mod tests {
         caps.add_fs(FsCapability::new_file(&file, AccessMode::Read).expect("file cap"));
         let policy = compile_filesystem_policy(&caps);
 
-        // Single-file grants are classified as unsupported, so validate_launch_paths must reject
+        // Single-file grant now a supported WindowsFilesystemRule; the executable
+        // path (&file) is covered by the rule, so validate_launch_paths accepts.
         validate_launch_paths(&policy, &file, dir.path())
-            .expect_err("single-file policy shapes must be rejected as unsupported");
+            .expect("Phase 21: single-file policy covering the executable path must be accepted");
     }
 
     #[test]
@@ -2247,40 +2285,49 @@ mod tests {
     }
 
     #[test]
-    fn preview_runtime_status_reports_requires_enforcement_for_single_file_policy() {
+    fn preview_runtime_status_allows_advisory_only_for_single_file_policy() {
+        // Phase 21: single-file grants are now enforced via per-file mandatory-label
+        // ACE at launch time. Pre-phase-21 this test asserted that preview status
+        // reported RequiresEnforcement because single-file grants were classified
+        // as unsupported. Post-phase-21 a pure single-file policy has no
+        // unsupported entries and no user-intent directory rules, so no reasons
+        // are collected and the status is AdvisoryOnly (the label application
+        // itself happens during Sandbox::apply and is transparent to the preview).
         let dir = tempdir().expect("tempdir");
         let file = dir.path().join("note.txt");
         std::fs::write(&file, "hello").expect("write file");
         let mut caps = CapabilitySet::new();
         caps.add_fs(FsCapability::new_file(&file, AccessMode::Read).expect("file cap"));
 
-        // Single-file grants are now classified as unsupported, so preview status
-        // must report RequiresEnforcement with the single-file grants label.
         let status = preview_runtime_status(
             &caps,
             Path::new(r"C:\outside-workdir"),
             WindowsPreviewContext::default(),
         );
         assert!(
-            matches!(status, PreviewRuntimeStatus::RequiresEnforcement { .. }),
-            "single-file policy should require enforcement: {status:?}"
+            matches!(status, PreviewRuntimeStatus::AdvisoryOnly),
+            "Phase 21: single-file policy must be advisory-only; got: {status:?}"
         );
     }
 
     #[test]
-    fn preview_runtime_status_reports_requires_enforcement_for_write_only_directory() {
+    fn preview_runtime_status_allows_advisory_only_for_write_only_directory() {
+        // Phase 21: write-only directory grants are now enforced via directory-scope
+        // mandatory-label ACE with NO_READ_UP mask. Pre-phase-21 this test asserted
+        // RequiresEnforcement because write-only directory grants were unsupported.
+        // Post-phase-21 the grant compiles to a WindowsFilesystemRule and — as long
+        // as the execution directory is covered by the rule — no enforcement
+        // reasons are collected (parity with read-write directory grants).
         let dir = tempdir().expect("tempdir");
         let work_dir = dir.path().join("work");
         std::fs::create_dir_all(&work_dir).expect("mkdir work");
         let mut caps = CapabilitySet::new();
         caps.add_fs(FsCapability::new_dir(dir.path(), AccessMode::Write).expect("dir cap"));
 
-        // Write-only directory grants are now classified as unsupported, so preview status
-        // must report RequiresEnforcement.
         let status = preview_runtime_status(&caps, &work_dir, WindowsPreviewContext::default());
         assert!(
-            matches!(status, PreviewRuntimeStatus::RequiresEnforcement { .. }),
-            "write-only directory policy should require enforcement: {status:?}"
+            matches!(status, PreviewRuntimeStatus::AdvisoryOnly),
+            "Phase 21: write-only directory policy covering execution dir must be advisory-only; got: {status:?}"
         );
     }
 
