@@ -203,6 +203,12 @@ enum NetworkEnforcementGuard {
 }
 
 struct PreparedWindowsLaunch {
+    // Phase 21: applied-labels guard reverts mandatory-label ACEs on drop.
+    // Declared BEFORE _network_enforcement so Rust's reverse-of-declaration
+    // drop order reverts labels first, then tears down network enforcement.
+    // This matches the Phase 16-02 drop-order discipline (containment_job
+    // outliving the supervisor runtime).
+    _applied_labels: labels_guard::AppliedLabelsGuard,
     _network_enforcement: Option<NetworkEnforcementGuard>,
     launch_program: PathBuf,
 }
@@ -242,6 +248,18 @@ fn prepare_live_windows_launch(
         fs_policy.unsupported.len()
     );
 
+    // Phase 21: snapshot pre-grant label state + apply mode-derived mandatory
+    // labels to every rule path (skip-on-any-prior-label per tightened D-02).
+    // Guard lifetime = PreparedWindowsLaunch lifetime = supervised session
+    // lifetime; Drop reverts applied labels (clears ACEs we added; Skip
+    // entries are a drop-time no-op).
+    //
+    // Note: the CLI path does NOT call nono::apply() (which also label-applies
+    // per Plan 21-03) — nono::apply is the library embedding surface; the CLI
+    // builds its own fs-policy + label-apply + network-enforcement pipeline.
+    // The guard here is the SOLE apply site on the CLI path.
+    let applied_labels = labels_guard::AppliedLabelsGuard::snapshot_and_apply(&fs_policy)?;
+
     let network_enforcement = prepare_network_enforcement(config, session_id)?;
     let launch_program = network_enforcement
         .as_ref()
@@ -250,6 +268,7 @@ fn prepare_live_windows_launch(
         .to_path_buf();
 
     Ok(PreparedWindowsLaunch {
+        _applied_labels: applied_labels,
         _network_enforcement: network_enforcement,
         launch_program,
     })
@@ -391,6 +410,7 @@ struct ProcessContainment {
 #[derive(Debug)]
 struct OwnedHandle(HANDLE);
 
+mod labels_guard;
 mod launch;
 mod network;
 mod restricted_token;
