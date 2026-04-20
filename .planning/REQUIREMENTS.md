@@ -347,3 +347,66 @@ Context: The fork is pinned at crate version 0.30.1 while upstream `always-furth
 3. `make ci` passes on the Windows host.
 
 **Maps to:** Phase 20 Plan 20-04.
+
+---
+
+## WSFG — Windows Single-File Grants
+
+Context: The Windows filesystem sandbox (`crates/nono/src/sandbox/windows.rs`) currently rejects `FsCapability { is_file: true, .. }` with `WindowsUnsupportedIssueKind::SingleFileGrant` and directory-scope `AccessMode::Write` with `WindowsUnsupportedIssueKind::WriteOnlyDirectoryGrant`. This blocks `nono run --profile claude-code` on Windows because the `claude-code` profile pulls in the `git_config` policy group whose five members (`.gitconfig`, `.gitignore_global`, `.config/git/config`, `.config/git/ignore`, `.config/git/attributes`) are all single-file grants. Phase 21 makes both enforceable via per-file / per-directory Low IL mandatory-label ACEs, preserving fail-closed semantics.
+
+### WSFG-01: Per-file and write-only-directory label enforcement
+
+**What:** `compile_filesystem_policy` emits `WindowsFilesystemRule` entries (no longer pushes `unsupported`) for single-file grants in all three access modes (`Read`, `Write`, `ReadWrite`) AND for write-only directory grants (`AccessMode::Write` on a directory). The enforcement primitive is a `SYSTEM_MANDATORY_LABEL_ACE` at `SECURITY_MANDATORY_LOW_RID` applied via `SetNamedSecurityInfoW(path, SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, ..)`. The ACE `Mask` field encodes the access mode per the CONTEXT.md D-01 mask-encoding table: `Read` → `NO_WRITE_UP | NO_EXECUTE_UP`, `Write` → `NO_READ_UP | NO_EXECUTE_UP`, `ReadWrite` → `NO_EXECUTE_UP`.
+
+**Enforcement:**
+- Windows: `SetNamedSecurityInfoW` with `LABEL_SECURITY_INFORMATION`, mode-derived mask, fail-closed on any Win32 error.
+- Linux / macOS: no change (Landlock / Seatbelt already support file-scope grants natively).
+
+**Security:**
+- Fail-closed on any label-apply error (I-01). Never silently degrade to labeling a parent directory or dropping the grant.
+- Path-component comparison throughout (I-03). No `str::starts_with` on paths.
+- D-21 Windows-invariance held (I-02): cross-platform files stay byte-identical modulo the additive `NonoError::LabelApplyFailed` variant.
+
+**Acceptance:**
+1. `compile_filesystem_policy` on a `CapabilitySet` containing one `FsCapability::new_file(p, Read)` emits exactly one `WindowsFilesystemRule { is_file: true, access: Read, path: p }` and zero `WindowsUnsupportedIssue` entries.
+2. The same assertion for `Write` and `ReadWrite` access modes on single files.
+3. `compile_filesystem_policy` on a `CapabilitySet` containing `FsCapability::new_dir(p, Write)` emits exactly one rule (no unsupported entry).
+4. A Windows integration test creates `tempdir()/only-this.txt`, applies `apply(&caps)` with `FsCapability::new_file(&file, Read)`, reads the file's mandatory-label ACE via `GetNamedSecurityInfoW`, and asserts RID == `SECURITY_MANDATORY_LOW_RID` and mask == `NO_WRITE_UP | NO_EXECUTE_UP`.
+5. Silent-degradation regression test: grant single file X; assert `low_integrity_label_rid(X.parent())` equals its pre-grant value (parent directory's integrity label was NOT mutated).
+
+**Maps to:** Phase 21 Plans 21-02, 21-03, 21-05.
+
+---
+
+### WSFG-02: Label lifecycle + error surface
+
+**What:** The supervisor applies labels at launch and reverts them at session exit / detach-and-stop. Apply is idempotent (if the file is already at Low IL for reasons unrelated to this session, we no-op the apply AND skip the revert — no state to restore). Write-mode grants to non-existent files are rejected at `CapabilitySet` construction time (`FsCapability::new_file` returns `PathNotFound`). On `SetNamedSecurityInfoW` failure, `apply()` returns `NonoError::LabelApplyFailed { path, hresult, hint }` (new variant) carrying the exact path, Win32 HRESULT, and a human-actionable hint.
+
+**Security:**
+- Revert on session end restores user's files to pre-grant integrity state (D-02).
+- Concurrent sessions: "last session out restores" — accepted trade-off.
+- `ERROR_ACCESS_DENIED` hint: "Ensure the target file is writable by the current user and is on NTFS (not ReFS or a network share)."
+- Unknown HRESULT: include raw hex value for support triage.
+
+**Acceptance:**
+1. `NonoError::LabelApplyFailed { path, hresult, hint }` exists in `crates/nono/src/error.rs` with `#[error(..)]` attribute via `thiserror`.
+2. `apply()` returns `LabelApplyFailed` (NOT `UnsupportedPlatform`) when `SetNamedSecurityInfoW` returns non-zero.
+3. An RAII guard type (`AppliedLabelsGuard` or equivalent, in `exec_strategy_windows/`) records the per-file pre-grant label state and reverts on `Drop`. Test: label applied, guard dropped, file integrity restored.
+4. `FsCapability::new_file(path, Write)` on a non-existent path returns `NonoError::PathNotFound` (no change — existing behavior is the contract).
+5. The `LabelApplyFailed` error's `Display` output includes both the path and the HRESULT (hex-formatted).
+
+**Maps to:** Phase 21 Plans 21-02, 21-04.
+
+---
+
+### WSFG-03: Phase 18 UAT close-out
+
+**What:** The Phase 18 AIPC UAT cookbook (`docs/cli/internals/aipc-uat-cookbook.mdx`) Path B + Path C are re-run end-to-end on the Windows host after Plans 21-02..21-04 land. All 4 live-CONIN$ tests in `.planning/phases/18-extended-ipc/18-HUMAN-UAT.md` transition from `result: [blocked — see Blocker above; retry after Phase 21]` to concrete `pass` or `issue` verdicts. If the UAT surfaces new issues they are routed to follow-up quick-tasks (not reopened in Phase 21).
+
+**Acceptance:**
+1. `.planning/phases/18-extended-ipc/18-HUMAN-UAT.md` frontmatter `status:` is no longer `blocked`; `blocked_on: phase-21-windows-single-file-grants` is removed.
+2. All 4 test entries in `18-HUMAN-UAT.md` have `result: [pass]` or `result: [issue — <short description>]`.
+3. `nono run --profile claude-code -- <aipc-demo>` launches successfully on the Windows host (the `git_config` group's 5 single-file grants no longer trip a launch-time error).
+4. The Summary block at the bottom of `18-HUMAN-UAT.md` reflects the new totals (passed + issues + blocked where blocked = 0).
+
+**Maps to:** Phase 21 Plan 21-05.
