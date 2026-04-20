@@ -143,6 +143,22 @@ pub enum NonoError {
     #[error("Session already has an active attached client")]
     AttachBusy,
 
+    /// Failed to apply (or revert) a Windows mandatory integrity label on a path.
+    ///
+    /// Fail-closed: any `SetNamedSecurityInfoW` non-zero return surfaces here.
+    /// The `hint` field carries a human-actionable diagnostic string (e.g.
+    /// "Ensure the target file is writable by the current user and is on NTFS
+    /// (not ReFS or a network share).") that callers can show to end users.
+    #[error("Failed to apply integrity label to {path}: {hint} (HRESULT: 0x{hresult:08X})")]
+    LabelApplyFailed {
+        /// The exact path that failed.
+        path: PathBuf,
+        /// The Win32 HRESULT (or raw error code) returned by the OS.
+        hresult: u32,
+        /// Human-actionable hint for remediation.
+        hint: String,
+    },
+
     /// One or more files could not be restored (e.g. locked on Windows).
     ///
     /// Carries the list of successfully applied changes along with per-file
