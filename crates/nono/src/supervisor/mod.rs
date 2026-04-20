@@ -27,6 +27,7 @@
 //! - Peer authentication via `SO_PEERCRED` (Linux) / `LOCAL_PEERPID` (macOS)
 //! - Path comparison uses [`Path::starts_with()`], never string operations
 
+pub mod aipc_sdk;
 pub mod policy;
 #[cfg(not(target_os = "windows"))]
 pub mod socket;
@@ -35,6 +36,10 @@ pub mod socket;
 pub mod socket;
 pub mod types;
 
+pub use aipc_sdk::{
+    request_event, request_job_object, request_mutex, request_pipe, request_socket, unsupported_platform_message,
+    RawHandle, RawSocket,
+};
 pub use socket::SupervisorSocket;
 #[cfg(target_os = "windows")]
 pub use socket::{
