@@ -1388,6 +1388,36 @@ mod tests {
     }
 
     #[test]
+    fn label_mask_for_access_mode_read_denies_write_and_execute_up() {
+        let mask = label_mask_for_access_mode(crate::AccessMode::Read);
+        assert_eq!(
+            mask,
+            SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP,
+            "Read mode must deny WRITE_UP and EXECUTE_UP; got 0x{mask:X}"
+        );
+    }
+
+    #[test]
+    fn label_mask_for_access_mode_write_denies_read_and_execute_up() {
+        let mask = label_mask_for_access_mode(crate::AccessMode::Write);
+        assert_eq!(
+            mask,
+            SYSTEM_MANDATORY_LABEL_NO_READ_UP | SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP,
+            "Write mode must deny READ_UP and EXECUTE_UP; got 0x{mask:X}"
+        );
+    }
+
+    #[test]
+    fn label_mask_for_access_mode_read_write_denies_only_execute_up() {
+        let mask = label_mask_for_access_mode(crate::AccessMode::ReadWrite);
+        assert_eq!(
+            mask,
+            SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP,
+            "ReadWrite mode must deny only EXECUTE_UP; got 0x{mask:X}"
+        );
+    }
+
+    #[test]
     fn apply_accepts_minimal_supported_windows_subset() {
         let dir = tempdir().expect("tempdir");
         let caps = CapabilitySet::new()
