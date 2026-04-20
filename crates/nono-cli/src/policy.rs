@@ -1375,14 +1375,16 @@ mod tests {
         // The pre-existing per-file assertions remain in place to keep both
         // the broader directory grant AND the legacy file-scoped grants
         // valid against the policy.json.
-        //
-        // Note: the upstream e3decf9d test added an additional assertion
-        // checking `claude_code_macos.allow.read` for `$HOME/.local/share/claude`
-        // but the fork's policy.json keeps that path under `claude_code_linux`
-        // (cross-platform CLAUDE state lives there per fork's data shape) so
-        // that assertion was dropped during the manual port to keep the test
-        // truthful against the embedded policy.json.
         assert!(claude_code_macos_paths.contains(&"$HOME/Library/Keychains".to_string()));
+        // a524b1a7 (Phase 22): claude_code_macos.allow.read now includes
+        // `$HOME/.local/share/claude` so claude-code can resolve its
+        // versioned symlink target (`.../versions/<v>`).
+        assert!(claude_code_macos
+            .allow
+            .as_ref()
+            .expect("claude_code_macos allow missing")
+            .read
+            .contains(&"$HOME/.local/share/claude".to_string()));
         assert!(claude_code_macos_paths
             .contains(&"$HOME/Library/Keychains/login.keychain-db".to_string()));
         assert!(claude_code_macos_paths
