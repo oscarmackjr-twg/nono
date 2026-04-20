@@ -685,6 +685,7 @@ fn cmd_show(args: PolicyShowArgs) -> Result<()> {
     // visibility per REQ-PROF-01 acceptance #2. The rules only execute on
     // macOS, but operators on Windows/Linux still need to see them when
     // inspecting profiles (e.g., reviewing a profile authored by a teammate).
+    // Cross-platform auditing per upstream e3decf9d.
     if !profile.unsafe_macos_seatbelt_rules.is_empty() {
         println!();
         println!(

@@ -128,6 +128,12 @@ pub struct ProfileDef {
     /// default is `None` aipc block (hard-coded supervisor defaults apply).
     #[serde(default)]
     pub capabilities: profile::CapabilitiesConfig,
+    /// PROF-01 (Phase 22) per upstream e3decf9d: built-in profiles MAY declare
+    /// raw Seatbelt rules. Forwarded via `to_raw_profile` so future curated
+    /// built-ins can ship rule sets without data loss on conversion. Runtime
+    /// application is macOS-only (sandbox_prepare gates with cfg).
+    #[serde(default)]
+    pub unsafe_macos_seatbelt_rules: Vec<String>,
 }
 
 impl ProfileDef {
@@ -163,11 +169,10 @@ impl ProfileDef {
             // policy.json verbatim. Default (empty `CapabilitiesConfig`) means
             // the hard-coded supervisor defaults apply (D-05).
             capabilities: self.capabilities.clone(),
-            // PROF-01 (Phase 22): built-in profiles cannot declare raw Seatbelt
-            // rules via policy.json (the field is profile-JSON only). Always
-            // forward an empty Vec; user-supplied profiles add rules at parse
-            // time via the Profile struct's `unsafe_macos_seatbelt_rules` field.
-            unsafe_macos_seatbelt_rules: Vec::new(),
+            // PROF-01 (Phase 22) per upstream e3decf9d: forward the rules
+            // verbatim so built-in profiles can declare them via policy.json.
+            // Runtime application is macOS-only (sandbox_prepare cfg-gates).
+            unsafe_macos_seatbelt_rules: self.unsafe_macos_seatbelt_rules.clone(),
         }
     }
 }
