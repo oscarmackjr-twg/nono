@@ -216,9 +216,18 @@ mod tests {
             hint: "Ensure the target file is writable by the current user.".into(),
         };
         let msg = err.to_string();
-        assert!(msg.contains(r"C:\Users\test\.gitconfig"), "Display missing path: {msg}");
-        assert!(msg.contains("0x00000005"), "Display missing hex HRESULT: {msg}");
-        assert!(msg.contains("writable by the current user"), "Display missing hint: {msg}");
+        assert!(
+            msg.contains(r"C:\Users\test\.gitconfig"),
+            "Display missing path: {msg}"
+        );
+        assert!(
+            msg.contains("0x00000005"),
+            "Display missing hex HRESULT: {msg}"
+        );
+        assert!(
+            msg.contains("writable by the current user"),
+            "Display missing hint: {msg}"
+        );
     }
 
     #[test]

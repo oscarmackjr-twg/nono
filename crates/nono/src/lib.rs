@@ -76,6 +76,10 @@ pub use keystore::{
     validate_env_uri, validate_file_uri, validate_keyring_uri, validate_op_uri, LoadedSecret,
 };
 pub use net_filter::{FilterResult, HostFilter};
+#[cfg(target_os = "windows")]
+pub use sandbox::windows::{
+    label_mask_for_access_mode, low_integrity_label_and_mask, try_set_mandatory_label,
+};
 #[cfg(target_os = "linux")]
 pub use sandbox::{detect_abi, is_wsl2, DetectedAbi};
 pub use sandbox::{PreviewRuntimeStatus, Sandbox, SupportInfo, SupportStatus};

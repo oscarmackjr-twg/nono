@@ -18,13 +18,18 @@ use crate::sandbox::{
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use windows_sys::Win32::Foundation::LocalFree;
-use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
+use windows_sys::Win32::Security::Authorization::{
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, GetNamedSecurityInfoW,
+    SetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT,
+};
 use windows_sys::Win32::Security::{
-    GetAce, GetSidSubAuthority, GetSidSubAuthorityCount, ACE_HEADER, ACL,
-    LABEL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SYSTEM_MANDATORY_LABEL_ACE,
+    GetAce, GetSecurityDescriptorSacl, GetSidSubAuthority, GetSidSubAuthorityCount, ACE_HEADER,
+    ACL, LABEL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SYSTEM_MANDATORY_LABEL_ACE,
 };
 use windows_sys::Win32::System::SystemServices::{
     SECURITY_MANDATORY_LOW_RID, SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+    SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP, SYSTEM_MANDATORY_LABEL_NO_READ_UP,
+    SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
 };
 
 const WINDOWS_PREVIEW_SUPPORTED: bool = true;
@@ -446,6 +451,162 @@ impl Drop for OwnedSecurityDescriptor {
     }
 }
 
+/// Maps an `AccessMode` to the `SYSTEM_MANDATORY_LABEL_ACE.Mask` bits per
+/// CONTEXT.md D-01 mask-encoding table.
+///
+/// - `Read` → `NO_WRITE_UP | NO_EXECUTE_UP` (Low IL subject can read, not write/execute-up)
+/// - `Write` → `NO_READ_UP | NO_EXECUTE_UP` (Low IL subject can write, not read/execute-up)
+/// - `ReadWrite` → `NO_EXECUTE_UP` only (Low IL subject can read + write, not execute-up)
+///
+/// Execute is never granted through a filesystem capability in the nono model —
+/// executability is controlled by the profile's command allowlist and the Low
+/// IL restricted token's execute rights. Always set `NO_EXECUTE_UP`.
+#[must_use]
+pub fn label_mask_for_access_mode(mode: crate::AccessMode) -> u32 {
+    match mode {
+        crate::AccessMode::Read => {
+            SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP
+        }
+        crate::AccessMode::Write => {
+            SYSTEM_MANDATORY_LABEL_NO_READ_UP | SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP
+        }
+        crate::AccessMode::ReadWrite => SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP,
+    }
+}
+
+/// Applies (or replaces) a `SYSTEM_MANDATORY_LABEL_ACE` at
+/// `SECURITY_MANDATORY_LOW_RID` on `path`, with the ACE `Mask` field set to
+/// `mask` (typically the return value of `label_mask_for_access_mode`).
+///
+/// Uses `SetNamedSecurityInfoW(SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, ..)`.
+/// Fail-closed: any non-zero return from the FFI surfaces as
+/// `NonoError::LabelApplyFailed`.
+///
+/// The SACL passed to `SetNamedSecurityInfoW` is constructed in-process via
+/// `ConvertStringSecurityDescriptorToSecurityDescriptorW` using an SDDL string
+/// of the form `"S:(ML;;{mask_hex};;;LW)"` where `LW` is the
+/// Low-Integrity-Mandatory-Level alias. This avoids hand-rolling a
+/// `SYSTEM_MANDATORY_LABEL_ACE` byte layout.
+///
+/// # Errors
+///
+/// Returns `NonoError::LabelApplyFailed` if the SDDL cannot be parsed, the
+/// SACL cannot be extracted, or `SetNamedSecurityInfoW` returns non-zero.
+pub fn try_set_mandatory_label(path: &Path, mask: u32) -> Result<()> {
+    use windows_sys::Win32::Foundation::{
+        ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED,
+    };
+
+    let wide_path: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    // Build SDDL: "S:(ML;;<mask-in-hex>;;;LW)" — mandatory-label ACE, Low IL.
+    // SDDL is ASCII-only, so encode_utf16 produces the correct wide form.
+    let sddl = format!("S:(ML;;0x{mask:X};;;LW)");
+    let wide_sddl: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
+
+    let mut security_descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    let ok = unsafe {
+        // SAFETY: `wide_sddl` is a valid nul-terminated UTF-16 buffer; the
+        // output pointer is a valid mutable out-pointer for the duration of
+        // the call. On success, the returned SD must be freed with LocalFree
+        // (handled by the OwnedSecurityDescriptor guard below).
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            wide_sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut security_descriptor,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        let hresult = unsafe {
+            // SAFETY: GetLastError has no preconditions.
+            windows_sys::Win32::Foundation::GetLastError()
+        };
+        return Err(NonoError::LabelApplyFailed {
+            path: path.to_path_buf(),
+            hresult,
+            hint: format!("Failed to construct mandatory-label SDDL (mask=0x{mask:X})"),
+        });
+    }
+    let _sd_guard = OwnedSecurityDescriptor(security_descriptor);
+
+    // Extract the SACL from the security descriptor.
+    let mut sacl: *mut ACL = std::ptr::null_mut();
+    let mut sacl_present: i32 = 0;
+    let mut sacl_defaulted: i32 = 0;
+    let ok = unsafe {
+        // SAFETY: `security_descriptor` is a valid SD returned by the
+        // conversion above; the output pointers are valid out-pointers.
+        GetSecurityDescriptorSacl(
+            security_descriptor,
+            &mut sacl_present,
+            &mut sacl,
+            &mut sacl_defaulted,
+        )
+    };
+    if ok == 0 || sacl_present == 0 || sacl.is_null() {
+        let hresult = unsafe {
+            // SAFETY: GetLastError has no preconditions.
+            windows_sys::Win32::Foundation::GetLastError()
+        };
+        return Err(NonoError::LabelApplyFailed {
+            path: path.to_path_buf(),
+            hresult,
+            hint: "Failed to extract SACL from constructed mandatory-label SD".to_string(),
+        });
+    }
+
+    let status = unsafe {
+        // SAFETY: `wide_path` is a valid nul-terminated UTF-16 buffer; `sacl`
+        // points into `security_descriptor` which lives as long as `_sd_guard`.
+        // SetNamedSecurityInfoW in windows-sys 0.59 signature:
+        //   fn SetNamedSecurityInfoW(
+        //     pobjectname: PCWSTR, objecttype: SE_OBJECT_TYPE,
+        //     securityinfo: OBJECT_SECURITY_INFORMATION,
+        //     psidowner: PSID, psidgroup: PSID,
+        //     pdacl: *const ACL, psacl: *const ACL
+        //   ) -> WIN32_ERROR
+        SetNamedSecurityInfoW(
+            wide_path.as_ptr(),
+            SE_FILE_OBJECT,
+            LABEL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            sacl,
+        )
+    };
+
+    if status == 0 {
+        return Ok(());
+    }
+
+    // Fail-closed: map common Win32 error codes to actionable hints.
+    let hint = match status {
+        x if x == ERROR_ACCESS_DENIED
+            || x == ERROR_INVALID_FUNCTION
+            || x == ERROR_NOT_SUPPORTED =>
+        {
+            "Ensure the target file is writable by the current user and is on NTFS (not ReFS or a network share).".to_string()
+        }
+        x if x == ERROR_FILE_NOT_FOUND => {
+            "Target path does not exist. Single-file Write / ReadWrite grants must name an existing file; use a directory-scope grant for file creation.".to_string()
+        }
+        other => {
+            format!("Unexpected Win32 error while applying mandatory label (raw=0x{other:08X}); see support triage docs.")
+        }
+    };
+    Err(NonoError::LabelApplyFailed {
+        path: path.to_path_buf(),
+        hresult: status,
+        hint,
+    })
+}
+
 fn low_integrity_label_rid(path: &Path) -> Option<u32> {
     let wide_path: Vec<u16> = path
         .as_os_str()
@@ -533,6 +694,102 @@ fn low_integrity_label_rid(path: &Path) -> Option<u32> {
         return Some(unsafe { *rid });
     }
 
+    None
+}
+
+/// Reads back the mandatory-label ACE on `path`, returning `Some((rid, mask))`
+/// if a label is present. Returns `None` if the path has no SACL, no
+/// mandatory-label ACE, or the FFI fails.
+///
+/// Companion to `try_set_mandatory_label` for verification in tests.
+#[must_use]
+pub fn low_integrity_label_and_mask(path: &Path) -> Option<(u32, u32)> {
+    let wide_path: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut sacl: *mut ACL = std::ptr::null_mut();
+    let mut security_descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+
+    let status = unsafe {
+        // SAFETY: `wide_path` is a valid nul-terminated UTF-16 buffer; the
+        // output pointers refer to live local storage for the duration of the
+        // call. On success, the SD is freed by OwnedSecurityDescriptor's Drop.
+        GetNamedSecurityInfoW(
+            wide_path.as_ptr(),
+            SE_FILE_OBJECT,
+            LABEL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut sacl,
+            &mut security_descriptor,
+        )
+    };
+    if status != 0 {
+        return None;
+    }
+    let _sd_guard = OwnedSecurityDescriptor(security_descriptor);
+    if sacl.is_null() {
+        return None;
+    }
+
+    let ace_count = unsafe {
+        // SAFETY: `sacl` is populated by GetNamedSecurityInfoW on success.
+        (*sacl).AceCount
+    };
+    for index in 0..ace_count {
+        let mut ace = std::ptr::null_mut();
+        let ok = unsafe {
+            // SAFETY: `sacl` is a valid ACL pointer; `ace` is a valid out-pointer.
+            GetAce(sacl, u32::from(index), &mut ace)
+        };
+        if ok == 0 || ace.is_null() {
+            continue;
+        }
+        let header = unsafe {
+            // SAFETY: `ace` points to a valid ACE entry returned by GetAce.
+            &*(ace as *const ACE_HEADER)
+        };
+        if u32::from(header.AceType) != SYSTEM_MANDATORY_LABEL_ACE_TYPE {
+            continue;
+        }
+        let label_ace = unsafe {
+            // SAFETY: AceType checked above; bytes are a SYSTEM_MANDATORY_LABEL_ACE.
+            &*(ace as *const SYSTEM_MANDATORY_LABEL_ACE)
+        };
+        let mask = label_ace.Mask;
+        let sid = (&label_ace.SidStart as *const u32).cast_mut().cast();
+        let subauthority_count = unsafe {
+            // SAFETY: `sid` points to the SID embedded in the label ACE.
+            GetSidSubAuthorityCount(sid)
+        };
+        if subauthority_count.is_null() {
+            continue;
+        }
+        let subauthority_count = unsafe {
+            // SAFETY: subauthority_count was just checked for non-null.
+            *subauthority_count
+        };
+        if subauthority_count == 0 {
+            continue;
+        }
+        let rid = unsafe {
+            // SAFETY: SID has at least one subauthority; final RID pointer is valid.
+            GetSidSubAuthority(sid, u32::from(subauthority_count) - 1)
+        };
+        if rid.is_null() {
+            continue;
+        }
+        return Some((
+            unsafe {
+                // SAFETY: `rid` was just checked for non-null and points into the ACE buffer.
+                *rid
+            },
+            mask,
+        ));
+    }
     None
 }
 
@@ -1411,8 +1668,7 @@ mod tests {
     fn label_mask_for_access_mode_read_write_denies_only_execute_up() {
         let mask = label_mask_for_access_mode(crate::AccessMode::ReadWrite);
         assert_eq!(
-            mask,
-            SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP,
+            mask, SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP,
             "ReadWrite mode must deny only EXECUTE_UP; got 0x{mask:X}"
         );
     }
