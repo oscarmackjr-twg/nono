@@ -50,7 +50,7 @@ Carry-forward → Phase 15: detached-console-grandchild `0xC0000142 STATUS_DLL_I
 
 **Goal:** Deliver Job Object resource limits (CPU / memory / timeout / process-count), extend the Phase 11 capability pipe to broker additional handle types, finish the Phase 15 attach-streaming gap with full ConPTY re-attach, and clean up accumulated v2.0 WIP.
 
-**Requirements (10):** RESL-01..04, AIPC-01, ATCH-01, CLEAN-01..04. See `.planning/REQUIREMENTS.md`.
+**Requirements (13):** RESL-01..04, AIPC-01, ATCH-01, CLEAN-01..04, WSFG-01..03. See `.planning/REQUIREMENTS.md`.
 
 - [x] **Phase 16: Resource Limits (RESL)** — CPU %, memory cap, wall-clock timeout, process count via `JOB_OBJECT_CPU_RATE_CONTROL_ENABLE`, `JobMemoryLimit`, supervisor-timer + `TerminateJobObject` (kernel JOB_TIME deliberately NOT used since it tracks CPU not wall-clock), `ActiveProcessLimit`. CLI flags: `--cpu-percent`, `--memory`, `--timeout`, `--max-processes`. Cross-platform: Unix accepts flags with a "not enforced on this platform" warning pending cross-platform follow-up milestone. `nono inspect` surfaces active caps via a `Limits:` block. **Completed 2026-04-18.**
 
@@ -102,6 +102,8 @@ Carry-forward → Phase 15: detached-console-grandchild `0xC0000142 STATUS_DLL_I
 - [ ] **Phase 21: Windows Single-File Filesystem Grants** — Extend the Windows filesystem sandbox backend in `crates/nono/src/sandbox/windows.rs` to enforce single-file capability grants (read / write / read-write). Today `WindowsUnsupportedIssueKind::SingleFileGrant` makes any `CapabilitySet` containing file-scoped grants (e.g. the `git_config` policy group: `.gitconfig`, `.gitignore_global`, `.config/git/config`, `.config/git/ignore`, `.config/git/attributes`) fail to launch on Windows under the `claude-code` profile. Design the enforcement primitive (per-file DACL vs alternative), preserve fail-closed semantics on any error, and land platform-split tests proving the grants do not silently degrade to broader directory grants.
 
   **Unblocks:** Phase 18 HUMAN-UAT Path B + Path C (all 4 live-CONIN$ tests, currently `blocked` in `.planning/phases/18-extended-ipc/18-HUMAN-UAT.md`). Re-run the AIPC UAT cookbook (`docs/cli/internals/aipc-uat-cookbook.mdx`) end-to-end as part of Phase 21 close-out.
+
+  **Requirements:** WSFG-01, WSFG-02, WSFG-03. See `.planning/REQUIREMENTS.md`.
 
   **Depends on:** Nothing structural; isolated to the Windows filesystem backend.
 
