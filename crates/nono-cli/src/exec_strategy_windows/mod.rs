@@ -163,6 +163,18 @@ pub struct SupervisorConfig<'a> {
     /// Rendezvous file path at which the capability pipe server binds.
     /// `None` disables the capability pipe server.
     pub cap_pipe_rendezvous_path: Option<&'a Path>,
+    /// Per-session restricting SID (`S-1-5-117-<guid>`) supplied to
+    /// `CreateRestrictedToken` when the sandboxed child is launched with
+    /// `WRITE_RESTRICTED`. When `Some(..)`, the capability pipe's DACL gets
+    /// an additional ACE granting `FILE_GENERIC_READ | FILE_GENERIC_WRITE |
+    /// SYNCHRONIZE` (object-specific mask `0x0012019F`) to this SID so the
+    /// child's second-pass DACL check succeeds on
+    /// `CreateFileW(pipe, GENERIC_READ | GENERIC_WRITE)`.
+    ///
+    /// Mirrors `ExecConfig.session_sid`. `None` means no WRITE_RESTRICTED
+    /// child is expected (detached-launch path, legacy callers) and the pipe
+    /// uses the byte-identical pre-fix SDDL.
+    pub session_sid: Option<String>,
 }
 
 pub struct WindowsSupervisorDenyAllApprovalBackend;

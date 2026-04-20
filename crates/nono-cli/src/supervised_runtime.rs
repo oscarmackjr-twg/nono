@@ -244,6 +244,12 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
         interactive_shell: session.interactive_pty && !session.detached_start,
         session_token: config.session_token.as_deref(),
         cap_pipe_rendezvous_path: config.cap_pipe_rendezvous_path.as_deref(),
+        // Debug session `supervisor-pipe-access-denied`: thread the same
+        // per-session restricting SID that `launch.rs` feeds into
+        // `CreateRestrictedToken(..., WRITE_RESTRICTED, ..., &session_sid, ...)`
+        // through to the capability pipe server's DACL so the child's
+        // second-pass access check succeeds.
+        session_sid: config.session_sid.clone(),
     };
 
     let trust_interceptor = create_trust_interceptor(trust);

@@ -41,7 +41,53 @@ const SDDL_REVISION_1: u32 = 1;
 /// SDDL string for the capability pipe. Grants full access to SYSTEM, Built-in
 /// Administrators, and the owner; adds a mandatory integrity SACL allowing
 /// Low Integrity processes to write (`NW`) to the pipe.
+///
+/// This constant is used verbatim when the caller does NOT supply a per-session
+/// restricting SID (in-process tests, Phase 11 / Phase 18 AIPC pipe callers).
+/// When a per-session SID *is* supplied via
+/// [`SupervisorSocket::bind_low_integrity_with_session_sid`], an additional
+/// ACE granting `FILE_GENERIC_READ | FILE_GENERIC_WRITE | SYNCHRONIZE`
+/// (mask 0x120089) to that SID is appended before the SACL — necessary so
+/// Phase 13's `CreateRestrictedToken(WRITE_RESTRICTED, ..., &session_sid, ...)`
+/// child passes the second-pass DACL check against the restricting SID set
+/// when it opens the pipe with `GENERIC_READ | GENERIC_WRITE`.
 const CAPABILITY_PIPE_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)S:(ML;;NW;;;LW)";
+
+/// Access mask granted to the per-session restricting SID when one is supplied.
+///
+/// `FILE_GENERIC_READ | FILE_GENERIC_WRITE | SYNCHRONIZE` = `0x0012019F`:
+///   * `FILE_GENERIC_READ`  = `0x00120089` (`STANDARD_RIGHTS_READ`  | `FILE_READ_DATA`  | `FILE_READ_ATTRIBUTES`  | `FILE_READ_EA`  | `SYNCHRONIZE`)
+///   * `FILE_GENERIC_WRITE` = `0x00120116` (`STANDARD_RIGHTS_WRITE` | `FILE_WRITE_DATA` | `FILE_WRITE_ATTRIBUTES` | `FILE_WRITE_EA` | `FILE_APPEND_DATA` | `SYNCHRONIZE`)
+///   * union (including `SYNCHRONIZE` = `0x00100000`) = `0x0012019F`
+///
+/// **Critical: object-specific rights, NOT generic rights.**
+///
+/// SDDL mnemonic forms `GR` / `GW` / `GRGW` are stored verbatim in the DACL's
+/// ACE mask (as `GENERIC_READ` = `0x80000000` and `GENERIC_WRITE` =
+/// `0x40000000`). They are NOT expanded into object-specific rights at
+/// SD-conversion time — Windows only applies the object's generic mapping at
+/// access-check time. The mismatch between the child's access request
+/// (`CreateFileW(GENERIC_READ | GENERIC_WRITE)` → mapped to
+/// `FILE_GENERIC_READ | FILE_GENERIC_WRITE` = `0x12019F`) and the DACL's
+/// stored generic mask (`0xC0000000`) causes the access check to fail when
+/// the second DACL pass (against restricting SIDs) runs, because
+/// `0xC0000000 & 0x12019F == 0`.
+///
+/// The regression test
+/// `capability_pipe_admits_restricted_token_child_with_session_sid` walks the
+/// parsed DACL and asserts this ACE carries exactly `0x12019F` — that
+/// assertion would fail on any `G*` mnemonic. Auditors should read
+/// `.planning/debug/supervisor-pipe-access-denied.md` for the full analysis.
+const CAPABILITY_PIPE_RESTRICTING_SID_MASK: &str = "0x0012019F";
+
+/// Maximum accepted length for a session SID string when embedding in SDDL.
+///
+/// The synthetic SIDs produced by `generate_session_sid` in
+/// `nono-cli/src/exec_strategy_windows/restricted_token.rs` are
+/// `S-1-5-117-<u32>-<u32>-<u32>-<u32>` — well under 64 characters. 128 is a
+/// generous ceiling that still rejects pathological input (SDDL injection
+/// defense-in-depth alongside the character-class filter).
+const SESSION_SID_MAX_LEN: usize = 128;
 
 /// Length prefix size: 4 bytes (u32 big-endian)
 const LENGTH_PREFIX_SIZE: usize = 4;
@@ -105,7 +151,7 @@ impl SupervisorSocket {
 
     /// Bind a named pipe for the provided rendezvous path and wait for a client.
     pub fn bind(path: &Path) -> Result<Self> {
-        Self::bind_impl(path, false)
+        Self::bind_impl(path, false, None)
     }
 
     /// Bind a named pipe that accepts connections from Low Integrity processes.
@@ -116,15 +162,61 @@ impl SupervisorSocket {
     /// Built-in Administrators, and the owner) are preserved. On SDDL
     /// conversion failure this function fails secure — it does NOT fall back
     /// to a null security descriptor.
+    ///
+    /// Back-compat thin wrapper over
+    /// [`SupervisorSocket::bind_low_integrity_with_session_sid`] that forwards
+    /// `None` for the per-session restricting SID. The resulting SDDL is
+    /// byte-identical to the pre-fix [`CAPABILITY_PIPE_SDDL`] constant, so
+    /// in-process tests and Phase 18 AIPC pipe callers are unaffected.
     pub fn bind_low_integrity(path: &Path) -> Result<Self> {
-        Self::bind_impl(path, true)
+        Self::bind_low_integrity_with_session_sid(path, None)
     }
 
-    fn bind_impl(path: &Path, low_integrity: bool) -> Result<Self> {
+    /// Bind a Low-Integrity-accessible named pipe and, when a per-session
+    /// restricting SID is provided, attach an additional DACL ACE granting
+    /// `FILE_GENERIC_READ | FILE_GENERIC_WRITE | SYNCHRONIZE` to that SID.
+    ///
+    /// Phase 13 launches sandboxed children with
+    /// `CreateRestrictedToken(..., WRITE_RESTRICTED, ..., 1, &session_sid, ...)`
+    /// where `session_sid` is the synthetic per-session
+    /// `S-1-5-117-<guid>`. For any WRITE access (including `GENERIC_WRITE`
+    /// on `CreateFileW`) Windows performs the DACL check twice — once against
+    /// the child's normal SIDs, once against the restricting SID set. The
+    /// capability pipe's baseline DACL grants access only to SYSTEM,
+    /// BUILTIN\Administrators, and OWNER_RIGHTS; the restricting SID is
+    /// absent from every ACL on the system, so the second pass fails and
+    /// Windows returns `ERROR_ACCESS_DENIED` on the child's `CreateFileW`.
+    /// Passing `Some(&session_sid)` here appends
+    /// `(A;;0x120089;;;<session_sid>)` to the DACL so that second-pass check
+    /// succeeds.
+    ///
+    /// # Security (SDDL injection defense)
+    ///
+    /// The SID string is embedded into a dynamically constructed SDDL, which
+    /// makes it a direct injection surface. Before embedding, the SID is
+    /// validated via [`validate_session_sid_for_sddl`]: must begin with
+    /// `S-1-`, contain only ASCII digits and hyphens after the prefix, and
+    /// be no longer than [`SESSION_SID_MAX_LEN`]. Malformed input triggers a
+    /// fail-closed `NonoError::SandboxInit` error — this function does NOT
+    /// silently fall back to the no-SID SDDL path.
+    pub fn bind_low_integrity_with_session_sid(
+        path: &Path,
+        session_sid: Option<&str>,
+    ) -> Result<Self> {
+        Self::bind_impl(path, true, session_sid)
+    }
+
+    fn bind_impl(path: &Path, low_integrity: bool, session_sid: Option<&str>) -> Result<Self> {
         let (pipe_name, cleanup_rendezvous_path) = prepare_bind_pipe_name(path)?;
         let server_handle = if low_integrity {
-            create_low_integrity_named_pipe(&pipe_name)?
+            create_low_integrity_named_pipe(&pipe_name, session_sid)?
         } else {
+            // Non-low-integrity path has no restricting-SID DACL ACE — the
+            // caller does not expect Low-IL or restricted-token children.
+            debug_assert!(
+                session_sid.is_none(),
+                "session_sid is only meaningful on the low_integrity path"
+            );
             create_named_pipe(&pipe_name, false)?
         };
         if let Err(err) = write_pipe_rendezvous(path, &pipe_name) {
@@ -647,7 +739,10 @@ pub fn broker_socket_to_process(
 /// CONTEXT.md `<specifics>` line 168 — the caller is responsible for that
 /// canonicalization before reaching this helper.
 pub fn bind_aipc_pipe(canonical_name: &str, _direction: PipeDirection) -> Result<HANDLE> {
-    let (sa, _sd_guard) = build_low_integrity_security_attributes()?;
+    // AIPC pipes do not face WRITE_RESTRICTED + restricting-SID children; the
+    // target process is the child's own spawned AIPC peer which inherits the
+    // normal user token. The byte-identical pre-fix SDDL is correct here.
+    let (sa, _sd_guard) = build_low_integrity_security_attributes(None)?;
     let wide_name = to_wide(canonical_name);
 
     // SAFETY: `wide_name` is a valid null-terminated UTF-16 string with a
@@ -881,12 +976,80 @@ impl Drop for SecurityDescriptorGuard {
     }
 }
 
+/// Validate a per-session restricting SID string before embedding it in SDDL.
+///
+/// The SID is concatenated directly into an SDDL template, so any unexpected
+/// character (quote, parenthesis, semicolon, whitespace, NUL byte) could let a
+/// malicious or corrupted input subvert the resulting DACL. This function
+/// enforces a conservative allow-list matching the shape produced by
+/// `nono-cli`'s `generate_session_sid`:
+///
+/// - Non-empty, no longer than [`SESSION_SID_MAX_LEN`] characters.
+/// - Begins with ASCII `S-1-` (so `ConvertStringSidToSidW` will accept it and
+///   nothing else can prefix an alternate SDDL token).
+/// - Every byte after the `S-` prefix is an ASCII digit or `-`.
+///
+/// Returns an error on any violation — the caller MUST treat it as fatal and
+/// MUST NOT silently fall back to the no-SID SDDL path. Fail-closed is
+/// mandatory per CLAUDE.md § "Fail Secure".
+fn validate_session_sid_for_sddl(sid: &str) -> Result<()> {
+    if sid.is_empty() {
+        return Err(NonoError::SandboxInit(
+            "malformed session SID: empty string".to_string(),
+        ));
+    }
+    if sid.len() > SESSION_SID_MAX_LEN {
+        return Err(NonoError::SandboxInit(format!(
+            "malformed session SID: length {} exceeds maximum {}",
+            sid.len(),
+            SESSION_SID_MAX_LEN
+        )));
+    }
+    if !sid.starts_with("S-1-") {
+        return Err(NonoError::SandboxInit(format!(
+            "malformed session SID: must start with \"S-1-\" (got {sid:?})"
+        )));
+    }
+    // Character-class check on the tail (post `S-`): digits and hyphens only.
+    // `.bytes()` avoids any Unicode surprises — every accepted byte is ASCII.
+    let tail = &sid[2..];
+    for b in tail.bytes() {
+        if !(b.is_ascii_digit() || b == b'-') {
+            return Err(NonoError::SandboxInit(format!(
+                "malformed session SID: contains non-digit non-hyphen character (got {sid:?})"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Construct the SDDL string for the capability pipe, optionally appending an
+/// ACE that grants the per-session restricting SID `FILE_GENERIC_READ |
+/// FILE_GENERIC_WRITE | SYNCHRONIZE`.
+///
+/// With `session_sid = None`, returns exactly `CAPABILITY_PIPE_SDDL` — this
+/// preserves byte-identical behavior for in-process tests and AIPC pipe
+/// callers that never face a WRITE_RESTRICTED child.
+fn build_capability_pipe_sddl(session_sid: Option<&str>) -> Result<String> {
+    match session_sid {
+        None => Ok(CAPABILITY_PIPE_SDDL.to_string()),
+        Some(sid) => {
+            validate_session_sid_for_sddl(sid)?;
+            // Insert the restricting-SID ACE BEFORE the SACL. SDDL requires
+            // the DACL (`D:`) section to precede the SACL (`S:`) section.
+            Ok(format!(
+                "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)(A;;{mask};;;{sid})S:(ML;;NW;;;LW)",
+                mask = CAPABILITY_PIPE_RESTRICTING_SID_MASK,
+            ))
+        }
+    }
+}
+
 fn build_low_integrity_security_attributes(
+    session_sid: Option<&str>,
 ) -> Result<(SECURITY_ATTRIBUTES, SecurityDescriptorGuard)> {
-    let sddl_u16: Vec<u16> = CAPABILITY_PIPE_SDDL
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
+    let sddl_str = build_capability_pipe_sddl(session_sid)?;
+    let sddl_u16: Vec<u16> = sddl_str.encode_utf16().chain(std::iter::once(0)).collect();
     let mut security_descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
     let ok = unsafe {
         // SAFETY: `sddl_u16` is a valid null-terminated UTF-16 string and
@@ -914,8 +1077,8 @@ fn build_low_integrity_security_attributes(
     Ok((sa, guard))
 }
 
-fn create_low_integrity_named_pipe(pipe_name: &str) -> Result<HANDLE> {
-    let (sa, _sd_guard) = build_low_integrity_security_attributes()?;
+fn create_low_integrity_named_pipe(pipe_name: &str, session_sid: Option<&str>) -> Result<HANDLE> {
+    let (sa, _sd_guard) = build_low_integrity_security_attributes(session_sid)?;
     let wide_name = to_wide(pipe_name);
 
     // SAFETY: `wide_name` is a valid null-terminated UTF-16 string. `sa` carries
@@ -1329,6 +1492,356 @@ mod tests {
 
         done_tx.send(()).expect("signal server");
         server_thread.join().expect("server thread");
+    }
+
+    // ---------------------------------------------------------------------
+    // Regression test: capability pipe must admit a WRITE_RESTRICTED +
+    // per-session-restricting-SID child (Phase 13 token shape). Verifies the
+    // fix for the `supervisor-pipe-access-denied` debug session — without the
+    // dynamic `(A;;0x120089;;;<session_sid>)` DACL ACE, the second-pass access
+    // check against the restricting SID set fails with ERROR_ACCESS_DENIED.
+    // ---------------------------------------------------------------------
+
+    /// Pseudo-unique session SID for the regression test. Emulates the shape
+    /// produced by `nono-cli::exec_strategy_windows::restricted_token::generate_session_sid`
+    /// (`S-1-5-117-<u32>-<u32>-<u32>-<u32>`) without pulling `uuid` into the
+    /// library `dev-dependencies`.
+    #[cfg(target_os = "windows")]
+    fn fabricate_session_sid(seed: u32) -> String {
+        let pid = std::process::id();
+        // SAFETY-adjacent: values are bounded u32s; the SID stays within
+        // SESSION_SID_MAX_LEN and contains only ASCII digits + hyphens.
+        // 4 subauthorities after the `S-1-5-117-` prefix — matches the shape
+        // produced by `nono-cli::generate_session_sid` exactly.
+        format!(
+            "S-1-5-117-{pid}-{seed}-{}-{}",
+            seed.wrapping_mul(2654435761),
+            seed.wrapping_add(0x9E3779B1),
+        )
+    }
+
+    /// Build a WRITE_RESTRICTED token carrying `session_sid` as its single
+    /// restricting SID. Returns a raw HANDLE the caller closes via
+    /// `CloseHandle`. Mirrors
+    /// `nono-cli::exec_strategy_windows::restricted_token::create_restricted_token_with_sid`
+    /// but lives in-crate so this regression test doesn't depend on nono-cli.
+    #[cfg(target_os = "windows")]
+    fn build_write_restricted_token(session_sid: &str) -> HANDLE {
+        use windows_sys::Win32::Foundation::GetLastError;
+        use windows_sys::Win32::Security::Authorization::ConvertStringSidToSidW;
+        use windows_sys::Win32::Security::{
+            CreateRestrictedToken, SID_AND_ATTRIBUTES, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE,
+            TOKEN_IMPERSONATE, TOKEN_QUERY, WRITE_RESTRICTED,
+        };
+        use windows_sys::Win32::System::Threading::OpenProcessToken;
+
+        let mut h_current: HANDLE = std::ptr::null_mut();
+        // SAFETY: OpenProcessToken writes a valid handle or returns 0.
+        let ok = unsafe {
+            OpenProcessToken(
+                GetCurrentProcess(),
+                TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY | TOKEN_IMPERSONATE,
+                &mut h_current,
+            )
+        };
+        assert_ne!(ok, 0, "OpenProcessToken failed: {}", unsafe {
+            GetLastError()
+        });
+
+        let sid_u16: Vec<u16> = session_sid
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut sid_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+        // SAFETY: sid_u16 is valid null-terminated UTF-16; sid_ptr is a valid
+        // writable out-pointer. On success sid_ptr must be freed via LocalFree.
+        let ok = unsafe { ConvertStringSidToSidW(sid_u16.as_ptr(), &mut sid_ptr) };
+        assert_ne!(
+            ok,
+            0,
+            "ConvertStringSidToSidW failed for {session_sid:?}: {}",
+            unsafe { GetLastError() }
+        );
+
+        let sid_restrict = SID_AND_ATTRIBUTES {
+            Sid: sid_ptr,
+            Attributes: 0,
+        };
+        let mut h_restricted: HANDLE = std::ptr::null_mut();
+        // SAFETY: h_current is a live token handle; sid_restrict references
+        // sid_ptr (live until LocalFree below); h_restricted is a writable
+        // out-pointer. WRITE_RESTRICTED confines the second-pass DACL check to
+        // WRITE accesses only (Phase 13 contract).
+        let ok = unsafe {
+            CreateRestrictedToken(
+                h_current,
+                WRITE_RESTRICTED,
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                1,
+                &sid_restrict,
+                &mut h_restricted,
+            )
+        };
+
+        // SAFETY: sid_ptr was returned by ConvertStringSidToSidW above and is
+        // not retained after this point (CreateRestrictedToken has copied it
+        // into the new token).
+        unsafe { LocalFree(sid_ptr as _) };
+        // SAFETY: h_current is a live token handle we opened above.
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(h_current) };
+
+        assert_ne!(ok, 0, "CreateRestrictedToken failed: {}", unsafe {
+            GetLastError()
+        });
+        assert!(!h_restricted.is_null(), "restricted token handle is NULL");
+        h_restricted
+    }
+
+    /// Parse the SDDL produced by [`build_capability_pipe_sddl`] into a
+    /// security descriptor and walk the DACL, returning the list of
+    /// `(sid_string, access_mask)` tuples. This lets the regression test
+    /// verify the *structural shape* of the DACL — specifically that the
+    /// per-session restricting-SID ACE is present with the expected
+    /// `FILE_GENERIC_READ | FILE_GENERIC_WRITE | SYNCHRONIZE` (`0x12019F`)
+    /// mask — without having to simulate a WRITE_RESTRICTED child process
+    /// end-to-end (which requires `CreateProcessAsUserW` and is too heavy for
+    /// a unit test). The production repro in
+    /// `.planning/debug/supervisor-pipe-access-denied.md` is the teeth-level
+    /// verification; this test guards against regressions in the SDDL builder.
+    #[cfg(target_os = "windows")]
+    fn extract_dacl_aces_from_sddl(sddl: &str) -> Vec<(String, u32)> {
+        use windows_sys::Win32::Foundation::GetLastError;
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+        };
+        use windows_sys::Win32::Security::{
+            AclSizeInformation, GetAclInformation, GetSecurityDescriptorDacl, ACCESS_ALLOWED_ACE,
+            ACL, ACL_SIZE_INFORMATION,
+        };
+
+        // Convert SDDL → security descriptor.
+        let sddl_u16: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        // SAFETY: sddl_u16 is valid null-terminated UTF-16; sd is writable.
+        let ok = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl_u16.as_ptr(),
+                SDDL_REVISION_1,
+                &mut sd,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(
+            ok,
+            0,
+            "ConvertStringSecurityDescriptorToSecurityDescriptorW failed: {}",
+            unsafe { GetLastError() }
+        );
+        let _sd_guard = SecurityDescriptorGuard(sd);
+
+        // Pull out the DACL.
+        let mut present: i32 = 0;
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        let mut defaulted: i32 = 0;
+        // SAFETY: all out-pointers are valid writable stack storage. `sd` is
+        // live for the lifetime of _sd_guard.
+        let ok = unsafe { GetSecurityDescriptorDacl(sd, &mut present, &mut dacl, &mut defaulted) };
+        assert_ne!(ok, 0, "GetSecurityDescriptorDacl failed");
+        assert_ne!(present, 0, "expected DACL to be present");
+        assert!(!dacl.is_null(), "expected non-NULL DACL pointer");
+
+        // Walk the ACE list.
+        let mut info: ACL_SIZE_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: info is writable; dacl is a live ACL pointer.
+        let ok = unsafe {
+            GetAclInformation(
+                dacl,
+                &mut info as *mut _ as *mut _,
+                std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+                AclSizeInformation,
+            )
+        };
+        assert_ne!(ok, 0, "GetAclInformation failed");
+
+        let mut out = Vec::new();
+        for i in 0..info.AceCount {
+            let mut ace_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+            // SAFETY: dacl is live; ace_ptr is writable.
+            let ok = unsafe { windows_sys::Win32::Security::GetAce(dacl, i, &mut ace_ptr) };
+            assert_ne!(ok, 0, "GetAce({i}) failed");
+            // ACCESS_ALLOWED_ACE is the prefix of the ACE struct for type 0.
+            // SAFETY: GetAce returned a valid pointer into the ACL buffer.
+            let ace = unsafe { &*(ace_ptr as *const ACCESS_ALLOWED_ACE) };
+            // The SID immediately follows the ACCESS_ALLOWED_ACE's header +
+            // AceSize fields. In windows-sys 0.59 ACCESS_ALLOWED_ACE is laid
+            // out as `{ Header, Mask, SidStart: u32 }` where `SidStart` is the
+            // first DWORD of the variable-length SID.
+            let sid_ptr = std::ptr::addr_of!(ace.SidStart) as *mut std::ffi::c_void;
+            let mut sid_str_ptr: *mut u16 = std::ptr::null_mut();
+            // SAFETY: sid_ptr points into the ACE's SID field; sid_str_ptr is
+            // a writable out-pointer. Output must be freed via LocalFree.
+            let ok = unsafe { ConvertSidToStringSidW(sid_ptr, &mut sid_str_ptr) };
+            assert_ne!(ok, 0, "ConvertSidToStringSidW failed");
+            // Read the null-terminated UTF-16 string.
+            let mut len = 0usize;
+            while unsafe { *sid_str_ptr.add(len) } != 0 {
+                len += 1;
+            }
+            let slice = unsafe { std::slice::from_raw_parts(sid_str_ptr, len) };
+            let sid_str = String::from_utf16_lossy(slice);
+            unsafe { LocalFree(sid_str_ptr as _) };
+            out.push((sid_str, ace.Mask));
+        }
+        out
+    }
+
+    /// **Regression test for `supervisor-pipe-access-denied`** (Phase 21 UAT
+    /// G-01).
+    ///
+    /// Verifies that the capability pipe's DACL — built via
+    /// [`build_capability_pipe_sddl`] with a per-session restricting SID —
+    /// contains an explicit ACE granting `FILE_GENERIC_READ |
+    /// FILE_GENERIC_WRITE | SYNCHRONIZE` (`0x12019F`) to that per-session
+    /// SID. This is exactly the mask Windows requires for a
+    /// WRITE_RESTRICTED child's `CreateFileW(pipe, GENERIC_READ |
+    /// GENERIC_WRITE)` to pass the second-pass restricting-SID access check.
+    ///
+    /// The test walks the parsed DACL via `GetSecurityDescriptorDacl +
+    /// GetAclInformation + GetAce + ConvertSidToStringSidW`, which guarantees
+    /// the ACE was not silently dropped at SD-conversion time (our primary
+    /// concern is an SDDL-injection or SID-format mismatch that would cause
+    /// `ConvertStringSecurityDescriptorToSecurityDescriptorW` to skip the
+    /// ACE).
+    ///
+    /// End-to-end verification of the WRITE_RESTRICTED child behavior
+    /// requires `CreateProcessAsUserW` which is out of scope for a library
+    /// unit test — that verification lives in the production repro
+    /// documented at
+    /// `.planning/debug/supervisor-pipe-access-denied.md`.
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn capability_pipe_admits_restricted_token_child_with_session_sid() {
+        let session_sid = fabricate_session_sid(0xBADC0FFE);
+
+        // Validate that a WRITE_RESTRICTED token carrying this SID as its
+        // restricting SID can even be constructed. If the SID format (shape
+        // produced by `nono-cli::generate_session_sid`) were rejected by
+        // `CreateRestrictedToken`, the whole fix would be moot.
+        let restricted_token = build_write_restricted_token(&session_sid);
+        // SAFETY: restricted_token is owned only by this scope.
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(restricted_token) };
+
+        let sddl = build_capability_pipe_sddl(Some(&session_sid))
+            .expect("build_capability_pipe_sddl for valid session SID must succeed");
+        assert!(
+            sddl.contains(&session_sid),
+            "SDDL should embed the session SID verbatim: {sddl}"
+        );
+
+        // Walk the converted DACL and confirm the session-SID ACE is
+        // present with the expected mask. Access mask 0x12019F ==
+        // FILE_GENERIC_READ | FILE_GENERIC_WRITE | SYNCHRONIZE — the
+        // generic-mapped result of `GRGW` applied against the file generic
+        // mapping at SD-conversion time.
+        let aces = extract_dacl_aces_from_sddl(&sddl);
+        let matching = aces
+            .iter()
+            .find(|(sid, _)| sid.eq_ignore_ascii_case(&session_sid))
+            .unwrap_or_else(|| {
+                panic!(
+                    "session-SID ACE missing from DACL — SDDL-injection guard may be dropping \
+                     the SID, or the generic-mnemonic mask was silently ignored. SDDL={sddl}, \
+                     aces={aces:?}"
+                )
+            });
+        assert_eq!(
+            matching.1, 0x0012_019F,
+            "session-SID ACE mask is 0x{:08X}, expected 0x0012019F (FILE_GENERIC_READ | \
+             FILE_GENERIC_WRITE | SYNCHRONIZE). A different mask would break the \
+             WRITE_RESTRICTED child's CreateFileW access check. SDDL={sddl}",
+            matching.1
+        );
+
+        // Pre-fix guard: when session_sid is None, the DACL MUST NOT contain
+        // an ACE for the restricting SID — the whole point of the fix is
+        // that the pre-fix DACL lacked this ACE and denied WRITE_RESTRICTED
+        // children. If this assertion fails, the `None` path regressed.
+        let baseline_sddl = build_capability_pipe_sddl(None).expect("no-SID path must succeed");
+        assert_eq!(baseline_sddl, CAPABILITY_PIPE_SDDL);
+        let baseline_aces = extract_dacl_aces_from_sddl(&baseline_sddl);
+        assert!(
+            !baseline_aces
+                .iter()
+                .any(|(sid, _)| sid.starts_with("S-1-5-117-")),
+            "baseline (no-SID) DACL must not contain any S-1-5-117-* ACE; aces={baseline_aces:?}"
+        );
+    }
+
+    /// `validate_session_sid_for_sddl` must reject any input that could
+    /// smuggle an extra SDDL token through string concatenation. This is the
+    /// defense-in-depth unit test for the SDDL-injection guard.
+    #[test]
+    fn validate_session_sid_for_sddl_rejects_injection() {
+        // Accepted shapes:
+        assert!(validate_session_sid_for_sddl("S-1-5-117-1-2-3-4").is_ok());
+        assert!(validate_session_sid_for_sddl("S-1-5-117-4294967295-0-0-0").is_ok());
+
+        // Rejected shapes:
+        assert!(validate_session_sid_for_sddl("").is_err());
+        assert!(validate_session_sid_for_sddl("S-1-5-117").is_ok()); // digits + hyphens only — fine
+        assert!(
+            validate_session_sid_for_sddl("X-1-5-117-1").is_err(),
+            "must start with S-1-"
+        );
+        assert!(
+            validate_session_sid_for_sddl("S-1-5-117-1)(A;;GA;;;WD").is_err(),
+            "injection via ACE"
+        );
+        assert!(
+            validate_session_sid_for_sddl("S-1-5-117-1;A").is_err(),
+            "semicolon"
+        );
+        assert!(
+            validate_session_sid_for_sddl("S-1-5-117-1 ").is_err(),
+            "trailing space"
+        );
+        assert!(
+            validate_session_sid_for_sddl("S-1-5-117-\0").is_err(),
+            "embedded NUL"
+        );
+        assert!(
+            validate_session_sid_for_sddl("s-1-5-117-1").is_err(),
+            "lowercase prefix"
+        );
+        let too_long = format!("S-1-5-117-{}", "1".repeat(SESSION_SID_MAX_LEN));
+        assert!(
+            validate_session_sid_for_sddl(&too_long).is_err(),
+            "length cap"
+        );
+    }
+
+    /// `build_capability_pipe_sddl(None)` must return the byte-identical
+    /// pre-fix constant so in-process tests and AIPC pipe callers are not
+    /// perturbed by the restricted-SID plumbing.
+    #[test]
+    fn build_capability_pipe_sddl_none_matches_constant() {
+        let sddl = build_capability_pipe_sddl(None).expect("none path must succeed");
+        assert_eq!(sddl, CAPABILITY_PIPE_SDDL);
+    }
+
+    /// `build_capability_pipe_sddl(Some(sid))` must embed the ACE before the
+    /// SACL and preserve the `D:P` protected prefix + Low-IL SACL verbatim.
+    #[test]
+    fn build_capability_pipe_sddl_some_embeds_ace_before_sacl() {
+        let sid = "S-1-5-117-1-2-3-4";
+        let sddl = build_capability_pipe_sddl(Some(sid)).expect("valid sid must build");
+        let expected = format!(
+            "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)(A;;0x0012019F;;;{sid})S:(ML;;NW;;;LW)"
+        );
+        assert_eq!(sddl, expected);
     }
 
     #[test]

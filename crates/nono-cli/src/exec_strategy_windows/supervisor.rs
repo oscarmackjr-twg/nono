@@ -235,6 +235,13 @@ pub(super) struct WindowsSupervisorRuntime {
     session_token: Option<String>,
     /// Rendezvous path written/cleaned up by the capability pipe server thread.
     cap_pipe_rendezvous_path: Option<std::path::PathBuf>,
+    /// Per-session restricting SID threaded through to the capability pipe
+    /// server's bind call so the DACL admits the sandboxed child's
+    /// WRITE_RESTRICTED token on `CreateFileW(pipe, GENERIC_READ |
+    /// GENERIC_WRITE)`. See debug session
+    /// `.planning/debug/supervisor-pipe-access-denied.md`. `None` preserves
+    /// the byte-identical pre-fix SDDL (legacy / non-restricted callers).
+    session_sid: Option<String>,
     /// Receiver end drained by the main event loop to merge audit entries
     /// produced by the capability pipe server thread.
     audit_rx: Option<std::sync::mpsc::Receiver<Vec<AuditEntry>>>,
@@ -346,6 +353,7 @@ impl WindowsSupervisorRuntime {
             interactive_shell: supervisor.interactive_shell,
             session_token: supervisor.session_token.map(str::to_string),
             cap_pipe_rendezvous_path: supervisor.cap_pipe_rendezvous_path.map(|p| p.to_path_buf()),
+            session_sid: supervisor.session_sid.clone(),
             audit_rx: None,
             child_process_for_broker: Arc::new(Mutex::new(None)),
             approval_backend: supervisor.approval_backend.clone(),
@@ -433,6 +441,12 @@ impl WindowsSupervisorRuntime {
         let session_id = self.session_id.clone();
         let user_session_id = self.user_session_id.clone();
         let backend = self.approval_backend.clone();
+        // Debug session `supervisor-pipe-access-denied`: clone the
+        // per-session restricting SID into the background thread so the
+        // capability pipe's DACL admits the WRITE_RESTRICTED child's
+        // `CreateFileW(GENERIC_READ | GENERIC_WRITE)` second-pass access
+        // check. `None` => byte-identical pre-fix SDDL.
+        let session_sid = self.session_sid.clone();
         // Phase 18 Plan 18-03: pass the supervisor's own containment Job
         // HANDLE through to the capability pipe server thread for the
         // containment-Job runtime guard in `handle_job_object_request`. The
@@ -452,7 +466,10 @@ impl WindowsSupervisorRuntime {
             // capture would detect the `runtime_containment_job.0` access
             // below and capture only the inner field, triggering an E0277.
             let runtime_containment_job_local: SendableHandle = runtime_containment_job;
-            let mut sock = match nono::SupervisorSocket::bind_low_integrity(&rendezvous_path) {
+            let mut sock = match nono::SupervisorSocket::bind_low_integrity_with_session_sid(
+                &rendezvous_path,
+                session_sid.as_deref(),
+            ) {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::error!(
