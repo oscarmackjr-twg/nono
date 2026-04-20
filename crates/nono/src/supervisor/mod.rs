@@ -37,8 +37,8 @@ pub mod socket;
 pub mod types;
 
 pub use aipc_sdk::{
-    request_event, request_job_object, request_mutex, request_pipe, request_socket, unsupported_platform_message,
-    RawHandle, RawSocket,
+    request_event, request_job_object, request_mutex, request_pipe, request_socket,
+    unsupported_platform_message, RawHandle, RawSocket,
 };
 pub use socket::SupervisorSocket;
 #[cfg(target_os = "windows")]

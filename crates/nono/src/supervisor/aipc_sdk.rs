@@ -42,6 +42,14 @@ use crate::error::{NonoError, Result};
 use crate::supervisor::socket::SupervisorSocket;
 use crate::supervisor::types::{PipeDirection, SocketProtocol, SocketRole};
 
+#[cfg(target_os = "windows")]
+use crate::capability::AccessMode;
+#[cfg(target_os = "windows")]
+use crate::supervisor::types::{
+    ApprovalDecision, CapabilityRequest, HandleKind, HandleTarget, ResourceGrant,
+    ResourceTransferKind, SupervisorMessage, SupervisorResponse,
+};
+
 /// Type alias for a raw Windows `SOCKET` value transported as `u64` over the
 /// wire. The wire shape matches Phase 11's `raw_handle: u64` representation;
 /// this alias disambiguates caller intent at the `request_socket` method
@@ -59,8 +67,10 @@ pub type RawHandle = u64;
 /// it without literal-string duplication.
 #[must_use]
 pub fn unsupported_platform_message() -> &'static str {
-    // TDD RED stub — will be replaced with the CONTEXT.md D-09 text in GREEN.
-    "aipc_sdk placeholder message — RED stub"
+    "AIPC handle brokering is Windows-only on v2.1; Unix has SCM_RIGHTS \
+     file-descriptor passing as the natural equivalent for sockets/pipes \
+     (separate cross-platform requirement, future milestone). Events, \
+     mutexes, and Job Objects have no direct Unix analog."
 }
 
 // -------------------------------------------------------------------------
@@ -69,21 +79,44 @@ pub fn unsupported_platform_message() -> &'static str {
 
 /// Request a brokered Windows `SOCKET` from the supervisor. Returns the raw
 /// socket reconstructed from the supervisor-provided `WSAPROTOCOL_INFOW`
-/// blob.
+/// blob via `WSASocketW(FROM_PROTOCOL_INFO, ...)`.
+///
+/// # Errors
+///
+/// Returns `NonoError::UnsupportedPlatform` on non-Windows builds, and
+/// `NonoError::SandboxInit` on all other failure modes (transport error,
+/// supervisor denial, blob deserialization failure, `WSASocketW` failure).
 #[cfg(target_os = "windows")]
 pub fn request_socket(
-    _cap_pipe: &mut SupervisorSocket,
-    _host: &str,
-    _port: u16,
-    _protocol: SocketProtocol,
-    _role: SocketRole,
-    _access_mask: u32,
-    _reason: Option<&str>,
+    cap_pipe: &mut SupervisorSocket,
+    host: &str,
+    port: u16,
+    protocol: SocketProtocol,
+    role: SocketRole,
+    access_mask: u32,
+    reason: Option<&str>,
 ) -> Result<RawSocket> {
-    // TDD RED stub — real implementation lands in GREEN.
-    Err(NonoError::SandboxInit(
-        "aipc_sdk::request_socket not implemented (RED stub)".to_string(),
-    ))
+    let target = HandleTarget::SocketEndpoint {
+        protocol,
+        host: host.to_string(),
+        port,
+        role,
+    };
+    let grant = send_capability_request(cap_pipe, HandleKind::Socket, target, access_mask, reason)?;
+    // Defense-in-depth: the supervisor is supposed to enforce the Socket
+    // transport contract (Plan 18-02), but we double-check on the client
+    // side so a corrupted response doesn't get silently misinterpreted as
+    // a HANDLE. T-18-04-04 mitigation.
+    if grant.transfer != ResourceTransferKind::SocketProtocolInfoBlob {
+        return Err(NonoError::SandboxInit(format!(
+            "expected SocketProtocolInfoBlob transfer for Socket grant, got {:?}",
+            grant.transfer
+        )));
+    }
+    let blob = grant.protocol_info_blob.ok_or_else(|| {
+        NonoError::SandboxInit("Socket grant missing protocol_info_blob".to_string())
+    })?;
+    reconstruct_socket_from_blob(&blob)
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -106,16 +139,30 @@ pub fn request_socket(
 // -------------------------------------------------------------------------
 
 /// Request a brokered named-pipe handle from the supervisor.
+///
+/// The `direction` is encoded server-side into an access mask derived from
+/// Plan 18-02's `GENERIC_READ`/`GENERIC_WRITE` mapping. The SDK's
+/// `access_mask` value derived from direction is informational here; the
+/// supervisor recomputes the mask from `HandleTarget::PipeName` +
+/// `PipeDirection` policy gate.
+///
+/// # Errors
+///
+/// Returns `NonoError::UnsupportedPlatform` on non-Windows builds, and
+/// `NonoError::SandboxInit` on all other failure modes.
 #[cfg(target_os = "windows")]
 pub fn request_pipe(
-    _cap_pipe: &mut SupervisorSocket,
-    _name: &str,
-    _direction: PipeDirection,
-    _reason: Option<&str>,
+    cap_pipe: &mut SupervisorSocket,
+    name: &str,
+    direction: PipeDirection,
+    reason: Option<&str>,
 ) -> Result<RawHandle> {
-    Err(NonoError::SandboxInit(
-        "aipc_sdk::request_pipe not implemented (RED stub)".to_string(),
-    ))
+    let target = HandleTarget::PipeName {
+        name: name.to_string(),
+    };
+    let access_mask = pipe_mask_for(direction);
+    let grant = send_capability_request(cap_pipe, HandleKind::Pipe, target, access_mask, reason)?;
+    extract_duplicated_handle(&grant, "Pipe")
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -135,16 +182,24 @@ pub fn request_pipe(
 // -------------------------------------------------------------------------
 
 /// Request a brokered Job Object handle from the supervisor.
+///
+/// # Errors
+///
+/// Returns `NonoError::UnsupportedPlatform` on non-Windows builds, and
+/// `NonoError::SandboxInit` on all other failure modes.
 #[cfg(target_os = "windows")]
 pub fn request_job_object(
-    _cap_pipe: &mut SupervisorSocket,
-    _name: &str,
-    _access_mask: u32,
-    _reason: Option<&str>,
+    cap_pipe: &mut SupervisorSocket,
+    name: &str,
+    access_mask: u32,
+    reason: Option<&str>,
 ) -> Result<RawHandle> {
-    Err(NonoError::SandboxInit(
-        "aipc_sdk::request_job_object not implemented (RED stub)".to_string(),
-    ))
+    let target = HandleTarget::JobObjectName {
+        name: name.to_string(),
+    };
+    let grant =
+        send_capability_request(cap_pipe, HandleKind::JobObject, target, access_mask, reason)?;
+    extract_duplicated_handle(&grant, "JobObject")
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -164,16 +219,23 @@ pub fn request_job_object(
 // -------------------------------------------------------------------------
 
 /// Request a brokered Event kernel-object handle from the supervisor.
+///
+/// # Errors
+///
+/// Returns `NonoError::UnsupportedPlatform` on non-Windows builds, and
+/// `NonoError::SandboxInit` on all other failure modes.
 #[cfg(target_os = "windows")]
 pub fn request_event(
-    _cap_pipe: &mut SupervisorSocket,
-    _name: &str,
-    _access_mask: u32,
-    _reason: Option<&str>,
+    cap_pipe: &mut SupervisorSocket,
+    name: &str,
+    access_mask: u32,
+    reason: Option<&str>,
 ) -> Result<RawHandle> {
-    Err(NonoError::SandboxInit(
-        "aipc_sdk::request_event not implemented (RED stub)".to_string(),
-    ))
+    let target = HandleTarget::EventName {
+        name: name.to_string(),
+    };
+    let grant = send_capability_request(cap_pipe, HandleKind::Event, target, access_mask, reason)?;
+    extract_duplicated_handle(&grant, "Event")
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -193,16 +255,23 @@ pub fn request_event(
 // -------------------------------------------------------------------------
 
 /// Request a brokered Mutex kernel-object handle from the supervisor.
+///
+/// # Errors
+///
+/// Returns `NonoError::UnsupportedPlatform` on non-Windows builds, and
+/// `NonoError::SandboxInit` on all other failure modes.
 #[cfg(target_os = "windows")]
 pub fn request_mutex(
-    _cap_pipe: &mut SupervisorSocket,
-    _name: &str,
-    _access_mask: u32,
-    _reason: Option<&str>,
+    cap_pipe: &mut SupervisorSocket,
+    name: &str,
+    access_mask: u32,
+    reason: Option<&str>,
 ) -> Result<RawHandle> {
-    Err(NonoError::SandboxInit(
-        "aipc_sdk::request_mutex not implemented (RED stub)".to_string(),
-    ))
+    let target = HandleTarget::MutexName {
+        name: name.to_string(),
+    };
+    let grant = send_capability_request(cap_pipe, HandleKind::Mutex, target, access_mask, reason)?;
+    extract_duplicated_handle(&grant, "Mutex")
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -215,6 +284,216 @@ pub fn request_mutex(
     Err(NonoError::UnsupportedPlatform(
         unsupported_platform_message().to_string(),
     ))
+}
+
+// -------------------------------------------------------------------------
+// Shared Windows-only helpers (private to module)
+// -------------------------------------------------------------------------
+
+/// Derive a GENERIC_READ/GENERIC_WRITE access mask from a [`PipeDirection`],
+/// matching Plan 18-02's server-side mapping.
+#[cfg(target_os = "windows")]
+fn pipe_mask_for(direction: PipeDirection) -> u32 {
+    // Mirrors windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE}
+    // without adding a new import at the module top (the constants are
+    // `crate::supervisor::policy::GENERIC_READ` / `GENERIC_WRITE`).
+    match direction {
+        PipeDirection::Read => crate::supervisor::policy::GENERIC_READ,
+        PipeDirection::Write => crate::supervisor::policy::GENERIC_WRITE,
+        PipeDirection::ReadWrite => {
+            crate::supervisor::policy::GENERIC_READ | crate::supervisor::policy::GENERIC_WRITE
+        }
+    }
+}
+
+/// Extract the duplicated raw HANDLE from a `DuplicatedWindowsHandle` grant,
+/// validating the transfer contract. Shared by Event / Mutex / Pipe /
+/// JobObject paths (all of which use the `DuplicatedWindowsHandle` transport
+/// per Plans 18-01..18-03). T-18-04-04 mitigation: catches corrupted
+/// responses that mis-tag the transport.
+#[cfg(target_os = "windows")]
+fn extract_duplicated_handle(grant: &ResourceGrant, kind_name: &str) -> Result<RawHandle> {
+    if grant.transfer != ResourceTransferKind::DuplicatedWindowsHandle {
+        return Err(NonoError::SandboxInit(format!(
+            "expected DuplicatedWindowsHandle transfer for {kind_name} grant, got {:?}",
+            grant.transfer
+        )));
+    }
+    grant
+        .raw_handle
+        .ok_or_else(|| NonoError::SandboxInit(format!("{kind_name} grant missing raw_handle")))
+}
+
+/// Generate a 128-bit hex request_id via the workspace `getrandom` dep (no
+/// new crate dependency). Rendered as 32 lowercase hex characters.
+#[cfg(target_os = "windows")]
+fn generate_request_id() -> Result<String> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes)
+        .map_err(|e| NonoError::SandboxInit(format!("getrandom for request_id failed: {e}")))?;
+    // Render as lowercase hex without pulling in the `hex` crate (which is
+    // not a `nono` direct dep).
+    let mut out = String::with_capacity(32);
+    for byte in bytes {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    Ok(out)
+}
+
+/// Construct a [`CapabilityRequest`], send it, wait for a response,
+/// demultiplex the [`ApprovalDecision`] into a typed `Result<ResourceGrant>`.
+/// Shared by all 5 Windows-arm SDK methods.
+///
+/// - Reads `NONO_SESSION_TOKEN` from env (fail-secure if absent).
+/// - Reads `NONO_SESSION_ID` from env (audit-correlation only; accept empty).
+/// - Stamps `std::process::id()` as `child_pid` for audit correlation.
+/// - Validates `response.request_id == request.request_id` (T-18-04-08).
+#[cfg(target_os = "windows")]
+fn send_capability_request(
+    cap_pipe: &mut SupervisorSocket,
+    kind: HandleKind,
+    target: HandleTarget,
+    access_mask: u32,
+    reason: Option<&str>,
+) -> Result<ResourceGrant> {
+    let request_id = generate_request_id()?;
+
+    // Phase 11 D-01 contract: hex-encoded 32 bytes, set by
+    // execution_runtime.rs on child spawn. Missing → fail-secure with a
+    // clear error. The supervisor would reject the request anyway via its
+    // constant-time token check, but failing fast client-side gives a
+    // better diagnostic. T-18-04-05 mitigation: error message does NOT
+    // include any token value.
+    let session_token = std::env::var("NONO_SESSION_TOKEN").map_err(|_| {
+        NonoError::SandboxInit(
+            "NONO_SESSION_TOKEN env var not set; AIPC SDK requires Phase 11 supervisor plumbing"
+                .to_string(),
+        )
+    })?;
+
+    // session_id is audit-correlation only per Phase 11 D-01; missing env →
+    // empty string is acceptable (T-18-04-09).
+    let session_id = std::env::var("NONO_SESSION_ID").unwrap_or_default();
+
+    let child_pid = std::process::id();
+
+    // Phase 11 `path` field is deprecated in place per 18-01 D-01. For AIPC
+    // requests the target enum carries the typed payload; the `path` field
+    // stays at its default (empty PathBuf) since the supervisor dispatches
+    // on `kind` + `target`, not `path`.
+    #[allow(deprecated)]
+    let req = CapabilityRequest {
+        request_id: request_id.clone(),
+        path: std::path::PathBuf::new(),
+        kind,
+        target: Some(target),
+        access_mask,
+        // Phase 11 access field preserved for File path; for AIPC kinds the
+        // access information lives in access_mask. Use AccessMode::Read as
+        // a benign default — the supervisor ignores this field for non-File
+        // kinds per Plan 18-01 dispatch.
+        access: AccessMode::Read,
+        reason: reason.map(str::to_string),
+        child_pid,
+        session_id,
+        session_token,
+    };
+
+    cap_pipe.send_message(&SupervisorMessage::Request(req))?;
+
+    match cap_pipe.recv_response()? {
+        SupervisorResponse::Decision {
+            request_id: resp_id,
+            decision,
+            grant,
+        } => {
+            if resp_id != request_id {
+                // T-18-04-08 mitigation: response/request id drift.
+                return Err(NonoError::SandboxInit(format!(
+                    "supervisor response request_id mismatch: expected {request_id}, got {resp_id}"
+                )));
+            }
+            match decision {
+                ApprovalDecision::Granted => grant.ok_or_else(|| {
+                    NonoError::SandboxInit(
+                        "supervisor granted but returned no ResourceGrant".to_string(),
+                    )
+                }),
+                ApprovalDecision::Denied { reason } => Err(NonoError::SandboxInit(format!(
+                    "supervisor denied capability: {reason}"
+                ))),
+                ApprovalDecision::Timeout => Err(NonoError::SandboxInit(
+                    "supervisor approval timed out".to_string(),
+                )),
+            }
+        }
+        other => Err(NonoError::SandboxInit(format!(
+            "expected Decision response, got {other:?}"
+        ))),
+    }
+}
+
+/// Reconstruct a live `SOCKET` in this process from a serialized
+/// `WSAPROTOCOL_INFOW` blob produced by the supervisor via
+/// `WSADuplicateSocketW`. The blob is single-use and target-PID-bound per
+/// the Microsoft API contract.
+///
+/// T-18-04-04 mitigation: validates the blob length matches the struct size
+/// BEFORE any `unsafe` read; mismatch returns a descriptive
+/// `NonoError::SandboxInit` with the exact byte counts.
+#[cfg(target_os = "windows")]
+fn reconstruct_socket_from_blob(blob: &[u8]) -> Result<RawSocket> {
+    use std::mem::size_of;
+    use windows_sys::Win32::Networking::WinSock::{
+        WSAGetLastError, WSASocketW, AF_UNSPEC, FROM_PROTOCOL_INFO, INVALID_SOCKET,
+        WSAPROTOCOL_INFOW, WSA_FLAG_OVERLAPPED,
+    };
+
+    let expected = size_of::<WSAPROTOCOL_INFOW>();
+    if blob.len() != expected {
+        return Err(NonoError::SandboxInit(format!(
+            "WSAPROTOCOL_INFOW blob length mismatch: expected {expected} bytes, got {} bytes \
+             (likely truncated transport)",
+            blob.len()
+        )));
+    }
+
+    // SAFETY: `blob` is a &[u8] slice of exactly size_of::<WSAPROTOCOL_INFOW>()
+    // bytes (validated above). WSAPROTOCOL_INFOW is `#[repr(C)]` per the
+    // Microsoft API contract. `read_unaligned` is used because the blob came
+    // over the wire as `Vec<u8>` with no alignment guarantee. The blob was
+    // produced by WSADuplicateSocketW server-side (Plan 18-02) and
+    // serialized as raw bytes; we deserialize back to the same struct shape.
+    let proto_info: WSAPROTOCOL_INFOW =
+        unsafe { std::ptr::read_unaligned(blob.as_ptr() as *const WSAPROTOCOL_INFOW) };
+
+    // SAFETY: WSASocketW with FROM_PROTOCOL_INFO and a non-null pointer to a
+    // valid WSAPROTOCOL_INFOW reconstructs the duplicated socket. The blob
+    // is single-use and target-PID-bound (per Plan 18-02 lifecycle); calling
+    // on the wrong PID returns INVALID_SOCKET with WSAEINVAL, which is
+    // caught and propagated as a typed error below. `AF_UNSPEC` /
+    // `FROM_PROTOCOL_INFO` for the type and protocol slots instruct WSASocketW
+    // to pull those values from the proto_info struct.
+    let sock = unsafe {
+        WSASocketW(
+            AF_UNSPEC as i32,
+            FROM_PROTOCOL_INFO,
+            FROM_PROTOCOL_INFO,
+            &proto_info as *const _,
+            0,
+            WSA_FLAG_OVERLAPPED,
+        )
+    };
+    if sock == INVALID_SOCKET {
+        // SAFETY: WSAGetLastError is a leaf-safe Win32 call that returns
+        // thread-local Winsock error state. Always safe to call immediately
+        // after a Winsock failure.
+        let err = unsafe { WSAGetLastError() };
+        return Err(NonoError::SandboxInit(format!(
+            "WSASocketW(FROM_PROTOCOL_INFO) failed: WSAGetLastError = {err}"
+        )));
+    }
+    Ok(sock as RawSocket)
 }
 
 // -------------------------------------------------------------------------
@@ -352,6 +631,15 @@ mod tests {
     }
 
     #[cfg(target_os = "windows")]
+    // Tests in this module mutate NONO_SESSION_TOKEN / NONO_SESSION_ID via
+    // the local `with_test_session_token` save/restore helper. The
+    // workspace `clippy.toml` disallows bare `std::env::set_var` /
+    // `std::env::remove_var`, recommending `EnvVarGuard` from
+    // `crates/nono-cli/src/test_env.rs`. That helper is not reachable from
+    // the `nono` crate without introducing a circular dep. Mirrors the
+    // `#[allow(clippy::disallowed_methods)]` pattern already used by
+    // `crates/nono/src/keystore.rs::tests` (line 1534, same rationale).
+    #[allow(clippy::disallowed_methods)]
     mod windows_loopback_tests {
         use super::*;
         use crate::capability::AccessMode;
