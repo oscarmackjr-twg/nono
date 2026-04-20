@@ -1,0 +1,215 @@
+---
+title: AIPC UAT Cookbook
+description: Copy-paste recipes for validating Phase 18 AIPC handle-brokering on Windows, including the 5 SDK request_* methods and CONIN$ approval-prompt rendering
+---
+
+This cookbook is for manually validating Phase 18 (AIPC-01) on a Windows host. Every command is copy-paste — no prior Rust or nono experience needed.
+
+What gets validated:
+
+- The 5 child-side SDK methods (`request_event`, `request_mutex`, `request_pipe`, `request_socket`, `request_job_object`)
+- The CONIN$ approval prompt rendering for each handle kind (the D-04 per-kind templates)
+- End-to-end broker pipeline (child → supervisor → CONIN$ → DuplicateHandle → child)
+
+## Prerequisites
+
+1. **Windows 10 1607+ or Windows 11** (`CompareObjectHandles` and Job Object nested containment both require 1607).
+2. **Rust toolchain** (stable, 1.77+). Install from <https://rustup.rs>.
+3. **nono repo checked out.** This cookbook assumes you're running from the repo root (the folder containing `Cargo.toml`, `crates\`, `docs\`).
+
+Open **PowerShell** (or the Terminal app with a PowerShell tab). Verify Rust works:
+
+```powershell
+rustc --version
+cargo --version
+```
+
+Both commands should print a version string. If they error, restart your shell after running `rustup-init.exe`.
+
+## Path A — Validate the SDK surface (fast, ~2 minutes)
+
+This path runs the built-in unit and integration tests. It does NOT render live CONIN$ prompts, but it proves:
+
+- All 5 `request_*` methods compile and exercise the full supervisor pipeline end-to-end
+- The `unsupported_platform_message()` string matches the CONTEXT.md D-09 spec
+- Handle brokering works round-trip (child sends request → supervisor duplicates handle → child receives and uses the handle)
+
+Run from the repo root:
+
+```powershell
+cargo test -p nono --lib supervisor::aipc_sdk -- --nocapture
+cargo test -p nono-cli --test aipc_handle_brokering_integration -- --nocapture
+```
+
+**Expected output:**
+
+- First command: `test result: ok. 11 passed; 0 failed` (the 11 SDK unit tests: 2 message-integrity + 4 Windows loopback + 5 real-broker smoke)
+- Second command: `test result: ok. 5 passed; 0 failed` (the 5 Windows-only round-trip integration tests: Event / Mutex / Pipe / Socket / JobObject)
+
+If both pass, the SDK surface is wired correctly and the broker pipeline works. Move on to Path B if you want to see the live CONIN$ prompts.
+
+## Path B — Observe live CONIN$ prompts (full UAT, ~10 minutes)
+
+This path is the one the human UAT asks for. It requires building a tiny Rust "child" binary that exercises each SDK method against a real `nono` supervisor — which renders each CONIN$ prompt on your terminal for you to eyeball.
+
+### Step 1 — Build nono
+
+From the repo root:
+
+```powershell
+cargo build --release -p nono-cli
+```
+
+When it finishes, the binary is at `target\release\nono.exe`. Confirm:
+
+```powershell
+.\target\release\nono.exe --version
+```
+
+### Step 2 — Scaffold the demo child binary
+
+Create a scratch project **outside** the repo so you don't accidentally commit it:
+
+```powershell
+cd $env:USERPROFILE
+cargo new --bin aipc-demo
+cd aipc-demo
+```
+
+Replace the auto-generated `Cargo.toml` with the block below. **Edit the `path` to point at your nono checkout** (use forward slashes or doubled backslashes):
+
+```toml
+[package]
+name = "aipc-demo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nono = { path = "C:/Users/omack/Nono/crates/nono" }
+```
+
+Replace `src\main.rs` with:
+
+```rust
+use std::path::Path;
+use nono::supervisor::{
+    request_event, request_job_object, request_mutex, request_pipe, request_socket,
+    PipeDirection, SocketProtocol, SocketRole, SupervisorSocket,
+};
+
+fn main() -> nono::Result<()> {
+    let pipe_path = std::env::var("NONO_SUPERVISOR_PIPE").expect(
+        "NONO_SUPERVISOR_PIPE not set — launch this binary via `nono --profile claude-code -- <demo.exe>`",
+    );
+    let mut sock = SupervisorSocket::connect(Path::new(&pipe_path))?;
+
+    println!("[demo] requesting Event  'aipc-demo-event'");
+    let _h = request_event(&mut sock, "aipc-demo-event", 0x0002 /*SYNCHRONIZE*/, Some("demo"))?;
+    println!("[demo]   -> OK, handle granted");
+
+    println!("[demo] requesting Mutex  'aipc-demo-mutex'");
+    let _h = request_mutex(&mut sock, "aipc-demo-mutex", 0x0001 /*MUTEX_MODIFY_STATE*/, Some("demo"))?;
+    println!("[demo]   -> OK, handle granted");
+
+    println!("[demo] requesting Pipe   'aipc-demo-pipe' (read)");
+    let _h = request_pipe(&mut sock, "aipc-demo-pipe", PipeDirection::Read, Some("demo"))?;
+    println!("[demo]   -> OK, handle granted");
+
+    println!("[demo] requesting Socket tcp 127.0.0.1:8080 (connect)");
+    let _s = request_socket(
+        &mut sock,
+        "127.0.0.1",
+        8080,
+        SocketProtocol::Tcp,
+        SocketRole::Connect,
+        0x0001,
+        Some("demo"),
+    )?;
+    println!("[demo]   -> OK, socket granted");
+
+    println!("[demo] requesting JobObject 'aipc-demo-job'");
+    let _h = request_job_object(&mut sock, "aipc-demo-job", 0x0004 /*JOB_OBJECT_QUERY*/, Some("demo"))?;
+    println!("[demo]   -> OK, handle granted");
+
+    println!("[demo] all 5 request_* methods succeeded");
+    Ok(())
+}
+```
+
+> If any signature above drifts from your checkout, run `cargo check` and the compiler will point at the right shape. Authoritative source: `crates\nono\src\supervisor\aipc_sdk.rs` plus the `pub use` block in `crates\nono\src\supervisor\mod.rs`.
+
+Build the demo:
+
+```powershell
+cargo build --release
+```
+
+The binary lands at `target\release\aipc-demo.exe` (inside the scratch folder, not the nono repo).
+
+### Step 3 — Run under nono with the claude-code profile
+
+From the scratch folder (`$env:USERPROFILE\aipc-demo`), run:
+
+```powershell
+C:\Users\omack\Nono\target\release\nono.exe --profile claude-code -- .\target\release\aipc-demo.exe
+```
+
+**Expected flow:**
+
+1. Supervisor launches and sets up the capability pipe.
+2. Demo child starts, calls `request_event` first.
+3. **CONIN$ prompts appear on your terminal, one per request.** For each prompt, you see a block like:
+
+   ```
+   nono: AIPC capability request from PID 1234
+     kind:   Event
+     name:   Local\nono-aipc-<16hex>-aipc-demo-event
+     mask:   0x00000002 (SYNCHRONIZE)
+     reason: demo
+   Approve? [y/N]:
+   ```
+
+4. Type **`y`** + Enter to approve. Demo prints `→ OK, handle granted` and moves to the next kind.
+5. Repeat for Mutex, Pipe, Socket, JobObject. Final line: `all 5 request_* methods succeeded`.
+
+### Step 4 — What to look for (pass / fail criteria)
+
+For each of the 6 handle kinds below, confirm the prompt includes the listed fields **exactly** (D-04 templates). If any field is missing, mislabelled, or the prompt renders as a raw `format!` dump, that's an **issue** — log it in the UAT file.
+
+| Kind      | Required fields                                                                       |
+|-----------|---------------------------------------------------------------------------------------|
+| File      | `path=<canonicalized>` + `mask=<hex>`                                                 |
+| Event     | `name=Local\nono-aipc-<user_session_id>-<sanitized>` + `mask=<hex>`                   |
+| Mutex     | `name=Local\nono-aipc-<user_session_id>-<sanitized>` + `mask=<hex>`                   |
+| Pipe      | `name=Local\nono-aipc-<user_session_id>-<sanitized>` + `direction=read` \| `write`    |
+| Socket    | `proto=tcp` + `host=<ip>` + `port=<port>` + `role=connect` \| `bind` \| `listen`      |
+| JobObject | `name=Local\nono-aipc-<user_session_id>-<sanitized>` + `mask=<hex>`                   |
+
+Also check:
+
+- **No token in the prompt or in stdout.** The session token (`NONO_SESSION_TOKEN`) must never appear in any prompt text, log line, or audit entry.
+- **Denial behavior.** Type **`N`** (or hit Enter) on one of the prompts. The demo should print a `Denied` error with reason `user rejected capability request` (or similar), and the next call should still run — a denial does not kill the session.
+- **Invalid names are rejected server-side.** Edit the demo to request a name like `"..\\escape"` or `"drop:me"`; the supervisor should reject it before the prompt even shows (the pre-approval gate: "validate before prompt").
+
+## Path C — If something goes wrong
+
+**Symptom:** The demo panics with `NONO_SESSION_TOKEN env var not set`.
+**Cause:** You ran the demo directly instead of through `nono.exe`. Always invoke via `nono --profile claude-code -- <demo>`.
+
+**Symptom:** CONIN$ prompt shows `name=` but no `Local\nono-aipc-` prefix.
+**Cause:** Probable regression in the `validate_aipc_object_name` + namespace canonicalization step (see `supervisor.rs`). Log this as a blocker in the UAT.
+
+**Symptom:** One of the 5 request_* methods returns `UnsupportedPlatform` on Windows.
+**Cause:** Serious regression — the non-Windows arm is leaking into Windows builds. Log as blocker.
+
+**Symptom:** Prompt includes a long hex string that looks like a token.
+**Cause:** Token-redaction regression (T-18-04-05). Log as **critical blocker** — do NOT approve; kill the session.
+
+## Reference paths
+
+- SDK source: `crates\nono\src\supervisor\aipc_sdk.rs`
+- Prompt templates: `crates\nono-cli\src\terminal_approval.rs` (`format_capability_prompt`)
+- Dispatcher: `crates\nono-cli\src\exec_strategy_windows\supervisor.rs` (`handle_event_request`, `handle_mutex_request`, ...)
+- Integration tests (Path A reference): `crates\nono-cli\tests\aipc_handle_brokering_integration.rs`
+- Phase 18 verification report: `.planning\phases\18-extended-ipc\18-VERIFICATION.md`
+- Phase 18 code review findings: `.planning\phases\18-extended-ipc\18-REVIEW.md`
