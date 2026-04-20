@@ -20,17 +20,27 @@
 use std::path::{Path, PathBuf};
 
 use nono::{
-    label_mask_for_access_mode, low_integrity_label_and_mask, try_set_mandatory_label, NonoError,
-    Result, WindowsFilesystemPolicy,
+    label_mask_for_access_mode, low_integrity_label_and_mask, path_is_owned_by_current_user,
+    try_set_mandatory_label, NonoError, Result, WindowsFilesystemPolicy,
 };
 
 /// Per-path state recorded at snapshot time.
 #[derive(Debug)]
 enum AppliedLabel {
-    /// Path had a pre-existing mandatory-label ACE of some kind; we did not
-    /// apply a new label and will not revert at Drop time. D-02
-    /// skip-on-any-prior-label arm. Preserves the contract that nono NEVER
-    /// mutates a pre-existing mandatory label.
+    /// Path was skipped for labeling. Either:
+    /// 1. Path had a pre-existing mandatory-label ACE of some kind (D-02
+    ///    skip-on-any-prior-label arm — preserves the contract that nono
+    ///    NEVER mutates a pre-existing mandatory label), OR
+    /// 2. Path is not owned by the current user (system paths like
+    ///    `C:\Windows` granted read via built-in policy groups). Unprivileged
+    ///    users do not hold `WRITE_OWNER` on system paths, so
+    ///    `SetNamedSecurityInfoW(LABEL_SECURITY_INFORMATION)` would fail
+    ///    with `ERROR_ACCESS_DENIED` (HRESULT 0x5). Skipping is correct on
+    ///    the merits: Low-IL is a subtractive model and system paths are
+    ///    already readable by Low-IL subjects through the Medium-IL default.
+    ///
+    /// In both cases: we did not apply a new label and will not revert at
+    /// Drop time.
     Skip,
     /// Path had NO pre-existing mandatory-label ACE. We applied a
     /// mode-derived mandatory-label ACE at Low IL via
@@ -53,14 +63,23 @@ impl AppliedLabelsGuard {
     /// 1. Snapshot prior label state via `nono::low_integrity_label_and_mask`.
     /// 2. If `prior.is_some()` (ANY pre-existing mandatory-label ACE),
     ///    record `Skip` and log a warning. Do NOT apply.
-    /// 3. Otherwise call `nono::try_set_mandatory_label` with the mode-derived
-    ///    mask. Record `Applied { path }`.
-    /// 4. If `try_set_mandatory_label` fails at step 3, best-effort-revert any
-    ///    `Applied` entries already added to `self.entries`, then return the
-    ///    original Err.
+    /// 3. Check ownership via `nono::path_is_owned_by_current_user`:
+    ///    - `Ok(false)` (e.g. `C:\Windows` granted read via the
+    ///      `system_read_windows` policy group): record `Skip` and log a
+    ///      warning. Do NOT apply. Labeling is unnecessary on system paths —
+    ///      the Low-IL model is subtractive and Medium-IL defaults are
+    ///      already readable by Low-IL subjects.
+    ///    - `Err(_)`: propagate immediately. Ownership-check errors are
+    ///      NEVER silently swallowed; this is fail-closed (Rule 1 invariant).
+    ///    - `Ok(true)`: proceed to step 4.
+    /// 4. Call `nono::try_set_mandatory_label` with the mode-derived mask.
+    ///    Record `Applied { path }`.
+    /// 5. If `try_set_mandatory_label` fails at step 4, best-effort-revert
+    ///    any `Applied` entries already added to `self.entries`, then return
+    ///    the original Err.
     ///
-    /// Fail-closed: returns Err(LabelApplyFailed) on any apply failure; no
-    /// partial-success state returned.
+    /// Fail-closed: returns Err(LabelApplyFailed) on any apply failure OR
+    /// ownership-check failure; no partial-success state returned.
     pub(crate) fn snapshot_and_apply(policy: &WindowsFilesystemPolicy) -> Result<Self> {
         let mut guard = Self::default();
         for rule in &policy.rules {
@@ -78,6 +97,43 @@ impl AppliedLabelsGuard {
                 );
                 guard.entries.push(AppliedLabel::Skip);
                 continue;
+            }
+
+            // Ownership pre-check: SetNamedSecurityInfoW(LABEL_SECURITY_INFORMATION)
+            // requires WRITE_OWNER on the target. System paths like
+            // C:\Windows are owned by TrustedInstaller and unprivileged
+            // users do not hold WRITE_OWNER — the label apply would fail
+            // with ERROR_ACCESS_DENIED (HRESULT 0x5), aborting the whole
+            // sandbox setup. Skipping is correct on the merits: system
+            // paths are Medium-IL by default, already readable by Low-IL
+            // subjects via existing OS ACLs, so labeling is unnecessary.
+            //
+            // Fail-closed on Err: if the ownership query itself fails we do
+            // NOT silently skip — propagate the error so operators can
+            // diagnose.
+            match path_is_owned_by_current_user(&rule.path) {
+                Ok(false) => {
+                    tracing::warn!(
+                        path = %rule.path.display(),
+                        access = ?rule.access,
+                        "label guard: path not owned by current user; skipping mandatory label apply \
+                         (system paths are Medium-IL by default and already readable by Low-IL subjects)"
+                    );
+                    guard.entries.push(AppliedLabel::Skip);
+                    continue;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        path = %rule.path.display(),
+                        error = %err,
+                        "label guard: ownership check failed; reverting entries already applied"
+                    );
+                    guard.revert_all();
+                    return Err(err);
+                }
+                Ok(true) => {
+                    // Current user owns the path — proceed to apply.
+                }
             }
 
             let mask = label_mask_for_access_mode(rule.access);
@@ -373,6 +429,59 @@ mod tests {
         assert!(
             post.is_none(),
             "ok_file must not carry a mandatory-label ACE after failed apply; got {post:?}"
+        );
+    }
+
+    #[test]
+    fn guard_skips_path_not_owned_by_current_user() {
+        // Regression test for the claude-code profile on Windows: the
+        // system_read_windows policy group grants read on C:\Windows, which
+        // is owned by TrustedInstaller. Unprivileged users cannot label it
+        // (no WRITE_OWNER), so the guard must record Skip instead of
+        // attempting the apply and exploding with ERROR_ACCESS_DENIED.
+        use std::path::PathBuf;
+        let system_root = std::env::var_os("SystemRoot")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+
+        // Capture the pre-state so we can assert the guard did not mutate
+        // the label on C:\Windows (which may or may not have one; the
+        // assertion is simply "we did not change it").
+        let pre_label = low_integrity_label_and_mask(&system_root);
+
+        let policy = WindowsFilesystemPolicy {
+            rules: vec![WindowsFilesystemRule {
+                path: system_root.clone(),
+                access: AccessMode::Read,
+                is_file: false,
+                source: CapabilitySource::User,
+            }],
+            unsupported: vec![],
+        };
+
+        let guard = AppliedLabelsGuard::snapshot_and_apply(&policy)
+            .expect("snapshot_and_apply must succeed (Skip is not an error)");
+        assert_eq!(guard.entries.len(), 1, "one rule → one guard entry");
+        // The sole entry must be a Skip — we must not have applied a label
+        // we don't own.
+        assert!(
+            matches!(guard.entries[0], AppliedLabel::Skip),
+            "guard entry for {} must be AppliedLabel::Skip; got {:?}",
+            system_root.display(),
+            guard.entries[0]
+        );
+
+        drop(guard);
+
+        // Post-condition: the label on C:\Windows is unchanged. We do not
+        // insist on "no label" — a domain-managed machine may legitimately
+        // carry one — only that we did not mutate it.
+        let post_label = low_integrity_label_and_mask(&system_root);
+        assert_eq!(
+            pre_label,
+            post_label,
+            "guard must NOT mutate the mandatory label on {}",
+            system_root.display()
         );
     }
 }

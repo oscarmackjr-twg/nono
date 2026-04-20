@@ -626,6 +626,209 @@ pub fn try_set_mandatory_label(path: &Path, mask: u32) -> Result<()> {
     })
 }
 
+/// Returns `Ok(true)` if `path`'s NTFS owner SID equals the current process
+/// user SID; `Ok(false)` otherwise. Returns `Err(NonoError::LabelApplyFailed)`
+/// if the owner cannot be read or the current-user token cannot be queried.
+///
+/// # Why
+///
+/// `SetNamedSecurityInfoW(LABEL_SECURITY_INFORMATION)` requires `WRITE_OWNER`
+/// on the target. Unprivileged users do not hold `WRITE_OWNER` on system paths
+/// like `C:\Windows`, so attempting to label them fails with
+/// `ERROR_ACCESS_DENIED` (HRESULT 0x5). The Low-IL integrity model is
+/// subtractive — system paths are Medium-IL by default and are already
+/// readable by Low-IL subjects through existing OS ACLs, so labeling them
+/// was never necessary. This helper lets the label guard skip paths the
+/// current user does not own without suppressing fatal errors from the
+/// ownership query itself (fail-closed: `Err` propagates).
+///
+/// # Errors
+///
+/// * `NonoError::LabelApplyFailed` if `GetNamedSecurityInfoW`,
+///   `OpenProcessToken`, `GetTokenInformation`, or the owner-SID extraction
+///   fails.
+pub fn path_is_owned_by_current_user(path: &Path) -> Result<bool> {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
+    use windows_sys::Win32::Security::{
+        EqualSid, GetTokenInformation, TokenUser, OWNER_SECURITY_INFORMATION, PSID, TOKEN_QUERY,
+        TOKEN_USER,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let wide_path: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    // 1. Read the NTFS owner SID for the path.
+    let mut owner_sid: PSID = std::ptr::null_mut();
+    let mut security_descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    let status = unsafe {
+        // SAFETY: `wide_path` is a valid nul-terminated UTF-16 buffer; the
+        // two out-pointers refer to live local storage for the duration of
+        // the call. On success the SD is heap-allocated by the kernel and
+        // must be freed with LocalFree (handled by `_sd_guard` below).
+        GetNamedSecurityInfoW(
+            wide_path.as_ptr(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner_sid,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut security_descriptor,
+        )
+    };
+    if status != 0 {
+        return Err(NonoError::LabelApplyFailed {
+            path: path.to_path_buf(),
+            hresult: status,
+            hint: format!(
+                "GetNamedSecurityInfoW(OWNER_SECURITY_INFORMATION) returned 0x{status:08X} while \
+                 reading owner SID for {}",
+                path.display()
+            ),
+        });
+    }
+    let _sd_guard = OwnedSecurityDescriptor(security_descriptor);
+    if owner_sid.is_null() {
+        return Err(NonoError::LabelApplyFailed {
+            path: path.to_path_buf(),
+            hresult: 0,
+            hint: format!(
+                "GetNamedSecurityInfoW returned a null owner SID for {}",
+                path.display()
+            ),
+        });
+    }
+
+    // 2. Open the current process token (read-only) to query TokenUser.
+    let mut token: HANDLE = std::ptr::null_mut();
+    let ok = unsafe {
+        // SAFETY: `GetCurrentProcess()` returns a pseudo-handle valid for
+        // the lifetime of this process; `&mut token` is a valid out-pointer.
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)
+    };
+    if ok == 0 {
+        let hresult = unsafe {
+            // SAFETY: GetLastError has no preconditions.
+            GetLastError()
+        };
+        return Err(NonoError::LabelApplyFailed {
+            path: path.to_path_buf(),
+            hresult,
+            hint: format!(
+                "OpenProcessToken(TOKEN_QUERY) failed (GetLastError=0x{hresult:08X}) while \
+                 resolving current-user SID for ownership check on {}",
+                path.display()
+            ),
+        });
+    }
+    // SAFETY guard: close the token handle on every exit path.
+    struct OwnedTokenHandle(HANDLE);
+    impl Drop for OwnedTokenHandle {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe {
+                    // SAFETY: `self.0` was returned by `OpenProcessToken`
+                    // above and has not been closed yet.
+                    let _ = CloseHandle(self.0);
+                }
+            }
+        }
+    }
+    let _token_guard = OwnedTokenHandle(token);
+
+    // 3. Probe TokenUser buffer size (first call returns
+    //    ERROR_INSUFFICIENT_BUFFER and fills `required`).
+    let mut required: u32 = 0;
+    let _ = unsafe {
+        // SAFETY: `token` is a valid token handle; passing null + 0 is the
+        // documented pattern to ask Windows for the required buffer size.
+        GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut required)
+    };
+    if required == 0 {
+        let hresult = unsafe {
+            // SAFETY: GetLastError has no preconditions.
+            GetLastError()
+        };
+        return Err(NonoError::LabelApplyFailed {
+            path: path.to_path_buf(),
+            hresult,
+            hint: format!(
+                "GetTokenInformation(TokenUser) size probe returned 0 \
+                 (GetLastError=0x{hresult:08X}) for ownership check on {}",
+                path.display()
+            ),
+        });
+    }
+
+    // 4. Allocate buffer and fetch TOKEN_USER.
+    let mut buffer: Vec<u8> = vec![0u8; required as usize];
+    let mut actual: u32 = required;
+    let ok = unsafe {
+        // SAFETY: `token` is a valid token handle; `buffer` has `required`
+        // bytes of live storage; `&mut actual` is a valid out-pointer.
+        GetTokenInformation(
+            token,
+            TokenUser,
+            buffer.as_mut_ptr().cast(),
+            required,
+            &mut actual,
+        )
+    };
+    if ok == 0 {
+        let hresult = unsafe {
+            // SAFETY: GetLastError has no preconditions.
+            GetLastError()
+        };
+        return Err(NonoError::LabelApplyFailed {
+            path: path.to_path_buf(),
+            hresult,
+            hint: format!(
+                "GetTokenInformation(TokenUser) failed (GetLastError=0x{hresult:08X}) while \
+                 resolving current-user SID for ownership check on {}",
+                path.display()
+            ),
+        });
+    }
+
+    // 5. Extract the current-user SID from the filled TOKEN_USER and compare
+    //    it to the path's owner SID via EqualSid.
+    //
+    // Buffer layout: TOKEN_USER { User: SID_AND_ATTRIBUTES { Sid: PSID, .. }, .. }.
+    // The PSID points INTO the same buffer allocation (it is not a separate
+    // heap allocation), so the comparison is safe as long as `buffer` outlives
+    // the EqualSid call — which it does (it lives to end of function).
+    let token_user = unsafe {
+        // SAFETY: GetTokenInformation succeeded above, so the first
+        // `required` bytes of `buffer` hold a valid TOKEN_USER.
+        &*(buffer.as_ptr() as *const TOKEN_USER)
+    };
+    let user_sid: PSID = token_user.User.Sid;
+    if user_sid.is_null() {
+        return Err(NonoError::LabelApplyFailed {
+            path: path.to_path_buf(),
+            hresult: 0,
+            hint: format!(
+                "GetTokenInformation(TokenUser) returned a null Sid pointer for ownership check \
+                 on {}",
+                path.display()
+            ),
+        });
+    }
+
+    let equal = unsafe {
+        // SAFETY: both `user_sid` (into `buffer`) and `owner_sid` (into the
+        // security descriptor owned by `_sd_guard`) are valid for the
+        // duration of this call. EqualSid is a leaf-safe Win32 call that
+        // does not retain the pointers.
+        EqualSid(user_sid, owner_sid)
+    };
+    Ok(equal != 0)
+}
+
 fn low_integrity_label_rid(path: &Path) -> Option<u32> {
     let wide_path: Vec<u16> = path
         .as_os_str()
@@ -3018,6 +3221,44 @@ mod tests {
         assert!(
             err.to_string().contains("absolute path argument")
                 || err.to_string().contains("comp file argument")
+        );
+    }
+
+    #[test]
+    fn path_is_owned_by_current_user_returns_true_for_tempfile() {
+        // Files we create in a tempdir are owned by the current user.
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("mine.txt");
+        std::fs::write(&file, "x").expect("write file");
+
+        let owned = path_is_owned_by_current_user(&file)
+            .expect("owner read must succeed for a user-created tempfile");
+        assert!(
+            owned,
+            "a file just created by the current user must be reported as owned"
+        );
+    }
+
+    #[test]
+    fn path_is_owned_by_current_user_returns_false_for_system_windows_dir() {
+        // C:\Windows is owned by TrustedInstaller (or the system) on a clean
+        // install and is NEVER owned by an unprivileged interactive user.
+        // This test is the whole reason path_is_owned_by_current_user exists:
+        // the label guard must skip labeling system paths to avoid
+        // ERROR_ACCESS_DENIED from SetNamedSecurityInfoW.
+        let system_root = std::env::var_os("SystemRoot")
+            .unwrap_or_else(|| std::ffi::OsString::from(r"C:\Windows"));
+        let system_root = PathBuf::from(system_root);
+        // Only assert the shape; if a developer is somehow running tests as
+        // the TrustedInstaller principal the assertion would flip — but in
+        // that environment the label guard wouldn't need to skip anyway, so
+        // the test would still reflect reality.
+        let is_current = path_is_owned_by_current_user(&system_root)
+            .expect("owner read must succeed for C:\\Windows (readable by everyone)");
+        assert!(
+            !is_current,
+            "an unprivileged user must not be reported as the owner of {}",
+            system_root.display()
         );
     }
 }

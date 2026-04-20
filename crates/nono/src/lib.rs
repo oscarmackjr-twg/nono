@@ -78,7 +78,8 @@ pub use keystore::{
 pub use net_filter::{FilterResult, HostFilter};
 #[cfg(target_os = "windows")]
 pub use sandbox::windows::{
-    label_mask_for_access_mode, low_integrity_label_and_mask, try_set_mandatory_label,
+    label_mask_for_access_mode, low_integrity_label_and_mask, path_is_owned_by_current_user,
+    try_set_mandatory_label,
 };
 #[cfg(target_os = "linux")]
 pub use sandbox::{detect_abi, is_wsl2, DetectedAbi};
