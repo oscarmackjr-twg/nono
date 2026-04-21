@@ -1351,6 +1351,18 @@ mod tests {
             .as_ref()
             .expect("claude_code_macos allow missing")
             .readwrite;
+        assert!(claude_code_macos
+            .allow
+            .as_ref()
+            .expect("claude_code_macos allow missing")
+            .read
+            .contains(&"$HOME/.local/share/claude".to_string()));
+        // PROF-04 (Phase 22): upstream broadened keychain access to include
+        // the entire `~/Library/Keychains` directory (was per-file in v0.37).
+        // The pre-existing per-file assertions remain in place to keep both
+        // the broader directory grant AND the legacy file-scoped grants
+        // valid against the policy.json.
+        assert!(claude_code_macos_paths.contains(&"$HOME/Library/Keychains".to_string()));
         assert!(claude_code_macos_paths
             .contains(&"$HOME/Library/Keychains/login.keychain-db".to_string()));
         assert!(claude_code_macos_paths

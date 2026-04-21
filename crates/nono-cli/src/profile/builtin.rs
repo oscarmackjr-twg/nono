@@ -42,6 +42,32 @@ mod tests {
     }
 
     #[test]
+    fn test_get_builtin_claude_no_kc() {
+        let profile = get_builtin("claude-no-kc").expect("Profile not found");
+        assert_eq!(profile.meta.name, "claude-no-kc");
+        assert!(!profile.network.block);
+        assert_eq!(profile.workdir.access, WorkdirAccess::ReadWrite);
+        assert!(profile
+            .security
+            .groups
+            .contains(&"claude_code_linux".to_string()));
+        assert!(!profile
+            .security
+            .groups
+            .contains(&"claude_code_macos".to_string()));
+        assert!(profile.policy.add_allow_readwrite.is_empty());
+        assert!(profile.policy.override_deny.is_empty());
+        assert!(profile
+            .filesystem
+            .allow
+            .contains(&"$HOME/.cache/claude".to_string()));
+        assert!(profile
+            .filesystem
+            .allow
+            .contains(&"$HOME/.claude.lock".to_string()));
+    }
+
+    #[test]
     fn test_get_builtin_default() {
         let profile = get_builtin("default").expect("Profile not found");
         assert_eq!(profile.meta.name, "default");
@@ -81,10 +107,45 @@ mod tests {
             .filesystem
             .allow_file
             .contains(&"$HOME/Library/Keychains/metadata.keychain-db".to_string()));
+        assert_eq!(
+            profile.policy.add_allow_readwrite,
+            vec!["$HOME/Library/Keychains".to_string()]
+        );
+        assert_eq!(
+            profile.policy.override_deny,
+            vec!["$HOME/Library/Keychains".to_string()]
+        );
         assert!(profile
             .filesystem
             .allow_file
             .contains(&"$HOME/.claude.lock".to_string()));
+    }
+
+    #[test]
+    fn test_get_builtin_claude_no_kc_does_not_relax_keychain_denies() {
+        let profile = get_builtin("claude-no-kc").expect("Profile not found");
+        assert!(!profile
+            .security
+            .groups
+            .contains(&"claude_code_macos".to_string()));
+        assert!(profile
+            .security
+            .groups
+            .contains(&"claude_code_linux".to_string()));
+        assert!(!profile
+            .filesystem
+            .read
+            .contains(&"$HOME/.local/share/claude".to_string()));
+        assert!(!profile
+            .filesystem
+            .allow_file
+            .contains(&"$HOME/Library/Keychains/login.keychain-db".to_string()));
+        assert!(!profile
+            .filesystem
+            .allow_file
+            .contains(&"$HOME/Library/Keychains/metadata.keychain-db".to_string()));
+        assert!(profile.policy.add_allow_readwrite.is_empty());
+        assert!(profile.policy.override_deny.is_empty());
     }
 
     #[test]
@@ -170,12 +231,38 @@ mod tests {
         assert!(get_builtin("nonexistent").is_none());
     }
 
+    /// PROF-04 (Phase 22) VALIDATION 22-01-T4: claude-no-kc builtin loads
+    /// via the get_builtin path and resolves cleanly under the fork's
+    /// existing POLY-01 stricter posture (CONTRADICTION-A reconciliation).
+    #[test]
+    fn claude_no_keychain_loads() {
+        // Upstream calls the profile `claude-no-kc`; the plan calls it
+        // `claude-no-keychain` conceptually. We follow upstream's naming.
+        let profile = get_builtin("claude-no-kc")
+            .expect("claude-no-kc must be a registered builtin");
+        assert_eq!(profile.meta.name, "claude-no-kc");
+
+        // The no-keychain variant inherits the claude-code agent groups
+        // EXCEPT claude_code_macos (which carries the keychain access).
+        assert!(
+            !profile.security.groups.contains(&"claude_code_macos".to_string()),
+            "claude-no-kc must not include claude_code_macos (keychain group)"
+        );
+        // Network unblocked + readwrite workdir match claude-code semantics.
+        assert!(!profile.network.block);
+        assert_eq!(profile.workdir.access, WorkdirAccess::ReadWrite);
+
+        // No keychain override_deny (the whole point of the variant).
+        assert!(profile.policy.override_deny.is_empty());
+    }
+
     #[test]
     fn test_list_builtin() {
         let profiles = list_builtin();
         assert!(profiles.contains(&"default".to_string()));
         assert!(profiles.contains(&"linux-host-compat".to_string()));
         assert!(profiles.contains(&"claude-code".to_string()));
+        assert!(profiles.contains(&"claude-no-kc".to_string()));
         assert!(profiles.contains(&"codex".to_string()));
         assert!(profiles.contains(&"openclaw".to_string()));
         assert!(profiles.contains(&"opencode".to_string()));
@@ -537,8 +624,8 @@ mod tests {
     #[test]
     fn test_all_profiles_signal_mode_resolves() {
         use crate::capability_ext::CapabilitySetExt;
+        #[cfg(target_os = "windows")]
         use tempfile::tempdir;
-
         let _guard = match crate::test_env::ENV_LOCK.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
@@ -550,17 +637,60 @@ mod tests {
         // reject the XDG_* paths and the whole test to fail with
         // EnvVarValidation. Use platform-absolute tempdir-backed paths on
         // Windows and keep the existing Unix-shaped guard on Unix.
+        //
+        // PROF-04 (Phase 22) per upstream 3c8b6756: pre-create
+        // `$HOME/Library/Keychains` on Unix so the broadened claude-code
+        // keychain grant resolves without being skipped (the directory must
+        // exist for the capability allowlist to include it).
+        #[cfg(not(target_os = "windows"))]
+        let home = tempfile::Builder::new()
+            .prefix("nono-builtin-profile-home-")
+            .tempdir_in(std::env::current_dir().expect("cwd"))
+            .expect("home tempdir");
+        #[cfg(not(target_os = "windows"))]
+        std::fs::create_dir_all(home.path().join("Library/Keychains"))
+            .expect("mkdir keychains");
+
         #[cfg(not(target_os = "windows"))]
         let _env = crate::test_env::EnvVarGuard::set_all(&[
-            ("HOME", "/home/nono-test"),
-            ("XDG_CONFIG_HOME", "/home/nono-test/.config"),
-            ("XDG_DATA_HOME", "/home/nono-test/.local/share"),
-            ("XDG_STATE_HOME", "/home/nono-test/.local/state"),
-            ("XDG_CACHE_HOME", "/home/nono-test/.cache"),
+            ("HOME", home.path().to_str().expect("home utf8")),
+            (
+                "XDG_CONFIG_HOME",
+                home.path().join(".config").to_str().expect("config utf8"),
+            ),
+            (
+                "XDG_DATA_HOME",
+                home.path()
+                    .join(".local/share")
+                    .to_str()
+                    .expect("data utf8"),
+            ),
+            (
+                "XDG_STATE_HOME",
+                home.path()
+                    .join(".local/state")
+                    .to_str()
+                    .expect("state utf8"),
+            ),
+            (
+                "XDG_CACHE_HOME",
+                home.path().join(".cache").to_str().expect("cache utf8"),
+            ),
         ]);
 
         #[cfg(target_os = "windows")]
         let home_tmp = tempdir().expect("home tmpdir");
+        // PROF-04 (Phase 22): pre-create the Library/Keychains subdirectory
+        // on Windows too. The claude-code profile's `add_allow_readwrite`
+        // entry for `$HOME/Library/Keychains` is gated on
+        // `try_new_dir` (path-exists), so without this mkdir the matching
+        // grant for the `override_deny` of the same path is silently
+        // skipped on Windows and resolution fails with "no matching grant".
+        // The path is platform-irrelevant (it's a tempdir under HOME); only
+        // the existence matters.
+        #[cfg(target_os = "windows")]
+        std::fs::create_dir_all(home_tmp.path().join("Library/Keychains"))
+            .expect("mkdir keychains on windows");
         #[cfg(target_os = "windows")]
         let home_str = home_tmp
             .path()
