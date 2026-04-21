@@ -23,8 +23,13 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Networking::WinSock::{
     WSADuplicateSocketW, INVALID_SOCKET, SOCKET, WSAPROTOCOL_INFOW,
 };
-use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
-use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+use windows_sys::Win32::Security::Authorization::{
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+};
+use windows_sys::Win32::Security::{
+    GetTokenInformation, TokenGroups, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
+    SID_AND_ATTRIBUTES, TOKEN_GROUPS, TOKEN_QUERY,
+};
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
 };
@@ -33,6 +38,8 @@ use windows_sys::Win32::System::Pipes::{
     GetNamedPipeServerProcessId, WaitNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
     PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
+use windows_sys::Win32::System::SystemServices::SE_GROUP_LOGON_ID;
+use windows_sys::Win32::System::Threading::OpenProcessToken;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId, GetProcessId};
 
 /// SDDL revision used by `ConvertStringSecurityDescriptorToSecurityDescriptorW`.
@@ -45,12 +52,12 @@ const SDDL_REVISION_1: u32 = 1;
 /// This constant is used verbatim when the caller does NOT supply a per-session
 /// restricting SID (in-process tests, Phase 11 / Phase 18 AIPC pipe callers).
 /// When a per-session SID *is* supplied via
-/// [`SupervisorSocket::bind_low_integrity_with_session_sid`], an additional
-/// ACE granting `FILE_GENERIC_READ | FILE_GENERIC_WRITE | SYNCHRONIZE`
-/// (mask 0x120089) to that SID is appended before the SACL — necessary so
-/// Phase 13's `CreateRestrictedToken(WRITE_RESTRICTED, ..., &session_sid, ...)`
-/// child passes the second-pass DACL check against the restricting SID set
-/// when it opens the pipe with `GENERIC_READ | GENERIC_WRITE`.
+/// [`SupervisorSocket::bind_low_integrity_with_session_sid`], two additional
+/// ACEs are appended before the SACL — together they allow a Phase 13
+/// `CreateRestrictedToken(WRITE_RESTRICTED, ..., &session_sid, ...)` child to
+/// pass BOTH DACL passes when opening the pipe with
+/// `GENERIC_READ | GENERIC_WRITE`. See [`build_capability_pipe_sddl`] for the
+/// full analysis.
 const CAPABILITY_PIPE_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)S:(ML;;NW;;;LW)";
 
 /// Access mask granted to the per-session restricting SID when one is supplied.
@@ -203,29 +210,6 @@ impl SupervisorSocket {
         path: &Path,
         session_sid: Option<&str>,
     ) -> Result<Self> {
-        // Debug session `supervisor-pipe-access-denied` (cycle 2 instrumentation):
-        // Log whether the restricting SID arrives at the bind call, and if so,
-        // only the first-16-char prefix (`S-1-5-117-...`) for security parity
-        // with existing audit-log patterns. To be reverted once root cause is
-        // identified.
-        match session_sid {
-            Some(sid) => {
-                let prefix: String = sid.chars().take(16).collect();
-                tracing::info!(
-                    session_sid_present = true,
-                    session_sid_prefix = %prefix,
-                    path = %path.display(),
-                    "bind_low_integrity_with_session_sid entry",
-                );
-            }
-            None => {
-                tracing::info!(
-                    session_sid_present = false,
-                    path = %path.display(),
-                    "bind_low_integrity_with_session_sid entry",
-                );
-            }
-        }
         Self::bind_impl(path, true, session_sid)
     }
 
@@ -1046,36 +1030,184 @@ fn validate_session_sid_for_sddl(sid: &str) -> Result<()> {
     Ok(())
 }
 
-/// Construct the SDDL string for the capability pipe, optionally appending an
-/// ACE that grants the per-session restricting SID `FILE_GENERIC_READ |
-/// FILE_GENERIC_WRITE | SYNCHRONIZE`.
+/// Retrieve the current process's logon SID as a string (shape
+/// `S-1-5-5-X-Y`). The logon SID is unique per interactive logon session
+/// and is present on every token spawned within that session with the
+/// `SE_GROUP_LOGON_ID` attribute.
+///
+/// Used by [`build_capability_pipe_sddl`] to add a narrowly-scoped ACE to
+/// the capability pipe's DACL — narrower than `WD` (Everyone) or `AU`
+/// (Authenticated Users), narrower than the owning user SID (covers only
+/// the CURRENT logon session, not all processes of that user). See
+/// `.planning/debug/supervisor-pipe-access-denied.md` for the empirical
+/// access-check analysis.
+///
+/// # Errors
+///
+/// Fails (fail-closed) if the current process's token cannot be opened, if
+/// `TokenGroups` cannot be queried, if no group has the
+/// `SE_GROUP_LOGON_ID` attribute (would be a Windows invariant violation),
+/// or if the logon SID cannot be converted to its string form. On failure
+/// the caller MUST propagate the error — the capability pipe MUST NOT be
+/// bound without this ACE, as the WRITE_RESTRICTED child would silently
+/// fail to connect.
+fn current_logon_sid() -> Result<String> {
+    // Open the current process's token.
+    let mut token: HANDLE = std::ptr::null_mut();
+    let ok = unsafe {
+        // SAFETY: `GetCurrentProcess` returns a pseudo-handle. `token` is a
+        // writable out-pointer. On success we own the resulting token handle
+        // and release it before returning.
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)
+    };
+    if ok == 0 {
+        return Err(NonoError::SandboxInit(format!(
+            "OpenProcessToken for current logon SID failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    // SAFETY: `token` is a valid token handle owned by this function.
+    let token_owned = unsafe { OwnedHandle::from_raw_handle(token) };
+
+    // Query required buffer size for TokenGroups.
+    let mut needed: u32 = 0;
+    let _ = unsafe {
+        // SAFETY: first call with null buffer queries the required size.
+        GetTokenInformation(
+            token_owned.as_raw_handle() as HANDLE,
+            TokenGroups,
+            std::ptr::null_mut(),
+            0,
+            &mut needed,
+        )
+    };
+    if needed == 0 {
+        return Err(NonoError::SandboxInit(
+            "GetTokenInformation(TokenGroups) returned zero needed bytes".to_string(),
+        ));
+    }
+
+    let mut buf = vec![0u8; needed as usize];
+    let ok = unsafe {
+        // SAFETY: buf is sized from the probe above; token_owned is live.
+        GetTokenInformation(
+            token_owned.as_raw_handle() as HANDLE,
+            TokenGroups,
+            buf.as_mut_ptr() as *mut _,
+            needed,
+            &mut needed,
+        )
+    };
+    if ok == 0 {
+        return Err(NonoError::SandboxInit(format!(
+            "GetTokenInformation(TokenGroups) failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    // Walk the groups list; find the entry with SE_GROUP_LOGON_ID.
+    // SAFETY: TOKEN_GROUPS header is followed by GroupCount
+    // SID_AND_ATTRIBUTES entries. The buffer was sized by GetTokenInformation.
+    let groups = unsafe { &*(buf.as_ptr() as *const TOKEN_GROUPS) };
+    let count = groups.GroupCount as usize;
+    let base = std::ptr::addr_of!(groups.Groups) as *const SID_AND_ATTRIBUTES;
+    for i in 0..count {
+        // SAFETY: i is bounded by GroupCount; array sized correctly.
+        let entry = unsafe { &*base.add(i) };
+        if (entry.Attributes & SE_GROUP_LOGON_ID as u32) == 0 {
+            continue;
+        }
+        // Convert the SID to string form.
+        let mut sid_str_ptr: *mut u16 = std::ptr::null_mut();
+        let ok = unsafe {
+            // SAFETY: entry.Sid is a valid SID pointer from the token buffer.
+            // Output string must be freed via LocalFree.
+            ConvertSidToStringSidW(entry.Sid, &mut sid_str_ptr)
+        };
+        if ok == 0 || sid_str_ptr.is_null() {
+            return Err(NonoError::SandboxInit(format!(
+                "ConvertSidToStringSidW for logon SID failed: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        // Read the null-terminated UTF-16 string.
+        let mut len = 0usize;
+        // SAFETY: sid_str_ptr points to a null-terminated UTF-16 string
+        // allocated by ConvertSidToStringSidW.
+        while unsafe { *sid_str_ptr.add(len) } != 0 {
+            len += 1;
+        }
+        // SAFETY: len bytes below the null terminator are valid UTF-16.
+        let slice = unsafe { std::slice::from_raw_parts(sid_str_ptr, len) };
+        let sid_str = String::from_utf16_lossy(slice);
+        // SAFETY: sid_str_ptr was returned by ConvertSidToStringSidW above.
+        unsafe { LocalFree(sid_str_ptr as _) };
+
+        // Defense in depth: the logon SID is also concatenated into an SDDL
+        // template, so reject anything that's not a plain string-form SID.
+        // Every character in a string-form SID from Windows is ASCII digit
+        // / hyphen / the 'S' prefix, so the validator used for the session
+        // SID applies verbatim.
+        validate_session_sid_for_sddl(&sid_str)?;
+        return Ok(sid_str);
+    }
+
+    Err(NonoError::SandboxInit(
+        "current process token has no SE_GROUP_LOGON_ID group".to_string(),
+    ))
+}
+
+/// Construct the SDDL string for the capability pipe, optionally appending
+/// the two ACEs required for a Phase 13 `WRITE_RESTRICTED` child to pass
+/// access check when opening the pipe with `GENERIC_READ | GENERIC_WRITE`.
 ///
 /// With `session_sid = None`, returns exactly `CAPABILITY_PIPE_SDDL` — this
 /// preserves byte-identical behavior for in-process tests and AIPC pipe
 /// callers that never face a WRITE_RESTRICTED child.
+///
+/// With `session_sid = Some(sid)`, appends TWO ACEs before the SACL:
+///
+/// 1. `(A;;0x0012019F;;;{sid})` — grants `FILE_GENERIC_READ |
+///    FILE_GENERIC_WRITE | SYNCHRONIZE` to the per-session restricting SID.
+///    This is required so the **second-pass** DACL check (walked against
+///    the token's RestrictedSids list) finds an allow-ACE for the session
+///    SID.
+/// 2. `(A;;0x0012019F;;;{logon_sid})` — grants the same mask to the current
+///    logon session SID (`S-1-5-5-X-Y`, retrieved at runtime via
+///    [`current_logon_sid`]). This is required because, empirically
+///    (Windows 11 26200), the second-pass access check with
+///    `WRITE_RESTRICTED` ALSO requires an ACE for a SID present in the
+///    token's enabled groups with `SE_GROUP_MANDATORY` — the restricting-SID
+///    ACE alone is not sufficient. The Microsoft-documented contract for
+///    `CreateRestrictedToken` does not describe this co-requirement; it was
+///    discovered by systematic SDDL iteration documented in
+///    `.planning/debug/supervisor-pipe-access-denied.md` (cycle 3).
+///
+/// The logon SID is narrower than the common alternatives (`WD` Everyone,
+/// `AU` Authenticated Users, `BU` Built-in Users) — it is unique per
+/// interactive logon session and is absent from the token of any process
+/// running in a different logon session (different user, different RDP,
+/// service account). In combination with the nonce-based pipe name and the
+/// application-layer session-token check, it preserves the pipe's
+/// capability-channel security properties while admitting the intended
+/// WRITE_RESTRICTED child.
+///
+/// Failure to retrieve the logon SID is fatal (fail-closed per CLAUDE.md).
 fn build_capability_pipe_sddl(session_sid: Option<&str>) -> Result<String> {
-    let sddl = match session_sid {
-        None => CAPABILITY_PIPE_SDDL.to_string(),
+    match session_sid {
+        None => Ok(CAPABILITY_PIPE_SDDL.to_string()),
         Some(sid) => {
             validate_session_sid_for_sddl(sid)?;
-            // Insert the restricting-SID ACE BEFORE the SACL. SDDL requires
-            // the DACL (`D:`) section to precede the SACL (`S:`) section.
-            format!(
-                "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)(A;;{mask};;;{sid})S:(ML;;NW;;;LW)",
+            let logon_sid = current_logon_sid()?;
+            // Insert the two ACEs BEFORE the SACL. SDDL requires the DACL
+            // (`D:`) section to precede the SACL (`S:`) section.
+            Ok(format!(
+                "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)\
+                 (A;;{mask};;;{sid})(A;;{mask};;;{logon_sid})S:(ML;;NW;;;LW)",
                 mask = CAPABILITY_PIPE_RESTRICTING_SID_MASK,
-            )
+            ))
         }
-    };
-    // Debug session `supervisor-pipe-access-denied` (cycle 2 instrumentation):
-    // Log the full SDDL string so we can see exactly what DACL the kernel is
-    // asked to install. The DACL structure is not a secret; this log is safe.
-    // To be reverted once root cause is identified.
-    tracing::info!(
-        session_sid_present = session_sid.is_some(),
-        sddl = %sddl,
-        "build_capability_pipe_sddl result",
-    );
-    Ok(sddl)
+    }
 }
 
 fn build_low_integrity_security_attributes(
@@ -1731,77 +1863,143 @@ mod tests {
         out
     }
 
-    /// **Regression test for `supervisor-pipe-access-denied`** (Phase 21 UAT
-    /// G-01).
+    /// **End-to-end regression test for `supervisor-pipe-access-denied`**
+    /// (Phase 21 UAT G-01, cycle 3).
     ///
-    /// Verifies that the capability pipe's DACL — built via
-    /// [`build_capability_pipe_sddl`] with a per-session restricting SID —
-    /// contains an explicit ACE granting `FILE_GENERIC_READ |
-    /// FILE_GENERIC_WRITE | SYNCHRONIZE` (`0x12019F`) to that per-session
-    /// SID. This is exactly the mask Windows requires for a
-    /// WRITE_RESTRICTED child's `CreateFileW(pipe, GENERIC_READ |
-    /// GENERIC_WRITE)` to pass the second-pass restricting-SID access check.
+    /// Creates a capability pipe via [`SupervisorSocket::bind_impl`] with a
+    /// fabricated session SID, constructs a `WRITE_RESTRICTED` token
+    /// carrying that SID as its only restricting SID (matching production
+    /// exactly), and attempts `CreateFileW(pipe, GENERIC_READ |
+    /// GENERIC_WRITE)` from a thread impersonating that token. The test
+    /// passes only if the open succeeds — the SAME `CreateFileW` call that
+    /// fails in production when the pipe's DACL lacks a logon-SID ACE.
     ///
-    /// The test walks the parsed DACL via `GetSecurityDescriptorDacl +
-    /// GetAclInformation + GetAce + ConvertSidToStringSidW`, which guarantees
-    /// the ACE was not silently dropped at SD-conversion time (our primary
-    /// concern is an SDDL-injection or SID-format mismatch that would cause
-    /// `ConvertStringSecurityDescriptorToSecurityDescriptorW` to skip the
-    /// ACE).
-    ///
-    /// End-to-end verification of the WRITE_RESTRICTED child behavior
-    /// requires `CreateProcessAsUserW` which is out of scope for a library
-    /// unit test — that verification lives in the production repro
-    /// documented at
-    /// `.planning/debug/supervisor-pipe-access-denied.md`.
+    /// Rationale: the previous version of this test only walked the parsed
+    /// DACL and confirmed the session-SID ACE was stored with mask
+    /// `0x12019F`. That structural check is necessary but not sufficient —
+    /// see cycle-3 empirical work documented in
+    /// `.planning/debug/supervisor-pipe-access-denied.md` which proved the
+    /// Windows restricted-SID second-pass access check also requires an ACE
+    /// for a SID in the token's enabled groups (the logon SID, in our
+    /// fix). A structure-only test cannot catch a regression that drops
+    /// the logon-SID ACE. This end-to-end variant does.
     #[test]
     #[cfg(target_os = "windows")]
     fn capability_pipe_admits_restricted_token_child_with_session_sid() {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::Security::{ImpersonateLoggedOnUser, RevertToSelf};
+
         let session_sid = fabricate_session_sid(0xBADC0FFE);
 
-        // Validate that a WRITE_RESTRICTED token carrying this SID as its
-        // restricting SID can even be constructed. If the SID format (shape
-        // produced by `nono-cli::generate_session_sid`) were rejected by
-        // `CreateRestrictedToken`, the whole fix would be moot.
-        let restricted_token = build_write_restricted_token(&session_sid);
-        // SAFETY: restricted_token is owned only by this scope.
-        unsafe { windows_sys::Win32::Foundation::CloseHandle(restricted_token) };
-
+        // Pre-flight: build the SDDL and assert it contains both the
+        // session-SID ACE AND an ACE for a logon-SID (`S-1-5-5-*`). If
+        // either is missing, the downstream CreateFileW will fail and we'd
+        // rather the assert surface the structural regression first.
         let sddl = build_capability_pipe_sddl(Some(&session_sid))
             .expect("build_capability_pipe_sddl for valid session SID must succeed");
         assert!(
             sddl.contains(&session_sid),
             "SDDL should embed the session SID verbatim: {sddl}"
         );
-
-        // Walk the converted DACL and confirm the session-SID ACE is
-        // present with the expected mask. Access mask 0x12019F ==
-        // FILE_GENERIC_READ | FILE_GENERIC_WRITE | SYNCHRONIZE — the
-        // generic-mapped result of `GRGW` applied against the file generic
-        // mapping at SD-conversion time.
         let aces = extract_dacl_aces_from_sddl(&sddl);
-        let matching = aces
+        let session_ace = aces
             .iter()
             .find(|(sid, _)| sid.eq_ignore_ascii_case(&session_sid))
-            .unwrap_or_else(|| {
-                panic!(
-                    "session-SID ACE missing from DACL — SDDL-injection guard may be dropping \
-                     the SID, or the generic-mnemonic mask was silently ignored. SDDL={sddl}, \
-                     aces={aces:?}"
-                )
-            });
+            .unwrap_or_else(|| panic!("session-SID ACE missing from DACL. SDDL={sddl}"));
         assert_eq!(
-            matching.1, 0x0012_019F,
-            "session-SID ACE mask is 0x{:08X}, expected 0x0012019F (FILE_GENERIC_READ | \
-             FILE_GENERIC_WRITE | SYNCHRONIZE). A different mask would break the \
-             WRITE_RESTRICTED child's CreateFileW access check. SDDL={sddl}",
-            matching.1
+            session_ace.1, 0x0012_019F,
+            "session-SID ACE mask is 0x{:08X}, expected 0x0012019F. SDDL={sddl}",
+            session_ace.1
+        );
+        let has_logon_ace = aces
+            .iter()
+            .any(|(sid, mask)| sid.starts_with("S-1-5-5-") && *mask == 0x0012_019F);
+        assert!(
+            has_logon_ace,
+            "capability pipe SDDL must contain an ACE for a logon SID \
+             (`S-1-5-5-*`) with mask 0x0012019F; without it the WRITE_RESTRICTED \
+             child's second-pass access check fails. aces={aces:?}, SDDL={sddl}"
         );
 
+        // Bind the capability pipe with the session-SID SDDL. Each test
+        // invocation gets a unique rendezvous path so parallel tests don't
+        // collide.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rendezvous = dir.path().join("pipe-roundtrip.rendezvous");
+        let server_thread_sid = session_sid.clone();
+        let rendezvous_for_server = rendezvous.clone();
+
+        // Drive the server on a background thread so the main thread can
+        // impersonate + open the client end. `SupervisorSocket::bind_impl`
+        // blocks until a client connects — we need both ends alive
+        // concurrently.
+        let server_handle = std::thread::spawn(move || {
+            SupervisorSocket::bind_impl(&rendezvous_for_server, true, Some(&server_thread_sid))
+        });
+
+        // Wait briefly for the rendezvous file to be written — the server
+        // creates it synchronously before ConnectNamedPipe blocks.
+        for _ in 0..50 {
+            if rendezvous.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            rendezvous.exists(),
+            "server thread did not publish rendezvous file at {}",
+            rendezvous.display()
+        );
+
+        // Build the restricted token and impersonate it on THIS thread.
+        let h_restricted = build_write_restricted_token(&session_sid);
+        let impersonate_ok = unsafe {
+            // SAFETY: h_restricted is a live token handle from
+            // build_write_restricted_token just above.
+            ImpersonateLoggedOnUser(h_restricted)
+        };
+        assert_ne!(
+            impersonate_ok,
+            0,
+            "ImpersonateLoggedOnUser failed: {}",
+            std::io::Error::last_os_error()
+        );
+
+        // Attempt the exact CreateFileW call that fails in production. This
+        // access check now runs against the restricted-token's SIDs,
+        // exercising BOTH DACL passes.
+        let connect_result = SupervisorSocket::connect(&rendezvous);
+
+        // ALWAYS revert impersonation before asserting, or the test harness
+        // will leak an impersonation context into subsequent tests.
+        let revert_ok = unsafe { RevertToSelf() };
+        // SAFETY: h_restricted is owned by this scope.
+        unsafe { CloseHandle(h_restricted) };
+        assert_ne!(
+            revert_ok,
+            0,
+            "RevertToSelf failed after impersonation: {}",
+            std::io::Error::last_os_error()
+        );
+
+        let client = connect_result.expect(
+            "CreateFileW from WRITE_RESTRICTED + session-SID token must succeed \
+             on the capability pipe. If this assertion fails the logon-SID ACE \
+             was likely dropped from build_capability_pipe_sddl — see \
+             .planning/debug/supervisor-pipe-access-denied.md.",
+        );
+
+        // Drain the server-side bind so the thread completes.
+        let server = server_handle
+            .join()
+            .expect("server thread panicked")
+            .expect("server bind failed");
+        drop(client);
+        drop(server);
+
         // Pre-fix guard: when session_sid is None, the DACL MUST NOT contain
-        // an ACE for the restricting SID — the whole point of the fix is
-        // that the pre-fix DACL lacked this ACE and denied WRITE_RESTRICTED
-        // children. If this assertion fails, the `None` path regressed.
+        // any `S-1-5-117-*` (session-SID) ACE. This preserves byte-identical
+        // SDDL for in-process / AIPC callers.
         let baseline_sddl = build_capability_pipe_sddl(None).expect("no-SID path must succeed");
         assert_eq!(baseline_sddl, CAPABILITY_PIPE_SDDL);
         let baseline_aces = extract_dacl_aces_from_sddl(&baseline_sddl);
@@ -1865,16 +2063,43 @@ mod tests {
         assert_eq!(sddl, CAPABILITY_PIPE_SDDL);
     }
 
-    /// `build_capability_pipe_sddl(Some(sid))` must embed the ACE before the
-    /// SACL and preserve the `D:P` protected prefix + Low-IL SACL verbatim.
+    /// `build_capability_pipe_sddl(Some(sid))` must embed two ACEs before
+    /// the SACL: (1) the session-SID ACE with mask `0x12019F`, and (2) a
+    /// logon-SID ACE with the same mask (logon SID is queried at runtime
+    /// from the current process token). Preserves the `D:P` protected
+    /// prefix + Low-IL SACL verbatim.
     #[test]
-    fn build_capability_pipe_sddl_some_embeds_ace_before_sacl() {
+    #[cfg(target_os = "windows")]
+    fn build_capability_pipe_sddl_some_embeds_session_and_logon_aces_before_sacl() {
         let sid = "S-1-5-117-1-2-3-4";
         let sddl = build_capability_pipe_sddl(Some(sid)).expect("valid sid must build");
-        let expected = format!(
-            "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)(A;;0x0012019F;;;{sid})S:(ML;;NW;;;LW)"
+        // The logon SID is a Windows invariant for any interactive session —
+        // we can't predict its exact value, so anchor on the prefix and
+        // assert the structural shape of the SDDL around it.
+        let session_ace = format!("(A;;0x0012019F;;;{sid})");
+        assert!(
+            sddl.starts_with("D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)"),
+            "SDDL must start with the D:P protected ACL prefix: {sddl}"
         );
-        assert_eq!(sddl, expected);
+        assert!(
+            sddl.contains(&session_ace),
+            "SDDL must contain the session-SID ACE verbatim: {sddl}"
+        );
+        let logon_pos = sddl.find("(A;;0x0012019F;;;S-1-5-5-").unwrap_or_else(|| {
+            panic!("SDDL must contain a logon-SID ACE (A;;0x0012019F;;;S-1-5-5-*): {sddl}")
+        });
+        let session_pos = sddl.find(&session_ace).expect("session ACE found above");
+        assert!(
+            session_pos < logon_pos,
+            "session-SID ACE must appear before the logon-SID ACE: {sddl}"
+        );
+        let sacl_pos = sddl
+            .find("S:(ML;;NW;;;LW)")
+            .unwrap_or_else(|| panic!("SDDL must retain the Low-IL SACL suffix: {sddl}"));
+        assert!(
+            logon_pos < sacl_pos,
+            "logon-SID ACE must appear before the SACL: {sddl}"
+        );
     }
 
     #[test]

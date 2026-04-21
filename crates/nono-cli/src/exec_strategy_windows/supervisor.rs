@@ -426,18 +426,6 @@ impl WindowsSupervisorRuntime {
     /// The thread exits naturally on pipe EOF or when `terminate_requested`
     /// is set. No token value is ever written to logs.
     fn start_capability_pipe_server(&mut self) -> Result<()> {
-        // Debug session `supervisor-pipe-access-denied` (cycle 2 instrumentation):
-        // Log whether the per-session restricting SID survived the supervisor
-        // layer. If `session_sid_present = false` here, the chain from
-        // `execution_runtime.rs:315` → `SupervisorConfig.session_sid` →
-        // `WindowsSupervisorRuntime.session_sid` is broken. To be reverted once
-        // root cause is identified.
-        tracing::info!(
-            session_sid_present = self.session_sid.is_some(),
-            session_id = %self.session_id,
-            "start_capability_pipe_server entry",
-        );
-
         let session_token = self.session_token.clone().ok_or_else(|| {
             NonoError::SandboxInit("Capability pipe server requires a session token".to_string())
         })?;
@@ -478,17 +466,6 @@ impl WindowsSupervisorRuntime {
             // capture would detect the `runtime_containment_job.0` access
             // below and capture only the inner field, triggering an E0277.
             let runtime_containment_job_local: SendableHandle = runtime_containment_job;
-            // Debug session `supervisor-pipe-access-denied` (cycle 2
-            // instrumentation): log rendezvous path + session_sid presence
-            // RIGHT before the bind call, inside the spawned thread. Confirms
-            // the `move ||` closure captured the right values. To be reverted
-            // once root cause is identified.
-            tracing::info!(
-                session_sid_present = session_sid.is_some(),
-                rendezvous_path = %rendezvous_path.display(),
-                session_id = %session_id,
-                "capability pipe server thread pre-bind",
-            );
             let mut sock = match nono::SupervisorSocket::bind_low_integrity_with_session_sid(
                 &rendezvous_path,
                 session_sid.as_deref(),
