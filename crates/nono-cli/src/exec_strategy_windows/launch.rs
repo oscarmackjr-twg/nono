@@ -924,7 +924,7 @@ fn prepare_low_integrity_runtime_root(path: &Path) -> bool {
         return true;
     }
 
-    let Ok(output) = Command::new("icacls")
+    let Ok(output) = Command::new(super::system32_exe("icacls"))
         .arg(path)
         .args(["/setintegritylevel", "(OI)(CI)L"])
         .output()

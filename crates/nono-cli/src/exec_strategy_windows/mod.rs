@@ -105,6 +105,25 @@ pub(crate) fn to_u16_null_terminated(s: &str) -> Vec<u16> {
         .collect()
 }
 
+/// Resolve an absolute path to a System32 executable.
+///
+/// Invoking OS tools (`icacls`, `netsh`, `sc`, etc.) through a relative
+/// command name via `Command::new` is a path-hijacking hazard: if an
+/// attacker can write to the current working directory or any directory
+/// earlier in `PATH`, a malicious executable with the same name is picked
+/// up instead of the genuine OS tool. Always invoke system binaries via
+/// their full `%SystemRoot%\System32\...` path.
+///
+/// Fallback chain (matches the existing pattern in this crate):
+/// `SystemRoot` env var → `windir` env var → literal `C:\Windows`.
+pub(super) fn system32_exe(name: &str) -> PathBuf {
+    let system_root = std::env::var_os("SystemRoot")
+        .or_else(|| std::env::var_os("windir"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    system_root.join("System32").join(format!("{name}.exe"))
+}
+
 pub fn resolve_program(program: &str) -> Result<PathBuf> {
     which::which(program).map_err(|e| {
         NonoError::CommandExecution(std::io::Error::new(

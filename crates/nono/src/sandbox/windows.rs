@@ -1792,6 +1792,17 @@ mod tests {
     use std::process::Command;
     use tempfile::tempdir;
 
+    // Avoid relative-path `Command::new("<tool>")` for OS utilities — path-
+    // hijack hazard on Windows. Resolve via `%SystemRoot%\System32\<tool>.exe`
+    // with the same fallback chain used elsewhere in the codebase.
+    fn system32_exe(name: &str) -> PathBuf {
+        let system_root = std::env::var_os("SystemRoot")
+            .or_else(|| std::env::var_os("windir"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+        system_root.join("System32").join(format!("{name}.exe"))
+    }
+
     fn try_create_symlink_file(link: &Path, target: &Path) -> bool {
         match std::os::windows::fs::symlink_file(target, link) {
             Ok(()) => true,
@@ -1803,7 +1814,7 @@ mod tests {
     }
 
     fn try_create_junction(link: &Path, target: &Path) -> bool {
-        let Ok(output) = Command::new("cmd")
+        let Ok(output) = Command::new(system32_exe("cmd"))
             .args([
                 "/c",
                 "mklink",
@@ -1830,7 +1841,7 @@ mod tests {
     }
 
     fn try_set_low_integrity_label(path: &Path) -> bool {
-        let Ok(output) = Command::new("icacls")
+        let Ok(output) = Command::new(system32_exe("icacls"))
             .arg(path)
             .args(["/setintegritylevel", "(OI)(CI)L"])
             .output()

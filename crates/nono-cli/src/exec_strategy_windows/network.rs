@@ -34,7 +34,7 @@ impl Drop for NetworkEnforcementGuard {
 }
 
 pub(super) fn run_netsh_firewall(args: &[&str]) -> Result<String> {
-    let output = Command::new("netsh")
+    let output = Command::new(super::system32_exe("netsh"))
         .args(args)
         .output()
         .map_err(NonoError::CommandExecution)?;
@@ -162,7 +162,7 @@ pub(super) fn format_wfp_service_command(config: &WfpProbeConfig) -> String {
 }
 
 pub(super) fn run_sc_query(service: &str) -> Result<String> {
-    let output = Command::new("sc")
+    let output = Command::new(super::system32_exe("sc"))
         .args(["query", service])
         .output()
         .map_err(NonoError::CommandExecution)?;
@@ -174,7 +174,7 @@ pub(super) fn run_sc_query(service: &str) -> Result<String> {
 }
 
 pub(super) fn run_sc_command(args: &[String]) -> Result<String> {
-    let output = Command::new("sc")
+    let output = Command::new(super::system32_exe("sc"))
         .args(args)
         .output()
         .map_err(NonoError::CommandExecution)?;

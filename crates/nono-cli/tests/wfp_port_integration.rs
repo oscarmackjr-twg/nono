@@ -29,13 +29,23 @@
 use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
 
+/// Resolve `%SystemRoot%\System32\<name>.exe`. Avoids the path-hijack hazard
+/// of `Command::new("<tool>")` picking up a malicious binary from the cwd.
+fn system32_exe(name: &str) -> std::path::PathBuf {
+    let system_root = std::env::var_os("SystemRoot")
+        .or_else(|| std::env::var_os("windir"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
+    system_root.join("System32").join(format!("{name}.exe"))
+}
+
 /// Returns `true` when the current process holds administrator privileges.
 ///
 /// Uses `net session` as a quick heuristic: the command succeeds only for
 /// elevated processes on Windows.
 fn is_elevated() -> bool {
     use std::process::Command;
-    Command::new("net")
+    Command::new(system32_exe("net"))
         .args(["session"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

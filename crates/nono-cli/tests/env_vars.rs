@@ -9,6 +9,17 @@ fn nono_bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_nono"))
 }
 
+/// Resolve `%SystemRoot%\System32\<name>.exe`. Avoids the path-hijack hazard
+/// of `Command::new("<tool>")` picking up a malicious binary from the cwd.
+#[cfg(target_os = "windows")]
+fn system32_exe(name: &str) -> std::path::PathBuf {
+    let system_root = std::env::var_os("SystemRoot")
+        .or_else(|| std::env::var_os("windir"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
+    system_root.join("System32").join(format!("{name}.exe"))
+}
+
 /// Combine stdout + stderr for assertion checking (nono writes UX to stderr).
 fn combined_output(output: &std::process::Output) -> String {
     let mut s = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -33,7 +44,7 @@ fn windows_net_probe_bin() -> std::path::PathBuf {
 
 #[cfg(target_os = "windows")]
 fn try_set_low_integrity_label(path: &std::path::Path) -> bool {
-    let Ok(output) = Command::new("icacls")
+    let Ok(output) = Command::new(system32_exe("icacls"))
         .arg(path)
         .args(["/setintegritylevel", "(OI)(CI)L"])
         .output()
@@ -66,7 +77,7 @@ fn try_add_and_remove_windows_firewall_rule(program: &std::path::Path) -> bool {
     let name = format!("nono-test-fw-{suffix}");
     let program_arg = format!("program={}", program.display());
 
-    let add = Command::new("netsh")
+    let add = Command::new(system32_exe("netsh"))
         .args([
             "advfirewall",
             "firewall",
@@ -84,7 +95,7 @@ fn try_add_and_remove_windows_firewall_rule(program: &std::path::Path) -> bool {
         eprintln!("skipping firewall integration test because netsh is unavailable");
         return false;
     };
-    let _ = Command::new("netsh")
+    let _ = Command::new(system32_exe("netsh"))
         .args([
             "advfirewall",
             "firewall",
