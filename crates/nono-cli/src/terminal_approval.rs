@@ -33,21 +33,20 @@ impl ApprovalBackend for TerminalApproval {
             });
         }
 
-        // Display the request (sanitize untrusted fields from the sandboxed child)
-        eprintln!();
-        eprintln!("[nono] The sandboxed process is requesting additional access:");
-        #[allow(deprecated)]
-        let request_path = &request.path;
-        eprintln!(
-            "[nono]   Path:   {}",
-            sanitize_for_terminal(&request_path.display().to_string())
-        );
-        eprintln!("[nono]   Access: {}", format_access_mode(&request.access));
-        if let Some(ref reason) = request.reason {
-            eprintln!("[nono]   Reason: {}", sanitize_for_terminal(reason));
+        // Phase 18.1 G-02 fix: route AIPC (non-File) requests through the
+        // D-04-locked per-kind templates; File-kind legacy shape
+        // (target == None) preserves the Phase 11 multi-line block
+        // byte-identical. The helper is side-effect-free so tests can
+        // capture the exact string without requiring a TTY.
+        let prompt = build_prompt_text(request);
+        eprint!("{prompt}");
+        if !prompt.ends_with(' ') {
+            // AIPC per-kind templates end with `[y/N]` (no trailing space).
+            // Legacy File path ends with `[y/N] ` (trailing space, already
+            // in the template). For the AIPC case, emit a newline so the
+            // approver's typed response appears on a new line.
+            eprintln!();
         }
-        eprintln!("[nono]");
-        eprint!("[nono] Grant access? [y/N] ");
         let _ = std::io::stderr().flush();
 
         // Read from a dedicated terminal device, not stdin (which belongs
@@ -158,11 +157,10 @@ fn format_access_mode(access: &AccessMode) -> &'static str {
 
 /// Render the per-bit Event mask as a human-readable label per D-04.
 ///
-/// Consumed transitively via `format_capability_prompt` by tests in this
-/// module; the dispatcher wiring (Plan 18-01 Task 5) will route the live
-/// CONIN$ prompt through it. Remove this `#[allow(dead_code)]` after Task 5
-/// lands the dispatcher path.
-#[allow(dead_code)]
+/// Consumed transitively via `format_capability_prompt` from
+/// `build_prompt_text`, which `TerminalApproval::request_capability` calls
+/// for every AIPC (non-File) approval prompt since Phase 18.1 Plan 18.1-01
+/// (G-02 fix).
 fn format_event_access(mask: u32) -> &'static str {
     let wait = mask & policy::SYNCHRONIZE != 0;
     let signal = mask & policy::EVENT_MODIFY_STATE != 0;
@@ -176,11 +174,10 @@ fn format_event_access(mask: u32) -> &'static str {
 
 /// Render the per-bit Mutex mask as a human-readable label per D-04.
 ///
-/// Consumed transitively via `format_capability_prompt` by tests in this
-/// module; the dispatcher wiring (Plan 18-01 Task 5) will route the live
-/// CONIN$ prompt through it. Remove this `#[allow(dead_code)]` after Task 5
-/// lands the dispatcher path.
-#[allow(dead_code)]
+/// Consumed transitively via `format_capability_prompt` from
+/// `build_prompt_text`, which `TerminalApproval::request_capability` calls
+/// for every AIPC (non-File) approval prompt since Phase 18.1 Plan 18.1-01
+/// (G-02 fix).
 fn format_mutex_access(mask: u32) -> &'static str {
     let wait = mask & policy::SYNCHRONIZE != 0;
     let release = mask & policy::MUTEX_MODIFY_STATE != 0;
@@ -197,7 +194,6 @@ fn format_mutex_access(mask: u32) -> &'static str {
 /// any other bits surface as `(none)` (the dispatcher's pipe helper rejects
 /// invalid combinations earlier, so this branch is only reached on valid
 /// requests).
-#[allow(dead_code)]
 fn format_pipe_direction(mask: u32) -> &'static str {
     let read = mask & policy::GENERIC_READ != 0;
     let write = mask & policy::GENERIC_WRITE != 0;
@@ -214,7 +210,6 @@ fn format_pipe_direction(mask: u32) -> &'static str {
 /// `JOB_OBJECT_SET_ATTRIBUTES`, `JOB_OBJECT_TERMINATE`,
 /// `JOB_OBJECT_ASSIGN_PROCESS`. Unrecognized combinations surface as `(none)`.
 /// Returns an owned `String` because the bit combinations multiply.
-#[allow(dead_code)]
 fn format_job_object_access(mask: u32) -> String {
     let mut parts: Vec<&'static str> = Vec::new();
     if mask & policy::JOB_OBJECT_QUERY != 0 {
@@ -236,6 +231,68 @@ fn format_job_object_access(mask: u32) -> String {
     }
 }
 
+/// Produce the exact prompt string `TerminalApproval::request_capability`
+/// writes to the approver's terminal.
+///
+/// Returning a `String` (no stdio side-effects) makes the prompt-selection
+/// logic unit-testable without requiring a TTY — the returned string is
+/// what the approver would have seen had stderr been a real terminal.
+///
+/// Dispatch rule (Phase 18.1 Plan 18.1-01 G-02 fix):
+///
+/// - `target == Some(_)` → route through [`format_capability_prompt`] with
+///   the D-04-locked per-kind template. All 5 new AIPC HandleKinds (Event,
+///   Mutex, Pipe, Socket, JobObject) take this path.
+/// - `target == None` → Phase 11 legacy File shape. Renders the byte-
+///   identical multi-line block (`[nono] The sandboxed process is
+///   requesting additional access:` / `Path:` / `Access:` / `Reason:` /
+///   blank / `Grant access? [y/N] `) so Phase 11 UAT output is preserved.
+///
+/// Every untrusted string (`path`, `reason`, and — transitively via
+/// `format_capability_prompt` — `name`/`host`) is scrubbed via
+/// [`sanitize_for_terminal`] before embedding.
+fn build_prompt_text(request: &CapabilityRequest) -> String {
+    match request.target.as_ref() {
+        Some(target) => {
+            // D-01: route the 5 new AIPC HandleKind shapes through the
+            // D-04-locked template helper. G-02 fix.
+            format_capability_prompt(
+                request.kind,
+                target,
+                request.access_mask,
+                request.reason.as_deref(),
+            )
+        }
+        None => {
+            // Phase 11 legacy File path — target is None. Preserve the
+            // byte-identical pre-fix multi-line block so Phase 11 UAT
+            // output does not regress.
+            #[allow(deprecated)]
+            let request_path = &request.path;
+            let mut out = String::new();
+            out.push('\n');
+            out.push_str("[nono] The sandboxed process is requesting additional access:\n");
+            out.push_str(&format!(
+                "[nono]   Path:   {}\n",
+                sanitize_for_terminal(&request_path.display().to_string())
+            ));
+            out.push_str(&format!(
+                "[nono]   Access: {}\n",
+                format_access_mode(&request.access)
+            ));
+            if let Some(ref reason) = request.reason {
+                out.push_str(&format!(
+                    "[nono]   Reason: {}\n",
+                    sanitize_for_terminal(reason)
+                ));
+            }
+            out.push_str("[nono]\n");
+            out.push_str("[nono] Grant access? [y/N] ");
+            out
+        }
+    }
+}
+
 /// Render the per-handle-type approval prompt per CONTEXT.md D-04
 /// (Phase 18 AIPC-01).
 ///
@@ -244,14 +301,12 @@ fn format_job_object_access(mask: u32) -> String {
 /// branch + y/N parser are reused unchanged from Phase 11 D-04; this
 /// function only produces the prompt string.
 ///
-/// `Socket`, `Pipe`, and `JobObject` branches return placeholder strings in
-/// this plan (Plan 18-01); Plans 18-02 (Pipe + Socket) and 18-03 (Job Object)
-/// replace them with the D-04-locked templates.
-///
-/// Consumed by tests in this module; the dispatcher wiring (Plan 18-01
-/// Task 5) routes the live CONIN$ prompt through it. Remove this
-/// `#[allow(dead_code)]` after Task 5 lands the dispatcher path.
-#[allow(dead_code)]
+/// Consumed by `build_prompt_text`, which
+/// `TerminalApproval::request_capability` calls for every AIPC (non-File)
+/// approval prompt. Phase 18.1 Plan 18.1-01 (G-02) wired the live
+/// dispatcher through this helper — before that fix the dispatcher emitted
+/// a generic 3-line `Path:/Access:/Reason:` block and the per-kind helpers
+/// were unreachable dead code.
 pub(crate) fn format_capability_prompt(
     kind: HandleKind,
     target: &HandleTarget,
