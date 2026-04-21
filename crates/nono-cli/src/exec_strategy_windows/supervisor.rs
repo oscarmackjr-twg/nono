@@ -2005,6 +2005,49 @@ pub(super) fn handle_windows_supervisor_message(
 #[cfg(all(test, target_os = "windows"))]
 #[allow(clippy::unwrap_used)]
 mod capability_handler_tests {
+    //! WR-01 reject-stage verdict matrix (Phase 18.1 G-05 empirical verification).
+    //!
+    //! Phase 18.1 Plan 18.1-04 closes G-05 (18-HUMAN-UAT.md § Gaps) by
+    //! empirically verifying the reject-stage invariant for each of the 5
+    //! AIPC HandleKinds plus File (the Phase 11 legacy path). The verdict
+    //! matrix is:
+    //!
+    //! | Kind      | Out-of-allowlist rejection stage | Enforcement site                                |
+    //! |-----------|----------------------------------|-------------------------------------------------|
+    //! | Event     | BEFORE prompt                    | handle_windows_supervisor_message :1846-1878    |
+    //! | Mutex     | BEFORE prompt                    | handle_windows_supervisor_message :1846-1878    |
+    //! | JobObject | BEFORE prompt                    | handle_windows_supervisor_message :1846-1878    |
+    //! | Pipe      | AFTER prompt (WR-01 deviation)   | handle_pipe_request :1411 post-approval         |
+    //! | Socket    | AFTER prompt (WR-01 deviation)   | handle_socket_request :1479 post-approval       |
+    //!
+    //! The `Event | Mutex | JobObject` branch of the pre-broker mask gate
+    //! executes BEFORE the approval backend is consulted, so a request
+    //! with `access_mask` outside the resolved allowlist never reaches
+    //! the user's approval prompt. `backend.calls() == 0` is observable
+    //! from the tests.
+    //!
+    //! The `Pipe | Socket` per-kind helpers run INSIDE the post-approval
+    //! dispatch arm (see `handle_windows_supervisor_message` ~line 1900+
+    //! — the `if decision.is_granted()` block). The direction-allowlist
+    //! check at `handle_pipe_request:1411` and the unconditional
+    //! privileged-port deny + role-allowlist check at
+    //! `handle_socket_request:1479` fire AFTER the approval backend has
+    //! returned `Granted`. The G-04 flip (Wave 2, Plan 18.1-02) wraps
+    //! the resulting `Err` into `Denied { reason: "broker failed:
+    //! <inner>" }` before the audit push + send_response, so the wire
+    //! shape is consistent; but the UX observable differs: Pipe/Socket
+    //! show the user the approval prompt BEFORE ultimately denying,
+    //! while Event/Mutex/JobObject deny silently without prompting.
+    //!
+    //! Per CONTEXT.md D-14 (Phase 18.1) + 18-HUMAN-UAT Test 2 result,
+    //! the WR-01 stage-unification fix (routing Pipe direction + Socket
+    //! role/port through the same pre-broker gate as
+    //! Event/Mutex/JobObject) is explicitly **deferred to v2.2 as a
+    //! product decision**. Phase 18.1 only verifies + documents the
+    //! current behavior; the `wr01_*` tests below lock the matrix above
+    //! into regression guards so any future refactor that accidentally
+    //! moves a mask check pre/post-broker breaks CI.
+
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
@@ -3090,6 +3133,17 @@ mod capability_handler_tests {
         )
         .expect("dispatch");
 
+        // WR-01 G-05 stage assertion: JobObject's pre-broker mask gate at
+        // handle_windows_supervisor_message:1846-1878 fires BEFORE the
+        // approval backend is consulted. The `backend.calls() == 0`
+        // assertion below is the structural proof of the pre-prompt stage
+        // — it pairs with the `wr01_job_object_rejects_before_prompt_on_terminate_mask`
+        // test appended to the end of this module, which locks the same
+        // semantic with an explicit WR-01 tie-in to the module docstring
+        // verdict matrix. Keep this assertion value-equivalent to the
+        // corresponding assertion there; diverging them would mean the
+        // dispatcher has two code paths for JobObject mask validation,
+        // which would itself be a bug worth catching.
         // Backend MUST NOT be consulted — pre-broker mask check happens
         // BEFORE backend dispatch (Phase 18 D-07 enforcement).
         assert_eq!(
@@ -4056,6 +4110,399 @@ mod capability_handler_tests {
                 !reason.contains("role Bind not in resolved allowlist"),
                 "Socket Bind widening failed to reach allowlist gate: {reason}"
             );
+        }
+        let _ = child.recv_response().expect("drain");
+    }
+
+    // =========================================================================
+    // WR-01 reject-stage regression tests (Phase 18.1 G-05)
+    // =========================================================================
+    //
+    // See the module-level docstring at the top of `capability_handler_tests`
+    // for the WR-01 verdict matrix. Each test below is a regression guard
+    // for ONE row of that matrix; collectively they lock the empirical
+    // reject-stage semantic for all 5 AIPC HandleKinds into CI. A future
+    // refactor that accidentally moves a mask/direction/role/port check
+    // from the pre-broker gate to the post-broker helper (or vice versa)
+    // will flip the observed `backend.calls()` value from 0 to 1 (or 1 to 0)
+    // and break one of these tests.
+    //
+    // 0x10000000 is used as the out-of-allowlist Event/Mutex probe mask
+    // because it is unambiguously outside the respective DEFAULT_MASKs:
+    //   EVENT_DEFAULT_MASK = SYNCHRONIZE | EVENT_MODIFY_STATE = 0x0010_0002
+    //   MUTEX_DEFAULT_MASK = SYNCHRONIZE | MUTEX_MODIFY_STATE = 0x0010_0001
+    // `0x10000000 & !(0x0010_0002)` is non-zero, so `mask_is_allowed` returns
+    // false. (Coincidentally equal to `policy::GENERIC_ALL`; the specific
+    // semantic does not matter — only that the bit fails the subset check.)
+
+    /// WR-01 G-05 regression: Event with a mask outside `EVENT_DEFAULT_MASK`
+    /// rejects BEFORE the approval backend is consulted.
+    ///
+    /// Enforcement site: the pre-broker mask-validation gate in
+    /// `handle_windows_supervisor_message` (~lines 1846-1878 post-Wave-3)
+    /// fires for `HandleKind::Event | Mutex | JobObject` branches BEFORE
+    /// `approval_backend.request_capability` is called (~line 1881).
+    ///
+    /// Observable: `backend.calls() == 0` AND the Denied reason is
+    /// "access mask ... not in allowlist for Event ..." — NOT the G-04-
+    /// wrapped `"broker failed:"` shape which would indicate a post-broker
+    /// rejection.
+    ///
+    /// Contrast with Pipe/Socket, which currently reject AFTER approval
+    /// per the WR-01 deviation (see module docstring).
+    #[test]
+    fn wr01_event_rejects_before_prompt_on_out_of_allowlist_mask() {
+        let backend = CountingGrantBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        let token = "testtoken12345678";
+        // 0x10000000 is unambiguously outside EVENT_DEFAULT_MASK.
+        let out_of_mask: u32 = 0x1000_0000;
+        let req = make_request_aipc(
+            token,
+            "wr01-event-001",
+            HandleKind::Event,
+            Some(HandleTarget::EventName {
+                name: "wr01-event".to_string(),
+            }),
+            out_of_mask,
+        );
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(req),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            token,
+            "testaipc12345678",
+            std::ptr::null_mut(),
+            &AipcResolvedAllowlist::default(),
+        )
+        .expect("dispatch");
+
+        assert_eq!(
+            backend.calls(),
+            0,
+            "WR-01 invariant: Event out-of-allowlist mask gate is PRE-prompt \
+             — backend MUST NOT be consulted"
+        );
+        assert_eq!(audit_log.len(), 1);
+        match &audit_log[0].decision {
+            nono::ApprovalDecision::Denied { reason } => {
+                assert!(
+                    reason.contains("access mask"),
+                    "expected pre-broker mask-gate reason, got: {reason}"
+                );
+                assert!(
+                    reason.contains("allowlist"),
+                    "expected pre-broker mask-gate reason, got: {reason}"
+                );
+                assert!(
+                    !reason.contains("broker failed:"),
+                    "WR-01 invariant violated: pre-prompt rejection MUST NOT \
+                     be G-04-wrapped (no `broker failed:` prefix): {reason}"
+                );
+            }
+            other => panic!("expected Denied, got {other:?}"),
+        }
+        let _ = child.recv_response().expect("drain");
+    }
+
+    /// WR-01 G-05 regression: Mutex with a mask outside `MUTEX_DEFAULT_MASK`
+    /// rejects BEFORE the approval backend is consulted.
+    ///
+    /// Same enforcement site + contract as
+    /// [`wr01_event_rejects_before_prompt_on_out_of_allowlist_mask`]; this
+    /// test locks the `HandleKind::Mutex` branch of the pre-broker gate.
+    #[test]
+    fn wr01_mutex_rejects_before_prompt_on_out_of_allowlist_mask() {
+        let backend = CountingGrantBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        let token = "testtoken12345678";
+        // 0x10000000 is unambiguously outside MUTEX_DEFAULT_MASK.
+        let out_of_mask: u32 = 0x1000_0000;
+        let req = make_request_aipc(
+            token,
+            "wr01-mutex-001",
+            HandleKind::Mutex,
+            Some(HandleTarget::MutexName {
+                name: "wr01-mutex".to_string(),
+            }),
+            out_of_mask,
+        );
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(req),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            token,
+            "testaipc12345678",
+            std::ptr::null_mut(),
+            &AipcResolvedAllowlist::default(),
+        )
+        .expect("dispatch");
+
+        assert_eq!(
+            backend.calls(),
+            0,
+            "WR-01 invariant: Mutex out-of-allowlist mask gate is PRE-prompt \
+             — backend MUST NOT be consulted"
+        );
+        assert_eq!(audit_log.len(), 1);
+        match &audit_log[0].decision {
+            nono::ApprovalDecision::Denied { reason } => {
+                assert!(
+                    reason.contains("access mask"),
+                    "expected pre-broker mask-gate reason, got: {reason}"
+                );
+                assert!(
+                    reason.contains("allowlist"),
+                    "expected pre-broker mask-gate reason, got: {reason}"
+                );
+                assert!(
+                    !reason.contains("broker failed:"),
+                    "WR-01 invariant violated: pre-prompt rejection MUST NOT \
+                     be G-04-wrapped (no `broker failed:` prefix): {reason}"
+                );
+            }
+            other => panic!("expected Denied, got {other:?}"),
+        }
+        let _ = child.recv_response().expect("drain");
+    }
+
+    /// WR-01 G-05 regression: JobObject with `JOB_OBJECT_TERMINATE`
+    /// (outside the default `JOB_OBJECT_QUERY`-only allowlist) rejects
+    /// BEFORE the approval backend is consulted under the default
+    /// profile (no widening).
+    ///
+    /// This test MIRRORS the intent of the pre-existing
+    /// `handle_denies_job_object_with_terminate_mask_no_profile_widening`
+    /// (line ~3062 post-Wave-3) and exists to tie the JobObject
+    /// branch explicitly to the WR-01 verdict matrix in the module
+    /// docstring. The existing test carries the WR-01 G-05 narrative
+    /// comment above its `backend.calls() == 0` assertion; this test is
+    /// the co-located regression guard that pairs with it.
+    #[test]
+    fn wr01_job_object_rejects_before_prompt_on_terminate_mask() {
+        let backend = CountingGrantBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        let token = "testtoken12345678";
+        // TERMINATE (0x0008) is outside JOB_OBJECT_DEFAULT_MASK (=QUERY=0x0004).
+        let req = make_request_aipc(
+            token,
+            "wr01-jobobj-001",
+            HandleKind::JobObject,
+            Some(HandleTarget::JobObjectName {
+                name: "wr01-jobobj".to_string(),
+            }),
+            policy::JOB_OBJECT_TERMINATE,
+        );
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(req),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            token,
+            "testaipc12345678",
+            std::ptr::null_mut(),
+            &AipcResolvedAllowlist::default(),
+        )
+        .expect("dispatch");
+
+        assert_eq!(
+            backend.calls(),
+            0,
+            "WR-01 invariant: JobObject out-of-allowlist mask gate is \
+             PRE-prompt — backend MUST NOT be consulted"
+        );
+        assert_eq!(audit_log.len(), 1);
+        match &audit_log[0].decision {
+            nono::ApprovalDecision::Denied { reason } => {
+                assert!(
+                    reason.contains("access mask"),
+                    "expected pre-broker mask-gate reason, got: {reason}"
+                );
+                assert!(
+                    reason.contains("allowlist"),
+                    "expected pre-broker mask-gate reason, got: {reason}"
+                );
+                assert!(
+                    !reason.contains("broker failed:"),
+                    "WR-01 invariant violated: pre-prompt rejection MUST NOT \
+                     be G-04-wrapped (no `broker failed:` prefix): {reason}"
+                );
+            }
+            other => panic!("expected Denied, got {other:?}"),
+        }
+        let _ = child.recv_response().expect("drain");
+    }
+
+    /// WR-01 G-05 regression: Pipe ReadWrite under the default allowlist
+    /// rejects AFTER the approval backend has been consulted.
+    ///
+    /// This is a **documented WR-01 deviation** from the Event/Mutex/
+    /// JobObject pre-prompt invariant. The direction-allowlist check
+    /// lives INSIDE `handle_pipe_request` at supervisor.rs:1411, which
+    /// the dispatcher invokes AFTER the backend returns `Granted`. With
+    /// the G-04 flip (Wave 2, Plan 18.1-02) the wire decision becomes
+    /// `Denied { reason: "broker failed: pipe direction ReadWrite not in
+    /// resolved allowlist ..." }`.
+    ///
+    /// NOTE: there is a closely-related Wave 3 regression test
+    /// `default_allowlist_rejects_pipe_readwrite_after_prompt` (~line
+    /// 3943) which asserts the same shape from the profile-widening
+    /// angle (G-06). This test is the WR-01-reject-stage co-lock
+    /// pairing with [`wr01_event_rejects_before_prompt_on_out_of_allowlist_mask`]
+    /// — both rows of the verdict matrix covered by named tests whose
+    /// identifiers encode the expected stage.
+    #[test]
+    fn wr01_pipe_rejects_after_prompt_on_readwrite_default_profile() {
+        let backend = CountingGrantBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        let token = "testtoken12345678";
+        let req = make_request_aipc(
+            token,
+            "wr01-pipe-001",
+            HandleKind::Pipe,
+            Some(HandleTarget::PipeName {
+                name: "wr01-pipe-rw".to_string(),
+            }),
+            policy::GENERIC_READ | policy::GENERIC_WRITE,
+        );
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(req),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            token,
+            "testaipc12345678",
+            std::ptr::null_mut(),
+            &AipcResolvedAllowlist::default(),
+        )
+        .expect("dispatch");
+
+        assert_eq!(
+            backend.calls(),
+            1,
+            "WR-01 deviation: Pipe direction check is POST-prompt — \
+             backend MUST have been consulted exactly once"
+        );
+        assert_eq!(audit_log.len(), 1);
+        match &audit_log[0].decision {
+            nono::ApprovalDecision::Denied { reason } => {
+                assert!(
+                    reason.contains("broker failed:"),
+                    "WR-01 deviation: post-prompt rejection MUST be \
+                     G-04-wrapped: {reason}"
+                );
+                assert!(
+                    reason.contains("not in resolved allowlist"),
+                    "expected pipe-direction allowlist rejection as \
+                     inner reason: {reason}"
+                );
+            }
+            other => panic!("expected Denied, got {other:?}"),
+        }
+        let _ = child.recv_response().expect("drain");
+    }
+
+    /// WR-01 G-05 empirical verification: Socket request with a
+    /// privileged port (`port=80`) under the default profile rejects.
+    ///
+    /// Stage observation (empirically confirmed 2026-04-21, Phase 18.1
+    /// Wave 4): the privileged-port check at
+    /// `handle_socket_request:1479` lives INSIDE the per-kind helper,
+    /// which the dispatcher invokes AFTER the approval backend returns
+    /// `Granted`. So the observed shape is:
+    ///
+    ///   - `backend.calls() == 1` (approval prompt was reached)
+    ///   - `audit_log[0].decision == Denied { reason }` with reason
+    ///     containing both `"broker failed:"` (G-04 wrapper) AND
+    ///     `"privileged port 80 not allowed"` (inner rejection text
+    ///     from `handle_socket_request`).
+    ///
+    /// This matches the WR-01 deviation for Pipe and lands the Socket
+    /// row of the module-docstring verdict matrix as "AFTER prompt".
+    ///
+    /// If this test fails with `backend.calls() == 0`, the privileged-
+    /// port check has been moved to the pre-broker gate — update BOTH
+    /// the assertion here AND the module-docstring verdict-matrix row
+    /// for Socket. This is a semantic change worth explicit bookkeeping.
+    #[test]
+    fn wr01_socket_privileged_port_rejects_after_prompt_empirical() {
+        let backend = CountingGrantBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        let token = "testtoken12345678";
+        let req = make_request_aipc(
+            token,
+            "wr01-socket-001",
+            HandleKind::Socket,
+            Some(HandleTarget::SocketEndpoint {
+                protocol: SocketProtocol::Tcp,
+                host: "127.0.0.1".to_string(),
+                port: 80, // privileged: <= PRIVILEGED_PORT_MAX (1023)
+                role: SocketRole::Connect,
+            }),
+            0,
+        );
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(req),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            token,
+            "testaipc12345678",
+            std::ptr::null_mut(),
+            &AipcResolvedAllowlist::default(),
+        )
+        .expect("dispatch");
+
+        // Empirical: privileged-port check runs INSIDE handle_socket_request
+        // (post-approval), so backend has been consulted exactly once.
+        assert_eq!(
+            backend.calls(),
+            1,
+            "WR-01 deviation: Socket privileged-port check is POST-prompt \
+             (verify matches module docstring verdict matrix)"
+        );
+        assert_eq!(audit_log.len(), 1);
+        match &audit_log[0].decision {
+            nono::ApprovalDecision::Denied { reason } => {
+                assert!(
+                    reason.contains("broker failed:"),
+                    "WR-01 deviation: post-prompt rejection MUST be \
+                     G-04-wrapped: {reason}"
+                );
+                assert!(
+                    reason.contains("privileged port"),
+                    "expected privileged-port rejection as inner reason: \
+                     {reason}"
+                );
+            }
+            other => panic!("expected Denied, got {other:?}"),
         }
         let _ = child.recv_response().expect("drain");
     }
