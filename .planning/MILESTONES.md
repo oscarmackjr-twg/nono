@@ -1,28 +1,36 @@
 # Milestones
 
-## v2.1 — Resource Limits, Extended IPC, Attach-Streaming & Cleanup (in progress)
+## v2.1 — Resource Limits, Extended IPC, Attach-Streaming & Cleanup
 
-**Status:** 🚧 ACTIVE (scoped 2026-04-18)
+**Status:** ✅ SHIPPED 2026-04-21
 **Started:** 2026-04-18
+**Shipped:** 2026-04-21
 **Branch:** `windows-squash` (continuing from v2.0 + Phase 15)
 
-**Goal:** Deliver Job Object resource limits (CPU / memory / timeout / process-count), extend the Phase 11 capability pipe to broker additional handle types, finish the Phase 15 attach-streaming gap with full ConPTY re-attach on detached Windows sessions, and clean up accumulated v2.0 WIP.
+**Goal:** Deliver Job Object resource limits (CPU / memory / timeout / process-count), extend the Phase 11 capability pipe to broker additional handle types end-to-end, land attach-streaming on detached Windows sessions, sync to upstream v0.37.1 (including the rustls-webpki security upgrade), enable single-file filesystem grants on Windows so the `claude-code` profile runs cleanly, and clean up v2.0 WIP.
 
-**Requirements (10):**
-- RESL-01..04 — CPU %, memory, wall-clock timeout, process count caps (Phase 16)
-- AIPC-01 — extended handle brokering: socket / pipe / Job Object / event / mutex (Phase 18)
-- ATCH-01 — full ConPTY re-attach on detached Windows sessions (Phase 17)
-- CLEAN-01..04 — fmt drift, Windows test flakes, WIP triage, session-file housekeeping (Phase 19)
+**Phases:** 7 phases (Phases 16–21 plus decimal Phase 18.1).
+**Plans shipped:** 25 plans.
+**Requirements:** 13 — RESL-01..04, AIPC-01, ATCH-01, CLEAN-01..04, UPST-01..04, WSFG-01..03.
 
-See `.planning/REQUIREMENTS.md` for full acceptance criteria.
+**Key accomplishments:**
+- Job Object resource limits — CPU/memory/timeout/process-count caps with kernel enforcement (Phase 16).
+- `nono attach` on detached Windows sessions now streams child stdout live via anonymous-pipe stdio; friendly multi-attach error (Phase 17).
+- AIPC handle brokering for Socket / Pipe / Job Object / Event / Mutex over the Phase 11 capability pipe + `capabilities.aipc` profile-widening schema + containment-Job runtime guard (Phases 18 + 18.1).
+- 5 HUMAN-UAT gaps (G-02..G-06) closed in Phase 18.1 with live dual-run widening proof on rebuilt binary.
+- Cleanup workstream — fmt drift, 4 Windows test flakes (incl. UNC-prefix `query_path` production bug), 10 WIP items triaged, `is_prunable` + `nono prune --older-than`/`--all-exited` + auto-sweep on `nono ps`, 1343-file one-shot prune on dev host (Phase 19).
+- Upstream parity sync to v0.37.1 — rustls-webpki 0.103.12 security upgrade (RUSTSEC-2026-0098/0099), `keyring://` URIs, env-var filtering, `--allow-gpu` with NVIDIA Linux allowlist, GitLab ID tokens for trust signing (Phase 20).
+- Windows single-file filesystem grants via per-file Low-IL mandatory-label ACEs + `AppliedLabelsGuard` RAII lifecycle + ownership-skip pre-check; unblocks `claude-code` profile's `git_config` group on Windows (Phase 21).
 
-**Phase structure (target; may split during planning):**
-- Phase 16: Resource Limits (RESL-01..04)
-- Phase 17: Attach-Streaming (ATCH-01)
-- Phase 18: Extended IPC (AIPC-01)
-- Phase 19: Cleanup (CLEAN-01..04)
+**Notable in-flight finding:** Windows 11 26200's `WRITE_RESTRICTED` tokens require BOTH a restricting-SID ACE AND a logon-SID ACE in the pipe DACL for the second-pass access check to pass — MSDN-undocumented; discovered via 13-variant systematic SDDL iteration in `crates/nono-cli/examples/pipe-repro.rs`. Fix in commit `938887f`.
 
-**Carried-forward from v2.0:** None. Phase 15 closed the detached-console-grandchild carry-forward; v2.1 starts clean.
+**Known deferred items at close:** 17 (5 UAT bookkeeping gaps, 3 verification human_needed flags, 9 stale quick-task index pointers to already-removed directories). See STATE.md `## Deferred Items` for the full table. None block release.
+
+**Archive files:**
+- `.planning/milestones/v2.1-ROADMAP.md`
+- `.planning/milestones/v2.1-REQUIREMENTS.md`
+
+Git tag: `v2.1`.
 
 ---
 
