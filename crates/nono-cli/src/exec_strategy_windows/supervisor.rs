@@ -676,21 +676,28 @@ impl WindowsSupervisorRuntime {
                 let _ = log_file.flush();
 
                 // On Windows, writing to a named pipe that has no listener
-                // will block if we try to write to it directly. We use a
-                // shared handle for the active attachment.
-                let attachment_handle = {
-                    let lock = active_attachment.lock().unwrap_or_else(|p| p.into_inner());
-                    *lock
-                };
-
-                if let Some(sendable) = attachment_handle {
+                // will block if we try to write to it directly. We mirror
+                // child stdout through the attach pipe when a client is
+                // connected.
+                //
+                // Hold `active_attachment` across WriteFile so the pipe-sink
+                // thread cannot clear the slot + drop its File wrapper
+                // (closing the HANDLE, which the OS may then recycle for an
+                // unrelated kernel object) between our lookup and the write.
+                // The pipe-sink thread only holds this mutex for the brief
+                // swap-in / swap-out of the Option — microsecond-scale — so
+                // there is no meaningful contention.
+                let lock = active_attachment.lock().unwrap_or_else(|p| p.into_inner());
+                if let Some(sendable) = *lock {
                     let mut written = 0;
-                    // SAFETY: sendable.0 is a valid named-pipe HANDLE while
-                    // it remains in active_attachment; the pipe-sink branch
-                    // clears the slot on disconnect. Raw FFI WriteFile (vs
-                    // File::write_all) avoids ownership conflicts and lets
-                    // us discard ERROR_NO_DATA / ERROR_BROKEN_PIPE without
-                    // killing the bridge (Pitfall 1).
+                    // SAFETY: sendable.0 is a valid named-pipe HANDLE for the
+                    // duration of this WriteFile — we hold active_attachment's
+                    // mutex above, and the pipe-sink thread must re-acquire
+                    // the same mutex before clearing the slot + dropping the
+                    // File wrapper that would close the HANDLE. Raw FFI
+                    // WriteFile (vs File::write_all) lets us discard
+                    // ERROR_NO_DATA / ERROR_BROKEN_PIPE without killing the
+                    // bridge (Pitfall 1).
                     unsafe {
                         windows_sys::Win32::Storage::FileSystem::WriteFile(
                             sendable.0,
@@ -701,6 +708,7 @@ impl WindowsSupervisorRuntime {
                         );
                     }
                 }
+                drop(lock);
             }
         });
 
