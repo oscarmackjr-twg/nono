@@ -29,7 +29,7 @@ use windows_sys::Win32::System::Console::{
     GetConsoleScreenBufferInfo, GetStdHandle, ResizePseudoConsole, SetConsoleCtrlHandler,
     CONSOLE_SCREEN_BUFFER_INFO, COORD, CTRL_C_EVENT, STD_OUTPUT_HANDLE,
 };
-use windows_sys::Win32::System::JobObjects::OpenJobObjectW;
+use windows_sys::Win32::System::JobObjects::CreateJobObjectW;
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
@@ -1665,17 +1665,28 @@ fn handle_job_object_request(
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
+    // Phase 18.1 G-03: align JobObject broker semantic with Event/Mutex/Pipe
+    // CREATE-if-not-exists parity. `CreateJobObjectW` atomically creates the
+    // named Job Object if it does not exist, or opens the existing object
+    // and sets `GetLastError() == ERROR_ALREADY_EXISTS` (a non-error — we
+    // still own a valid HANDLE). This matches the Event/Mutex broker
+    // pattern (`CreateEventW`/`CreateMutexW`) and fixes the HUMAN-UAT G-03
+    // open-only `ERROR_FILE_NOT_FOUND` that broke `aipc-demo.exe` when the
+    // demo did not pre-create the named Job Object (per CONTEXT D-05 the
+    // design contract is "supervisor creates the named kernel object on
+    // demand").
+    //
     // SAFETY: `wide.as_ptr()` is a null-terminated UTF-16 string in
-    // stack-owned storage that outlives the FFI call. `OpenJobObjectW`
-    // returns NULL on failure (no UB on bad arguments). We open with
-    // `bInheritHandles = FALSE`. We open with `JOB_OBJECT_ALL_ACCESS`
-    // (defined in `nono::supervisor::policy` because windows-sys 0.59 does
-    // not export the constant) server-side; `DuplicateHandle` then MAPs
-    // DOWN to the validated mask (T-18-03-01 mitigation).
-    let job: HANDLE = unsafe { OpenJobObjectW(policy::JOB_OBJECT_ALL_ACCESS, 0, wide.as_ptr()) };
+    // stack-owned storage that outlives the FFI call. `CreateJobObjectW`
+    // returns NULL on failure (no UB on bad arguments). NULL
+    // SECURITY_ATTRIBUTES = no inheritance, default DACL. The handle is
+    // opened with full access; the subsequent `DuplicateHandle` MAPs DOWN
+    // to the validated mask (T-18-03-01 mitigation, preserved from the
+    // pre-fix shape).
+    let job: HANDLE = unsafe { CreateJobObjectW(std::ptr::null_mut(), wide.as_ptr()) };
     if job.is_null() {
         return Err(NonoError::SandboxInit(format!(
-            "OpenJobObjectW(\"{canonical}\") failed: {}",
+            "CreateJobObjectW(\"{canonical}\") failed: {}",
             std::io::Error::last_os_error()
         )));
     }
@@ -1693,14 +1704,14 @@ fn handle_job_object_request(
     // duplicated handle, so even if a profile widens `job_object` to
     // include `terminate`, the supervisor's containment Job is unreachable.
     if !runtime_containment_job.is_null() {
-        // SAFETY: Both `job` (from OpenJobObjectW above) and
+        // SAFETY: Both `job` (from CreateJobObjectW above) and
         // `runtime_containment_job` (passed by the caller from
         // `WindowsSupervisorRuntime.containment_job`) are live HANDLEs we
         // own at supervisor scope. CompareObjectHandles is a leaf-safe
         // Win32 call that returns BOOL (non-zero = same kernel object).
         let same = unsafe { CompareObjectHandles(job, runtime_containment_job) };
         if same != 0 {
-            // SAFETY: `job` is the HANDLE returned by OpenJobObjectW above;
+            // SAFETY: `job` is the HANDLE returned by CreateJobObjectW above;
             // it is owned by the supervisor and has not been duplicated yet.
             unsafe {
                 CloseHandle(job);
@@ -1713,7 +1724,7 @@ fn handle_job_object_request(
 
     let grant = broker_job_object_to_process(job, target_process, request.access_mask);
     // D-10: supervisor closes its source after broker call.
-    // SAFETY: `job` is a live HANDLE returned by OpenJobObjectW above and has
+    // SAFETY: `job` is a live HANDLE returned by CreateJobObjectW above and has
     // not been wrapped or freed elsewhere.
     unsafe {
         CloseHandle(job);
@@ -2947,7 +2958,11 @@ mod capability_handler_tests {
         let mut audit_log = Vec::new();
 
         // Pre-create the kernel-object name the dispatcher will canonicalize
-        // so OpenJobObjectW succeeds. The dispatcher computes
+        // so CreateJobObjectW resolves to the same kernel object (Phase 18.1
+        // G-03: the dispatcher now uses CreateJobObjectW, which creates-or-opens;
+        // when we pre-create here, the dispatcher side opens the existing
+        // object and gets a HANDLE that CompareObjectHandles reports equal to
+        // `pre_created`). The dispatcher computes
         // `Local\nono-aipc-<user_session_id>-<raw_name>`; pre-create with the
         // matching canonical name. We pre-create with a raw name distinct from
         // the runtime containment job to ensure the runtime guard does NOT
@@ -2958,7 +2973,8 @@ mod capability_handler_tests {
             .chain(std::iter::once(0))
             .collect();
         // SAFETY: Anonymous Job Object scaffolded with an explicit named
-        // canonical so the dispatcher's `OpenJobObjectW` handshake resolves.
+        // canonical so the dispatcher's `CreateJobObjectW` handshake resolves
+        // to the same kernel object.
         let pre_created: HANDLE = unsafe {
             windows_sys::Win32::System::JobObjects::CreateJobObjectW(
                 std::ptr::null_mut(),
@@ -3083,15 +3099,16 @@ mod capability_handler_tests {
 
         // Create a Job Object with a known canonical name; this stand-in
         // simulates the supervisor's runtime.containment_job. The dispatcher
-        // will OpenJobObjectW the same canonical name; the open returns a
-        // DIFFERENT HANDLE value that resolves to the SAME kernel object.
+        // will `CreateJobObjectW` the same canonical name (Phase 18.1 G-03 —
+        // create-or-open); the dispatcher's HANDLE is a DIFFERENT value that
+        // resolves to the SAME kernel object.
         // CompareObjectHandles is required (numeric == is insufficient).
         let canonical = "Local\\nono-aipc-testaipc12345678-orch";
         let wide: Vec<u16> = std::ffi::OsStr::new(canonical)
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
-        // SAFETY: Named Job Object creation; OpenJobObjectW(canonical) on the
+        // SAFETY: Named Job Object creation; CreateJobObjectW(canonical) on the
         // dispatcher side will resolve to the same kernel object.
         let containment: HANDLE = unsafe {
             windows_sys::Win32::System::JobObjects::CreateJobObjectW(
@@ -3221,7 +3238,9 @@ mod capability_handler_tests {
         let mut seen = HashSet::new();
         let mut audit_log = Vec::new();
 
-        // Pre-create the same canonical the dispatcher will OpenJobObjectW.
+        // Pre-create the same canonical the dispatcher will `CreateJobObjectW`
+        // (Phase 18.1 G-03 — create-or-open; the dispatcher opens this same
+        // kernel object).
         let canonical = "Local\\nono-aipc-testaipc12345678-orch-widened";
         let wide: Vec<u16> = std::ffi::OsStr::new(canonical)
             .encode_wide()
@@ -3369,7 +3388,7 @@ mod capability_handler_tests {
 
         // Use a deny-all backend so the dispatcher reaches the audit-emit
         // path without actually brokering kernel objects (avoids
-        // OpenJobObjectW / CreateNamedPipeW / WSASocketW side effects in
+        // CreateJobObjectW / CreateNamedPipeW / WSASocketW side effects in
         // a redaction-focused test).
         for (kind, target, access_mask) in cases {
             let backend = CountingDenyBackend::new();
