@@ -433,6 +433,46 @@ fn send_capability_request(
     }
 }
 
+/// Idempotent process-scoped Winsock initializer. `WSASocketW(FROM_PROTOCOL_INFO,
+/// ...)` requires that Winsock be initialized in the calling process; without a
+/// prior `WSAStartup`, the call fails with `WSAGetLastError = 10093`
+/// (WSANOTINITIALISED). The unit tests at
+/// `sdk_request_socket_round_trips_through_real_broker` call `WSAStartup`
+/// themselves (see line above `request_socket` in that test), which is why the
+/// tests pass — but production child processes do not, so the first real
+/// brokered socket reconstruction fails at runtime.
+///
+/// Uses `OnceLock<i32>` to cache the WSAStartup return code so the syscall
+/// runs exactly once per child process lifetime. Per MSDN, `WSAStartup` is
+/// reference-counted and safe to call repeatedly, but once-per-process is the
+/// standard idiom. No matching `WSACleanup` — the child process is ephemeral
+/// (spawned, does work, exits) and the OS reclaims Winsock state on process
+/// exit.
+#[cfg(target_os = "windows")]
+fn ensure_winsock_initialized() -> Result<()> {
+    use std::sync::OnceLock;
+    use windows_sys::Win32::Networking::WinSock::{WSAStartup, WSADATA};
+
+    static WINSOCK_INIT: OnceLock<i32> = OnceLock::new();
+
+    let rc = *WINSOCK_INIT.get_or_init(|| {
+        // SAFETY: WSAStartup with version 2.2 (0x0202) is the standard
+        // Winsock 2 initialization call. `wsa` is a locally-owned, zero-
+        // initialized output buffer whose `#[repr(C)]` layout matches the
+        // system ABI via `windows-sys`. Per MSDN, WSAStartup is reference-
+        // counted; wrapping in `OnceLock` ensures we call it exactly once
+        // per child process lifetime, which is the documented idiom.
+        let mut wsa: WSADATA = unsafe { std::mem::zeroed() };
+        unsafe { WSAStartup(0x0202, &mut wsa) }
+    });
+    if rc != 0 {
+        return Err(NonoError::SandboxInit(format!(
+            "WSAStartup(2.2) failed: {rc}"
+        )));
+    }
+    Ok(())
+}
+
 /// Reconstruct a live `SOCKET` in this process from a serialized
 /// `WSAPROTOCOL_INFOW` blob produced by the supervisor via
 /// `WSADuplicateSocketW`. The blob is single-use and target-PID-bound per
@@ -448,6 +488,13 @@ fn reconstruct_socket_from_blob(blob: &[u8]) -> Result<RawSocket> {
         WSAGetLastError, WSASocketW, AF_UNSPEC, FROM_PROTOCOL_INFO, INVALID_SOCKET,
         WSAPROTOCOL_INFOW, WSA_FLAG_OVERLAPPED,
     };
+
+    // Winsock must be initialized in this process before WSASocketW with
+    // FROM_PROTOCOL_INFO. Without this, production runtime fails with
+    // WSAGetLastError = 10093 (WSANOTINITIALISED) even though unit tests pass
+    // (tests call WSAStartup themselves; see
+    // sdk_request_socket_round_trips_through_real_broker).
+    ensure_winsock_initialized()?;
 
     let expected = size_of::<WSAPROTOCOL_INFOW>();
     if blob.len() != expected {
@@ -1194,6 +1241,29 @@ mod tests {
             });
 
             supervisor_thread.join().expect("supervisor thread");
+        }
+
+        /// Regression test for the child-side runtime gap that surfaced during
+        /// Phase 21 HUMAN-UAT: production runtime failed with
+        /// `WSAGetLastError = 10093` (WSANOTINITIALISED) because
+        /// `reconstruct_socket_from_blob` did not call `WSAStartup` before
+        /// `WSASocketW(FROM_PROTOCOL_INFO, ...)`. The fix is an idempotent
+        /// `WSAStartup(2.2)` guarded by `OnceLock`; this test asserts the
+        /// helper is safe to invoke twice in a row.
+        ///
+        /// Other Windows tests in this module (e.g.
+        /// `sdk_request_socket_round_trips_through_real_broker`) call
+        /// `WSAStartup` themselves, so they would pass even WITHOUT the fix;
+        /// this test exercises the helper directly to prove the runtime path
+        /// is self-sufficient.
+        #[test]
+        fn ensure_winsock_initialized_is_idempotent() {
+            // First call must succeed.
+            ensure_winsock_initialized().expect("first call");
+            // Second call must also succeed — OnceLock caches the startup rc,
+            // so no new WSAStartup syscall is issued, but the public contract
+            // of the helper is that repeated calls are safe.
+            ensure_winsock_initialized().expect("second call");
         }
     }
 }
