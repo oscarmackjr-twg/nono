@@ -203,6 +203,29 @@ impl SupervisorSocket {
         path: &Path,
         session_sid: Option<&str>,
     ) -> Result<Self> {
+        // Debug session `supervisor-pipe-access-denied` (cycle 2 instrumentation):
+        // Log whether the restricting SID arrives at the bind call, and if so,
+        // only the first-16-char prefix (`S-1-5-117-...`) for security parity
+        // with existing audit-log patterns. To be reverted once root cause is
+        // identified.
+        match session_sid {
+            Some(sid) => {
+                let prefix: String = sid.chars().take(16).collect();
+                tracing::info!(
+                    session_sid_present = true,
+                    session_sid_prefix = %prefix,
+                    path = %path.display(),
+                    "bind_low_integrity_with_session_sid entry",
+                );
+            }
+            None => {
+                tracing::info!(
+                    session_sid_present = false,
+                    path = %path.display(),
+                    "bind_low_integrity_with_session_sid entry",
+                );
+            }
+        }
         Self::bind_impl(path, true, session_sid)
     }
 
@@ -1031,18 +1054,28 @@ fn validate_session_sid_for_sddl(sid: &str) -> Result<()> {
 /// preserves byte-identical behavior for in-process tests and AIPC pipe
 /// callers that never face a WRITE_RESTRICTED child.
 fn build_capability_pipe_sddl(session_sid: Option<&str>) -> Result<String> {
-    match session_sid {
-        None => Ok(CAPABILITY_PIPE_SDDL.to_string()),
+    let sddl = match session_sid {
+        None => CAPABILITY_PIPE_SDDL.to_string(),
         Some(sid) => {
             validate_session_sid_for_sddl(sid)?;
             // Insert the restricting-SID ACE BEFORE the SACL. SDDL requires
             // the DACL (`D:`) section to precede the SACL (`S:`) section.
-            Ok(format!(
+            format!(
                 "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)(A;;{mask};;;{sid})S:(ML;;NW;;;LW)",
                 mask = CAPABILITY_PIPE_RESTRICTING_SID_MASK,
-            ))
+            )
         }
-    }
+    };
+    // Debug session `supervisor-pipe-access-denied` (cycle 2 instrumentation):
+    // Log the full SDDL string so we can see exactly what DACL the kernel is
+    // asked to install. The DACL structure is not a secret; this log is safe.
+    // To be reverted once root cause is identified.
+    tracing::info!(
+        session_sid_present = session_sid.is_some(),
+        sddl = %sddl,
+        "build_capability_pipe_sddl result",
+    );
+    Ok(sddl)
 }
 
 fn build_low_integrity_security_attributes(
