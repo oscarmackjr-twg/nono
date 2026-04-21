@@ -1220,6 +1220,24 @@ pub(super) fn open_windows_supervisor_path(
     path: &Path,
     access: &nono::AccessMode,
 ) -> Result<std::fs::File> {
+    // std::fs::OpenOptions on Windows wraps CreateFileW without
+    // FILE_FLAG_BACKUP_SEMANTICS, so directory paths would fail with an
+    // opaque ERROR_ACCESS_DENIED that looks like an ACL problem but is
+    // really a platform quirk. The capability broker contract is
+    // file-scoped by design (cap-pipe brokers file handles via
+    // DuplicateHandle, not directory enumeration handles). Reject
+    // directory paths up-front with a clear boundary message. If future
+    // work needs directory brokering it should add an explicit `is_dir`
+    // discriminator to CapabilityRequest rather than silently flipping
+    // this branch (would be a capability-scope expansion requiring
+    // protocol review).
+    if path.metadata().map(|m| m.is_dir()).unwrap_or(false) {
+        return Err(NonoError::SandboxInit(format!(
+            "Windows supervisor refused directory path {}: capability broker brokers file handles only",
+            path.display()
+        )));
+    }
+
     let mut options = std::fs::OpenOptions::new();
     match access {
         nono::AccessMode::Read => {
