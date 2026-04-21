@@ -1199,7 +1199,11 @@ fn get_app_id_blob(target_program: &std::path::Path) -> Result<WfpAppIdBlob, Str
     // SAFETY: path_wide is a valid null-terminated UTF-16 buffer for the target
     // program path, and blob points to writable storage for the returned pointer.
     let status = unsafe { FwpmGetAppIdFromFileName0(path_wide.as_ptr(), &mut blob) };
-    if status == 0 {
+    // `FwpmGetAppIdFromFileName0` returns DWORD — ERROR_SUCCESS (0) on success,
+    // non-zero on failure. Bail on non-zero so `format_windows_error` surfaces
+    // the actual WFP status code rather than letting the code fall through to
+    // the less-informative `blob.is_null()` branch below.
+    if status != 0 {
         return Err(format_windows_error(
             status,
             &format!(
