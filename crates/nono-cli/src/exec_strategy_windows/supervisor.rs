@@ -276,11 +276,13 @@ pub(super) struct WindowsSupervisorRuntime {
     /// `handle_job_object_request`) for the per-request mask / role /
     /// direction validation step.
     ///
-    /// Currently populated with `Default::default()` (matching D-05 defaults
-    /// byte-for-byte). A future plan will thread `SupervisorConfig` through to
-    /// carry the loaded `Profile`'s resolved allowlist; the default-only
-    /// behavior preserved here matches the pre-Plan-18-03 hard-coded
-    /// resolved_mask_for_kind semantics 1:1.
+    /// Sourced from `SupervisorConfig.aipc_allowlist` which itself is resolved
+    /// at the `execute_supervised_runtime` call site from the loaded
+    /// `Profile` (or `AipcResolvedAllowlist::default()` when no profile is
+    /// loaded). Plan 18.1-03 (G-06) replaced the Plan 18-03 `default()` seed
+    /// with the live profile-resolved allowlist — this is the end-to-end
+    /// wiring that lets `nono run --profile <widened>` actually consume
+    /// `capabilities.aipc` widening at the dispatcher.
     resolved_aipc_allowlist: std::sync::Arc<crate::profile::AipcResolvedAllowlist>,
 }
 
@@ -359,16 +361,15 @@ impl WindowsSupervisorRuntime {
             approval_backend: supervisor.approval_backend.clone(),
             timeout_deadline,
             containment_job,
-            // Phase 18 Plan 18-03: defaults match the pre-Plan-18-03
-            // hard-coded resolved_mask_for_kind semantics. A future plan will
-            // populate from supervisor.resolved_aipc_allowlist (loaded via
-            // Profile::resolve_aipc_allowlist) once SupervisorConfig carries
-            // the resolved allowlist field. Until then, the default Connect-
-            // only / read-OR-write / QUERY / wait+signal / wait+release
-            // behavior is preserved byte-identical with Plans 18-01 + 18-02.
-            resolved_aipc_allowlist: std::sync::Arc::new(
-                crate::profile::AipcResolvedAllowlist::default(),
-            ),
+            // Phase 18.1 Plan 18.1-03 G-06 fix: source the resolved
+            // allowlist from SupervisorConfig (which, at the
+            // execute_supervised_runtime call site, reads from the loaded
+            // profile's Profile::resolve_aipc_allowlist). Callers that do
+            // not load a profile still get the byte-identical pre-fix
+            // default via `AipcResolvedAllowlist::default()` — the Windows
+            // `SupervisorConfig` carries the resolved allowlist inline.
+            // Plan 18-03 Deferred Issue #1 is resolved here.
+            resolved_aipc_allowlist: std::sync::Arc::new(supervisor.aipc_allowlist.clone()),
         };
 
         // Phase 17 reorder (RESEARCH.md Pitfall 5): start_control_pipe_server

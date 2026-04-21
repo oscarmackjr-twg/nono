@@ -175,6 +175,19 @@ pub struct SupervisorConfig<'a> {
     /// child is expected (detached-launch path, legacy callers) and the pipe
     /// uses the byte-identical pre-fix SDDL.
     pub session_sid: Option<String>,
+    /// Phase 18 AIPC-01 (Plan 18-03 + Plan 18.1-03): per-handle-type
+    /// allowlist resolved by UNIONing the hard-coded supervisor defaults
+    /// (D-05) with the loaded profile's `capabilities.aipc` widening
+    /// (D-06). Callers that do not load a profile pass
+    /// `AipcResolvedAllowlist::default()` — the byte-identical pre-18.1-03
+    /// hard-coded default behavior. Callers with a loaded profile pass
+    /// `profile.resolve_aipc_allowlist()?`.
+    ///
+    /// Consumed by `WindowsSupervisorRuntime::initialize` into the
+    /// `resolved_aipc_allowlist: Arc<AipcResolvedAllowlist>` field so the
+    /// capability pipe server thread honors profile widening at per-kind
+    /// mask / role / direction validation time.
+    pub aipc_allowlist: crate::profile::AipcResolvedAllowlist,
 }
 
 pub struct WindowsSupervisorDenyAllApprovalBackend;

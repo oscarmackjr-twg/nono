@@ -250,6 +250,11 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
         // through to the capability pipe server's DACL so the child's
         // second-pass access check succeeds.
         session_sid: config.session_sid.clone(),
+        // Phase 18.1 Plan 18.1-03 G-06: task 1 seeds the field with
+        // `default()` so the crate compiles; task 2 replaces this with
+        // the profile-resolved allowlist threaded through
+        // SupervisedRuntimeContext.loaded_profile.
+        aipc_allowlist: crate::profile::AipcResolvedAllowlist::default(),
     };
 
     let trust_interceptor = create_trust_interceptor(trust);
