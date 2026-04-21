@@ -681,4 +681,177 @@ mod tests {
         assert!(prompt.contains("proto=udp"), "proto missing: {prompt}");
         assert!(prompt.contains("role=connect"), "role missing: {prompt}");
     }
+
+    // Phase 18.1 AIPC-01 Plan 18.1-01 (G-02) — `build_prompt_text` dispatcher
+    // tests. These assert the live `TerminalApproval::request_capability`
+    // prompt text end-to-end: AIPC kinds route through
+    // `format_capability_prompt` (per-kind D-04 templates); File-kind legacy
+    // shape (target == None, Phase 11 path) preserves the byte-identical
+    // multi-line block. The helper returns a `String` (no TTY side-effects)
+    // so the tests can run on any host without stdio capture.
+
+    #[test]
+    fn build_prompt_text_event_kind() {
+        #[allow(deprecated)]
+        let request = CapabilityRequest {
+            request_id: "r1".to_string(),
+            path: std::path::PathBuf::new(),
+            access: AccessMode::Read,
+            reason: Some("lifecycle".to_string()),
+            child_pid: 0,
+            session_id: "s1".to_string(),
+            session_token: String::new(),
+            kind: HandleKind::Event,
+            target: Some(HandleTarget::EventName {
+                name: "shutdown".to_string(),
+            }),
+            access_mask: policy::EVENT_DEFAULT_MASK,
+        };
+        let prompt = build_prompt_text(&request);
+        assert_eq!(
+            prompt,
+            r#"[nono] Grant event access? name=shutdown access=wait+signal reason="lifecycle" [y/N]"#
+        );
+    }
+
+    #[test]
+    fn build_prompt_text_mutex_kind() {
+        #[allow(deprecated)]
+        let request = CapabilityRequest {
+            request_id: "r1".to_string(),
+            path: std::path::PathBuf::new(),
+            access: AccessMode::Read,
+            reason: Some("logfile sync".to_string()),
+            child_pid: 0,
+            session_id: "s1".to_string(),
+            session_token: String::new(),
+            kind: HandleKind::Mutex,
+            target: Some(HandleTarget::MutexName {
+                name: "logfile".to_string(),
+            }),
+            access_mask: policy::MUTEX_DEFAULT_MASK,
+        };
+        let prompt = build_prompt_text(&request);
+        assert_eq!(
+            prompt,
+            r#"[nono] Grant mutex access? name=logfile access=wait+release reason="logfile sync" [y/N]"#
+        );
+    }
+
+    #[test]
+    fn build_prompt_text_pipe_kind() {
+        #[allow(deprecated)]
+        let request = CapabilityRequest {
+            request_id: "r1".to_string(),
+            path: std::path::PathBuf::new(),
+            access: AccessMode::Read,
+            reason: Some("agent op".to_string()),
+            child_pid: 0,
+            session_id: "s1".to_string(),
+            session_token: String::new(),
+            kind: HandleKind::Pipe,
+            target: Some(HandleTarget::PipeName {
+                name: "test-stream".to_string(),
+            }),
+            access_mask: policy::GENERIC_READ,
+        };
+        let prompt = build_prompt_text(&request);
+        assert_eq!(
+            prompt,
+            r#"[nono] Grant pipe access? name=test-stream direction=read reason="agent op" [y/N]"#
+        );
+    }
+
+    #[test]
+    fn build_prompt_text_socket_kind() {
+        #[allow(deprecated)]
+        let request = CapabilityRequest {
+            request_id: "r1".to_string(),
+            path: std::path::PathBuf::new(),
+            access: AccessMode::Read,
+            reason: Some("agent fetch".to_string()),
+            child_pid: 0,
+            session_id: "s1".to_string(),
+            session_token: String::new(),
+            kind: HandleKind::Socket,
+            target: Some(HandleTarget::SocketEndpoint {
+                protocol: SocketProtocol::Tcp,
+                host: "example.com".to_string(),
+                port: 8080,
+                role: SocketRole::Connect,
+            }),
+            access_mask: 0,
+        };
+        let prompt = build_prompt_text(&request);
+        assert_eq!(
+            prompt,
+            r#"[nono] Grant socket access? proto=tcp host=example.com port=8080 role=connect reason="agent fetch" [y/N]"#
+        );
+    }
+
+    #[test]
+    fn build_prompt_text_job_object_kind() {
+        #[allow(deprecated)]
+        let request = CapabilityRequest {
+            request_id: "r1".to_string(),
+            path: std::path::PathBuf::new(),
+            access: AccessMode::Read,
+            reason: Some("orch monitor".to_string()),
+            child_pid: 0,
+            session_id: "s1".to_string(),
+            session_token: String::new(),
+            kind: HandleKind::JobObject,
+            target: Some(HandleTarget::JobObjectName {
+                name: "test-orch".to_string(),
+            }),
+            access_mask: policy::JOB_OBJECT_QUERY,
+        };
+        let prompt = build_prompt_text(&request);
+        assert_eq!(
+            prompt,
+            r#"[nono] Grant Job Object access? name=test-orch access=query reason="orch monitor" [y/N]"#
+        );
+    }
+
+    #[test]
+    fn build_prompt_text_file_kind_preserves_legacy_block() {
+        // Phase 11 legacy shape: target=None, kind=File. The pre-fix
+        // multi-line block (`[nono] The sandboxed process is requesting...`
+        // / Path / Access / Reason / blank / Grant access? [y/N] ) must
+        // render byte-identical so Phase 11 UAT output is preserved.
+        #[allow(deprecated)]
+        let request = CapabilityRequest {
+            request_id: "r1".to_string(),
+            path: std::path::PathBuf::from("/tmp/secret"),
+            access: AccessMode::ReadWrite,
+            reason: Some("agent op".to_string()),
+            child_pid: 0,
+            session_id: "s1".to_string(),
+            session_token: String::new(),
+            kind: HandleKind::File,
+            target: None,
+            access_mask: 0,
+        };
+        let prompt = build_prompt_text(&request);
+        assert!(
+            prompt.contains("[nono] The sandboxed process is requesting additional access:"),
+            "legacy preamble missing: {prompt}"
+        );
+        assert!(
+            prompt.contains("[nono]   Path:   /tmp/secret"),
+            "legacy Path line missing: {prompt}"
+        );
+        assert!(
+            prompt.contains("[nono]   Access: read+write"),
+            "legacy Access line missing: {prompt}"
+        );
+        assert!(
+            prompt.contains("[nono]   Reason: agent op"),
+            "legacy Reason line missing: {prompt}"
+        );
+        assert!(
+            prompt.contains("[nono] Grant access? [y/N] "),
+            "legacy trailing prompt missing: {prompt}"
+        );
+    }
 }
