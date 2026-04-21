@@ -233,9 +233,10 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
             .map(|network| network.allow_domains.clone())
             .unwrap_or_default();
         if !silent {
-            for warning in
-                network_policy::collect_allow_domain_port_warnings(&allow_domain, "manifest allow_domain")
-            {
+            for warning in network_policy::collect_allow_domain_port_warnings(
+                &allow_domain,
+                "manifest allow_domain",
+            ) {
                 output::print_warning(&warning);
             }
         }
