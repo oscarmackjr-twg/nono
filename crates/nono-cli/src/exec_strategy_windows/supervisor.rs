@@ -3314,6 +3314,366 @@ mod capability_handler_tests {
         }
     }
 
+    // Phase 18.1 Plan 18.1-02 Task 2 — G-04 regression tests (one per
+    // HandleKind). Each asserts the dispatcher flips ApprovalDecision::Approved
+    // to Denied { reason: "broker failed: ..." } when the per-kind broker
+    // helper returns Err(..) AFTER the approval backend granted the request.
+    //
+    // Failure-injection mechanism: each test crafts a CapabilityRequest
+    // whose per-kind helper will `Err(..)` BEFORE any kernel-object call
+    // is reached (cheapest / most deterministic injection — no #[cfg(test)]
+    // flip-flag, no trait refactor). The dispatcher's G-04 flip logic
+    // fires on ANY Err from the helper, regardless of its origin, so
+    // input-validation-driven errors are strictly equivalent to kernel-
+    // object-call errors for G-04's purposes.
+    //
+    // Assertion shape:
+    //   (a) backend.calls() == 1 — proving the approval path was reached
+    //   (b) audit_log[0].decision is Denied with reason containing
+    //       "broker failed:"
+    //   (c) the wire response's decision matches (a) and grant is None
+    //
+    // Invariant: (Approved, grant=None) is structurally unreachable from
+    // handle_windows_supervisor_message once G-04 lands.
+
+    #[test]
+    fn dispatcher_flips_approved_to_denied_on_event_broker_failure() {
+        let backend = CountingGrantBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        let token = "testtoken12345678";
+        // Failure shape: empty event name fails `validate_aipc_object_name`
+        // inside `handle_event_request` BEFORE CreateEventW is reached.
+        // The mask passes the pre-broker gate (EVENT_DEFAULT_MASK).
+        let req = make_request_aipc(
+            token,
+            "g04-event-001",
+            HandleKind::Event,
+            Some(HandleTarget::EventName {
+                name: String::new(),
+            }),
+            policy::EVENT_DEFAULT_MASK,
+        );
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(req),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            token,
+            "testaipc12345678",
+            std::ptr::null_mut(),
+            &AipcResolvedAllowlist::default(),
+        )
+        .expect("dispatch");
+
+        assert_eq!(
+            backend.calls(),
+            1,
+            "backend MUST be consulted (approval path reached)"
+        );
+        assert_eq!(audit_log.len(), 1);
+        match &audit_log[0].decision {
+            nono::ApprovalDecision::Denied { reason } => {
+                assert!(
+                    reason.contains("broker failed:"),
+                    "expected reason to contain 'broker failed:', got: {reason}"
+                );
+            }
+            other => panic!("expected Denied, got {other:?}"),
+        }
+        match child.recv_response().expect("drain") {
+            nono::supervisor::SupervisorResponse::Decision {
+                decision: nono::ApprovalDecision::Denied { reason },
+                grant,
+                ..
+            } => {
+                assert!(
+                    reason.contains("broker failed:"),
+                    "wire reason: {reason}"
+                );
+                assert!(grant.is_none(), "grant must be None on Denied");
+            }
+            other => panic!("unexpected wire response: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatcher_flips_approved_to_denied_on_mutex_broker_failure() {
+        let backend = CountingGrantBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        let token = "testtoken12345678";
+        // Failure shape: empty mutex name fails `validate_aipc_object_name`
+        // inside `handle_mutex_request` BEFORE CreateMutexW is reached.
+        // The mask passes the pre-broker gate (MUTEX_DEFAULT_MASK).
+        let req = make_request_aipc(
+            token,
+            "g04-mutex-001",
+            HandleKind::Mutex,
+            Some(HandleTarget::MutexName {
+                name: String::new(),
+            }),
+            policy::MUTEX_DEFAULT_MASK,
+        );
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(req),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            token,
+            "testaipc12345678",
+            std::ptr::null_mut(),
+            &AipcResolvedAllowlist::default(),
+        )
+        .expect("dispatch");
+
+        assert_eq!(
+            backend.calls(),
+            1,
+            "backend MUST be consulted (approval path reached)"
+        );
+        assert_eq!(audit_log.len(), 1);
+        match &audit_log[0].decision {
+            nono::ApprovalDecision::Denied { reason } => {
+                assert!(
+                    reason.contains("broker failed:"),
+                    "expected reason to contain 'broker failed:', got: {reason}"
+                );
+            }
+            other => panic!("expected Denied, got {other:?}"),
+        }
+        match child.recv_response().expect("drain") {
+            nono::supervisor::SupervisorResponse::Decision {
+                decision: nono::ApprovalDecision::Denied { reason },
+                grant,
+                ..
+            } => {
+                assert!(
+                    reason.contains("broker failed:"),
+                    "wire reason: {reason}"
+                );
+                assert!(grant.is_none(), "grant must be None on Denied");
+            }
+            other => panic!("unexpected wire response: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatcher_flips_approved_to_denied_on_pipe_broker_failure() {
+        let backend = CountingGrantBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        let token = "testtoken12345678";
+        // Failure shape: empty pipe name fails `validate_aipc_object_name`
+        // inside `handle_pipe_request` BEFORE CreateNamedPipeW is reached.
+        // The Pipe kind has no pre-broker mask gate in the dispatcher
+        // (direction decode happens inside the helper), so the approval
+        // backend IS consulted even with an empty name. access_mask =
+        // GENERIC_READ keeps the direction-decode branch reachable but
+        // the name-validation error fires first.
+        let req = make_request_aipc(
+            token,
+            "g04-pipe-001",
+            HandleKind::Pipe,
+            Some(HandleTarget::PipeName {
+                name: String::new(),
+            }),
+            policy::GENERIC_READ,
+        );
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(req),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            token,
+            "testaipc12345678",
+            std::ptr::null_mut(),
+            &AipcResolvedAllowlist::default(),
+        )
+        .expect("dispatch");
+
+        assert_eq!(
+            backend.calls(),
+            1,
+            "backend MUST be consulted (approval path reached)"
+        );
+        assert_eq!(audit_log.len(), 1);
+        match &audit_log[0].decision {
+            nono::ApprovalDecision::Denied { reason } => {
+                assert!(
+                    reason.contains("broker failed:"),
+                    "expected reason to contain 'broker failed:', got: {reason}"
+                );
+            }
+            other => panic!("expected Denied, got {other:?}"),
+        }
+        match child.recv_response().expect("drain") {
+            nono::supervisor::SupervisorResponse::Decision {
+                decision: nono::ApprovalDecision::Denied { reason },
+                grant,
+                ..
+            } => {
+                assert!(
+                    reason.contains("broker failed:"),
+                    "wire reason: {reason}"
+                );
+                assert!(grant.is_none(), "grant must be None on Denied");
+            }
+            other => panic!("unexpected wire response: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatcher_flips_approved_to_denied_on_socket_broker_failure() {
+        let backend = CountingGrantBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        let token = "testtoken12345678";
+        // Failure shape: empty host fails `host.is_empty()` inside
+        // `handle_socket_request` AFTER the privileged-port check and
+        // role-allowlist check (both of which pass with port=8080,
+        // role=Connect against the default allowlist), but BEFORE
+        // WSASocketW is reached. The Socket kind has no pre-broker
+        // mask gate in the dispatcher, so the approval backend IS
+        // consulted.
+        let req = make_request_aipc(
+            token,
+            "g04-socket-001",
+            HandleKind::Socket,
+            Some(HandleTarget::SocketEndpoint {
+                protocol: SocketProtocol::Tcp,
+                host: String::new(),
+                port: 8080,
+                role: SocketRole::Connect,
+            }),
+            0,
+        );
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(req),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            token,
+            "testaipc12345678",
+            std::ptr::null_mut(),
+            &AipcResolvedAllowlist::default(),
+        )
+        .expect("dispatch");
+
+        assert_eq!(
+            backend.calls(),
+            1,
+            "backend MUST be consulted (approval path reached)"
+        );
+        assert_eq!(audit_log.len(), 1);
+        match &audit_log[0].decision {
+            nono::ApprovalDecision::Denied { reason } => {
+                assert!(
+                    reason.contains("broker failed:"),
+                    "expected reason to contain 'broker failed:', got: {reason}"
+                );
+            }
+            other => panic!("expected Denied, got {other:?}"),
+        }
+        match child.recv_response().expect("drain") {
+            nono::supervisor::SupervisorResponse::Decision {
+                decision: nono::ApprovalDecision::Denied { reason },
+                grant,
+                ..
+            } => {
+                assert!(
+                    reason.contains("broker failed:"),
+                    "wire reason: {reason}"
+                );
+                assert!(grant.is_none(), "grant must be None on Denied");
+            }
+            other => panic!("unexpected wire response: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatcher_flips_approved_to_denied_on_job_object_broker_failure() {
+        let backend = CountingGrantBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        let token = "testtoken12345678";
+        // Failure shape: empty JobObject name fails
+        // `validate_aipc_object_name` inside `handle_job_object_request`
+        // BEFORE CreateJobObjectW is reached. The mask passes the
+        // pre-broker gate (JOB_OBJECT_DEFAULT_MASK), so we reach the
+        // approval backend AND the helper.
+        let req = make_request_aipc(
+            token,
+            "g04-jobobject-001",
+            HandleKind::JobObject,
+            Some(HandleTarget::JobObjectName {
+                name: String::new(),
+            }),
+            policy::JOB_OBJECT_DEFAULT_MASK,
+        );
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(req),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            token,
+            "testaipc12345678",
+            std::ptr::null_mut(),
+            &AipcResolvedAllowlist::default(),
+        )
+        .expect("dispatch");
+
+        assert_eq!(
+            backend.calls(),
+            1,
+            "backend MUST be consulted (approval path reached)"
+        );
+        assert_eq!(audit_log.len(), 1);
+        match &audit_log[0].decision {
+            nono::ApprovalDecision::Denied { reason } => {
+                assert!(
+                    reason.contains("broker failed:"),
+                    "expected reason to contain 'broker failed:', got: {reason}"
+                );
+            }
+            other => panic!("expected Denied, got {other:?}"),
+        }
+        match child.recv_response().expect("drain") {
+            nono::supervisor::SupervisorResponse::Decision {
+                decision: nono::ApprovalDecision::Denied { reason },
+                grant,
+                ..
+            } => {
+                assert!(
+                    reason.contains("broker failed:"),
+                    "wire reason: {reason}"
+                );
+                assert!(grant.is_none(), "grant must be None on Denied");
+            }
+            other => panic!("unexpected wire response: {other:?}"),
+        }
+    }
+
     // Phase 18 AIPC-01 Plan 18-03 Task 3 — parameterized token-redaction
     // test covering all 6 HandleKind shapes (replaces the 5 per-kind
     // redaction tests added in Plans 18-01 / 18-02 / 18-03 Task 1).
