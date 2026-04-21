@@ -37,6 +37,15 @@ pub(crate) struct LaunchPlan {
     pub(crate) cmd_args: Vec<OsString>,
     pub(crate) caps: CapabilitySet,
     pub(crate) loaded_secrets: Vec<nono::LoadedSecret>,
+    /// Plan 18.1-03 G-06: the loaded profile (if any) carried forward from
+    /// `PreparedSandbox` so the Windows supervisor construction path can
+    /// resolve `capabilities.aipc` widening via
+    /// `Profile::resolve_aipc_allowlist`. `None` when the run has no
+    /// `--profile` argument; the supervisor falls back to hard-coded
+    /// defaults in that case. On non-Windows platforms this field is
+    /// currently unread (Windows-only wiring per D-21); kept cross-platform
+    /// to avoid a `cfg` split in shared plumbing.
+    pub(crate) loaded_profile: Option<profile::Profile>,
     pub(crate) flags: ExecutionFlags,
 }
 
@@ -262,6 +271,9 @@ pub(crate) fn prepare_run_launch_plan(
         cmd_args,
         caps: prepared.caps,
         loaded_secrets: prepared.secrets,
+        // Plan 18.1-03 G-06: carry the loaded profile forward so the
+        // Windows supervisor resolves AIPC widening from it.
+        loaded_profile: prepared.loaded_profile,
         flags: ExecutionFlags {
             strategy,
             workdir: resolve_requested_workdir(args.workdir.as_ref()),

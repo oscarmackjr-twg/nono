@@ -37,6 +37,15 @@ pub(crate) struct SupervisedRuntimeContext<'a> {
     /// `timeout` field for the supervisor-side wall-clock timer. On Unix this
     /// is read only by `warn_unix_resource_limits` at run start.
     pub(crate) resource_limits: &'a ResourceLimits,
+    /// Plan 18.1-03 G-06: the loaded profile (if any) that resolves the
+    /// per-handle-type AIPC allowlist widening. `None` means no profile →
+    /// the Windows supervisor uses the hard-coded D-05 defaults only. This
+    /// enables `nono run --profile <widened>` to actually consume the
+    /// widened `capabilities.aipc` allowlist end-to-end at request-dispatch
+    /// time. Unused on non-Windows per D-21 (kept non-cfg-gated so the
+    /// cross-platform caller `execution_runtime.rs` does not need a
+    /// conditional struct-literal).
+    pub(crate) loaded_profile: Option<&'a crate::profile::Profile>,
 }
 
 fn build_supervisor_session_id(audit_state: Option<&AuditState>) -> String {
@@ -168,7 +177,26 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
         proxy_handle,
         silent,
         resource_limits,
+        loaded_profile,
     } = ctx;
+
+    // Plan 18.1-03 G-06 wiring: UNION the hard-coded D-05 defaults with the
+    // loaded profile's `capabilities.aipc` widening. No profile → pure
+    // default (byte-identical to pre-fix behavior). `?` propagates
+    // `NonoError::ProfileParse` if an unknown widening token reaches
+    // runtime re-validation (should be prevented by
+    // `validate_profile_aipc_tokens` at parse time — belt-and-braces
+    // idempotent revalidation). The result is cheap to clone and is
+    // consumed by the Windows `SupervisorConfig` literal below.
+    let aipc_allowlist = match loaded_profile {
+        Some(profile) => profile.resolve_aipc_allowlist()?,
+        None => crate::profile::AipcResolvedAllowlist::default(),
+    };
+    // Silence unused warning on non-Windows where the field is not consumed
+    // yet (D-21 Windows-only). The resolution call above still runs for its
+    // `?` validation side-effect — cheap and consistent across platforms.
+    #[cfg(not(target_os = "windows"))]
+    let _ = &aipc_allowlist;
 
     // Emit per-flag "not enforced on this platform" warnings on Unix before any
     // spawn work. On Windows this is a no-op — Task 2 of Plan 16-01 applies the
@@ -250,11 +278,14 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
         // through to the capability pipe server's DACL so the child's
         // second-pass access check succeeds.
         session_sid: config.session_sid.clone(),
-        // Phase 18.1 Plan 18.1-03 G-06: task 1 seeds the field with
-        // `default()` so the crate compiles; task 2 replaces this with
-        // the profile-resolved allowlist threaded through
-        // SupervisedRuntimeContext.loaded_profile.
-        aipc_allowlist: crate::profile::AipcResolvedAllowlist::default(),
+        // Phase 18.1 Plan 18.1-03 G-06: live profile-resolved allowlist.
+        // UNION of hard-coded D-05 defaults with the loaded profile's
+        // `capabilities.aipc` widening (via `Profile::resolve_aipc_allowlist`).
+        // `None` profile → pure defaults (byte-identical pre-fix behavior).
+        // The dispatcher's per-kind helpers consult this at mask / role /
+        // direction validation time. End-to-end wiring closes G-06 and
+        // resolves Plan 18-03 Deferred Issue #1.
+        aipc_allowlist: aipc_allowlist.clone(),
     };
 
     let trust_interceptor = create_trust_interceptor(trust);

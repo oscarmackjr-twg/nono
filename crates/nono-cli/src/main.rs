@@ -237,6 +237,8 @@ mod tests {
             open_url_origins: Vec::new(),
             open_url_allow_localhost: false,
             override_deny_paths: Vec::new(),
+            // Plan 18.1-03 G-06: test fixture has no loaded profile.
+            loaded_profile: None,
         };
 
         let effective = resolve_effective_proxy_settings(&args, &prepared);
@@ -278,6 +280,8 @@ mod tests {
             open_url_origins: Vec::new(),
             open_url_allow_localhost: false,
             override_deny_paths: Vec::new(),
+            // Plan 18.1-03 G-06: test fixture has no loaded profile.
+            loaded_profile: None,
         };
 
         let effective = resolve_effective_proxy_settings(&args, &prepared);
