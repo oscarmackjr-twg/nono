@@ -1,3 +1,16 @@
+// `dead_code` is allowed at module scope because this module hosts a small
+// number of intentionally-unused-on-Windows symbols whose ownership lives
+// outside the Phase 16 scope:
+//   * `collect_unix_resource_limit_warnings` — Windows shim of the Unix
+//     warning collector kept for cross-platform call-site symmetry.
+//   * `WindowsSupervisorDenyAllApprovalBackend` — fallback approval backend
+//     for SC #4 callers that build a `SupervisorConfig` without an
+//     interactive backend.
+//   * `set_windows_wfp_test_force_ready` — debug-only WFP readiness toggle
+//     pair (the matching reader is wired in `network.rs`).
+// These pre-date Phase 16 and should be addressed in a follow-up cleanup.
+// The Phase 16 dead helpers in `launch.rs` were removed (16-WR-02); do NOT
+// re-introduce broad allow scopes there.
 #![allow(dead_code)]
 
 //! Windows execution strategy placeholder.
@@ -8,6 +21,30 @@
 
 #[path = "../exec_strategy/env_sanitization.rs"]
 mod env_sanitization;
+
+/// Windows no-op stub of the Unix warning collector. On Windows, resource
+/// limits are kernel-enforced by `apply_resource_limits` inside
+/// `spawn_windows_child`, so there's nothing to warn about.
+///
+/// Always returns an empty `Vec`. The signature matches the Unix version in
+/// `exec_strategy.rs` so cross-platform callers can invoke
+/// `exec_strategy::collect_unix_resource_limit_warnings` without `#[cfg]` gating.
+pub(crate) fn collect_unix_resource_limit_warnings(
+    _limits: &crate::launch_runtime::ResourceLimits,
+    _silent: bool,
+) -> Vec<String> {
+    Vec::new()
+}
+
+/// Windows no-op stub of the Unix warning emitter. On Windows this is a
+/// compile-time no-op — resource limits are kernel-enforced in
+/// `apply_resource_limits`.
+pub(crate) fn warn_unix_resource_limits(
+    _limits: &crate::launch_runtime::ResourceLimits,
+    _silent: bool,
+) {
+    // No-op on Windows.
+}
 
 use crate::pty_proxy;
 use crate::rollback_runtime::{
@@ -37,9 +74,13 @@ use windows_sys::Win32::Security::{
     TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_ELEVATION, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
 };
 use windows_sys::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-    SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-    JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    AssignProcessToJobObject, CreateJobObjectW, JobObjectCpuRateControlInformation,
+    JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+    TerminateJobObject, JOBOBJECT_CPU_RATE_CONTROL_INFORMATION,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_CPU_RATE_CONTROL_ENABLE,
+    JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
+    JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION, JOB_OBJECT_LIMIT_JOB_MEMORY,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 use windows_sys::Win32::System::Services::{
     OpenSCManagerW, OpenServiceW, QueryServiceStatusEx, SC_MANAGER_CONNECT, SC_STATUS_PROCESS_INFO,
@@ -141,6 +182,31 @@ pub struct SupervisorConfig<'a> {
     /// Rendezvous file path at which the capability pipe server binds.
     /// `None` disables the capability pipe server.
     pub cap_pipe_rendezvous_path: Option<&'a Path>,
+    /// Per-session restricting SID (`S-1-5-117-<guid>`) supplied to
+    /// `CreateRestrictedToken` when the sandboxed child is launched with
+    /// `WRITE_RESTRICTED`. When `Some(..)`, the capability pipe's DACL gets
+    /// an additional ACE granting `FILE_GENERIC_READ | FILE_GENERIC_WRITE |
+    /// SYNCHRONIZE` (object-specific mask `0x0012019F`) to this SID so the
+    /// child's second-pass DACL check succeeds on
+    /// `CreateFileW(pipe, GENERIC_READ | GENERIC_WRITE)`.
+    ///
+    /// Mirrors `ExecConfig.session_sid`. `None` means no WRITE_RESTRICTED
+    /// child is expected (detached-launch path, legacy callers) and the pipe
+    /// uses the byte-identical pre-fix SDDL.
+    pub session_sid: Option<String>,
+    /// Phase 18 AIPC-01 (Plan 18-03 + Plan 18.1-03): per-handle-type
+    /// allowlist resolved by UNIONing the hard-coded supervisor defaults
+    /// (D-05) with the loaded profile's `capabilities.aipc` widening
+    /// (D-06). Callers that do not load a profile pass
+    /// `AipcResolvedAllowlist::default()` — the byte-identical pre-18.1-03
+    /// hard-coded default behavior. Callers with a loaded profile pass
+    /// `profile.resolve_aipc_allowlist()?`.
+    ///
+    /// Consumed by `WindowsSupervisorRuntime::initialize` into the
+    /// `resolved_aipc_allowlist: Arc<AipcResolvedAllowlist>` field so the
+    /// capability pipe server thread honors profile widening at per-kind
+    /// mask / role / direction validation time.
+    pub aipc_allowlist: crate::profile::AipcResolvedAllowlist,
 }
 
 pub struct WindowsSupervisorDenyAllApprovalBackend;
@@ -181,6 +247,12 @@ enum NetworkEnforcementGuard {
 }
 
 struct PreparedWindowsLaunch {
+    // Phase 21: applied-labels guard reverts mandatory-label ACEs on drop.
+    // Declared BEFORE _network_enforcement so Rust's reverse-of-declaration
+    // drop order reverts labels first, then tears down network enforcement.
+    // This matches the Phase 16-02 drop-order discipline (containment_job
+    // outliving the supervisor runtime).
+    _applied_labels: labels_guard::AppliedLabelsGuard,
     _network_enforcement: Option<NetworkEnforcementGuard>,
     launch_program: PathBuf,
 }
@@ -220,6 +292,18 @@ fn prepare_live_windows_launch(
         fs_policy.unsupported.len()
     );
 
+    // Phase 21: snapshot pre-grant label state + apply mode-derived mandatory
+    // labels to every rule path (skip-on-any-prior-label per tightened D-02).
+    // Guard lifetime = PreparedWindowsLaunch lifetime = supervised session
+    // lifetime; Drop reverts applied labels (clears ACEs we added; Skip
+    // entries are a drop-time no-op).
+    //
+    // Note: the CLI path does NOT call nono::apply() (which also label-applies
+    // per Plan 21-03) — nono::apply is the library embedding surface; the CLI
+    // builds its own fs-policy + label-apply + network-enforcement pipeline.
+    // The guard here is the SOLE apply site on the CLI path.
+    let applied_labels = labels_guard::AppliedLabelsGuard::snapshot_and_apply(&fs_policy)?;
+
     let network_enforcement = prepare_network_enforcement(config, session_id)?;
     let launch_program = network_enforcement
         .as_ref()
@@ -228,6 +312,7 @@ fn prepare_live_windows_launch(
         .to_path_buf();
 
     Ok(PreparedWindowsLaunch {
+        _applied_labels: applied_labels,
         _network_enforcement: network_enforcement,
         launch_program,
     })
@@ -369,6 +454,7 @@ struct ProcessContainment {
 #[derive(Debug)]
 struct OwnedHandle(HANDLE);
 
+mod labels_guard;
 mod launch;
 mod network;
 mod restricted_token;
@@ -557,7 +643,11 @@ pub(crate) fn cleanup_windows_network_enforcement_artifacts() {
     cleanup_stale_network_enforcement_artifacts();
 }
 
-pub fn execute_direct(config: &ExecConfig<'_>, session_id: Option<&str>) -> Result<i32> {
+pub fn execute_direct(
+    config: &ExecConfig<'_>,
+    limits: &crate::launch_runtime::ResourceLimits,
+    session_id: Option<&str>,
+) -> Result<i32> {
     let prepared = prepare_live_windows_launch(config, session_id)?;
     let launch_program = prepared.launch_program.as_path();
 
@@ -568,12 +658,19 @@ pub fn execute_direct(config: &ExecConfig<'_>, session_id: Option<&str>) -> Resu
     );
     let containment = create_process_containment(session_id)?;
 
-    let mut child = spawn_windows_child(
+    // Phase 17 (Task 2): spawn_windows_child now returns
+    // (WindowsSupervisedChild, Option<DetachedStdioPipes>). The Direct
+    // execution path never goes through the detached supervisor — pty=None
+    // here means "no PTY", and is_windows_detached_launch() is false outside
+    // the inner detached supervisor process — so the second tuple element is
+    // always None for execute_direct. Discard it.
+    let (mut child, _detached_stdio) = spawn_windows_child(
         config,
         launch_program,
         &containment,
         &cmd_args,
         None,
+        limits,
         session_id,
     )?;
     loop {
@@ -600,6 +697,7 @@ pub fn execute_supervised(
     started: &str,
     silent: bool,
     rollback_prompt_disabled: bool,
+    limits: &crate::launch_runtime::ResourceLimits,
 ) -> Result<i32> {
     let Some(supervisor) = supervisor else {
         return Err(NonoError::UnsupportedPlatform(
@@ -607,7 +705,34 @@ pub fn execute_supervised(
         ));
     };
 
-    let mut runtime = WindowsSupervisorRuntime::initialize(supervisor, pty_pair)?;
+    // Compute the --timeout wall-clock deadline BEFORE any spawn work so a
+    // u64::MAX overflow fails fast. None when --timeout is absent.
+    let timeout_deadline = supervisor::compute_deadline(limits.timeout, std::time::Instant::now())?;
+
+    // Plan 16-02 Step 5 reorders this block so `containment` is created BEFORE
+    // `WindowsSupervisorRuntime::initialize`. The runtime borrows
+    // `containment.job` for the `--timeout` expiry path; `ProcessContainment`
+    // owns the close-on-drop and must outlive the runtime. Rust drop order is
+    // reverse-of-declaration: with `containment` declared first, the runtime
+    // drops first (its `Drop` does not touch `containment_job`), then
+    // `containment` drops last and calls `CloseHandle` exactly once.
+    let prepared = prepare_live_windows_launch(config, session_id)?;
+    let launch_program = prepared.launch_program.as_path();
+
+    let cmd_args = prepare_runtime_hardened_args(
+        launch_program,
+        &config.command[1..],
+        config.interactive_shell,
+    );
+    let containment = create_process_containment(session_id)?;
+
+    let mut runtime = WindowsSupervisorRuntime::initialize(
+        supervisor,
+        pty_pair,
+        session_id,
+        timeout_deadline,
+        containment.job,
+    )?;
     tracing::debug!(
         "Windows supervised approval backend: {}",
         supervisor.approval_backend.as_ref().backend_name()
@@ -617,8 +742,8 @@ pub fn execute_supervised(
     let supported = supervisor.support.supported_feature_labels();
     if !unsupported.is_empty() {
         return Err(NonoError::UnsupportedPlatform(format!(
-            "Windows supervised execution initialized the control channel 
-             (session: {}, transport: {}), but these supervised features are not available yet: {}. 
+            "Windows supervised execution initialized the control channel
+             (session: {}, transport: {}), but these supervised features are not available yet: {}.
              Details: {}. Supported Windows supervised features currently: {}.",
             supervisor.session_id,
             runtime.transport_name(),
@@ -632,15 +757,6 @@ pub fn execute_supervised(
         )));
     }
 
-    let prepared = prepare_live_windows_launch(config, session_id)?;
-    let launch_program = prepared.launch_program.as_path();
-
-    let cmd_args = prepare_runtime_hardened_args(
-        launch_program,
-        &config.command[1..],
-        config.interactive_shell,
-    );
-    let containment = create_process_containment(session_id)?;
     runtime.state = WindowsSupervisorLifecycleState::LaunchingChild;
     tracing::debug!(
         "Windows supervised execution starting event loop (session: {}, transport: {}, features: {})",
@@ -653,15 +769,27 @@ pub fn execute_supervised(
         }
     );
 
-    let mut child = spawn_windows_child(
+    // Phase 17 (Tasks 2 + 3): spawn_windows_child returns
+    // (WindowsSupervisedChild, Option<DetachedStdioPipes>). The second
+    // tuple element is the parent-end stdio handles for the Windows
+    // detached path; it is None on the PTY (non-detached) path. Hand it to
+    // the runtime via attach_detached_stdio BEFORE start_streaming so the
+    // pipe-source / pipe-sink bridge threads see the populated field.
+    let (mut child, detached_stdio) = spawn_windows_child(
         config,
         launch_program,
         &containment,
         &cmd_args,
         runtime.pty(),
+        limits,
         session_id,
     )
     .map_err(|err| runtime.startup_failure(err.to_string()))?;
+
+    runtime.attach_detached_stdio(detached_stdio);
+    runtime
+        .start_streaming()
+        .map_err(|err| runtime.startup_failure(err.to_string()))?;
 
     // Publish the child's process handle so the capability pipe server
     // thread can broker granted file handles via `DuplicateHandle`.

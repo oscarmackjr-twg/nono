@@ -16,7 +16,7 @@ mod linux;
 mod macos;
 
 #[cfg(target_os = "windows")]
-mod windows;
+pub mod windows;
 
 // Re-export macOS extension functions for supervisor use
 #[cfg(target_os = "macos")]

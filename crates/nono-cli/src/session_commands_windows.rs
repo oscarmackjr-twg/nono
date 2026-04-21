@@ -18,7 +18,128 @@ fn reject_if_sandboxed(command: &str) -> Result<()> {
     Ok(())
 }
 
+/// Translate the `io::Error` returned by `OpenOptions::open` on the attach
+/// data pipe into a `NonoError`.
+///
+/// `ERROR_PIPE_BUSY` (231) is the kernel signal that another client already
+/// holds the single-instance pipe (`nMaxInstances=1` at supervisor.rs:165).
+/// Wrap it in a friendly `NonoError::Setup` per Phase 17 D-08 with the
+/// session id and a hint to run `nono detach <id>` first. Everything else
+/// falls through to the existing "Failed to connect" wording so users still
+/// see the underlying io::Error message.
+///
+/// Kept as a free function (not a method) so unit tests can call it without
+/// constructing a `SessionRecord`. Returns `NonoError::Setup` (not
+/// `NonoError::AttachBusy`) per CONTEXT.md D-21 — the `AttachBusy` variant
+/// stays generic; the session-id-bearing message lives at the call site.
+pub(crate) fn translate_attach_open_error(err: &std::io::Error, session_id: &str) -> NonoError {
+    use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
+    if err.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) {
+        NonoError::Setup(format!(
+            "Session {session_id} is already attached. \
+             Use 'nono detach {session_id}' to release the existing client first."
+        ))
+    } else {
+        NonoError::Setup(format!(
+            "Failed to connect to session data pipe: {err}. Is another client already attached?"
+        ))
+    }
+}
+
+/// Default auto-prune threshold: prune if more than this many stale
+/// (>30d, Exited) session files are on disk when `nono ps` starts.
+const AUTO_PRUNE_STALE_THRESHOLD: usize = 100;
+
+/// Default retention used by the auto-trigger (30 days in seconds).
+const AUTO_PRUNE_RETENTION_SECS: u64 = 30 * 86_400;
+
+/// At the top of `run_ps`, check how many stale sessions are on disk.
+/// If the count exceeds AUTO_PRUNE_STALE_THRESHOLD, spawn a background
+/// thread to prune them and log a single info line to stderr.
+///
+/// STRUCTURAL NO-OP INSIDE A SANDBOX: if `NONO_CAP_FILE` is set, returns
+/// immediately. Sandboxed agents must not be able to trigger deletion of
+/// the host supervisor's session files (threat T-19-04-07 — EoP). This
+/// mirrors the `reject_if_sandboxed` check used by `run_prune`, but is
+/// silent (no error) because `nono ps` itself IS legal from a sandbox;
+/// only the background-deletion side effect is forbidden.
+///
+/// Fails silently — any error inside the background thread is logged
+/// at debug level and discarded. `nono ps` itself must not be delayed
+/// or broken by this cleanup path.
+fn auto_prune_if_needed() {
+    // T-19-04-07: refuse to delete host supervisor's sessions from
+    // within a sandboxed process. NONO_CAP_FILE is the canonical
+    // "I am running inside nono" signal (same check as reject_if_sandboxed).
+    if std::env::var_os("NONO_CAP_FILE").is_some() {
+        debug!("auto-prune skipped: running inside sandbox (NONO_CAP_FILE set)");
+        return;
+    }
+
+    // Load fresh list (cheap — directory scan).
+    let sessions = match session::list_sessions() {
+        Ok(s) => s,
+        Err(e) => {
+            debug!("auto-prune skipped: list_sessions failed: {e}");
+            return;
+        }
+    };
+
+    let now_epoch = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => d.as_secs(),
+        Err(e) => {
+            debug!("auto-prune skipped: clock error: {e}");
+            return;
+        }
+    };
+
+    let stale_ids: Vec<String> = sessions
+        .iter()
+        .filter(|s| session::is_prunable(s, now_epoch, AUTO_PRUNE_RETENTION_SECS))
+        .map(|s| s.session_id.clone())
+        .collect();
+
+    if stale_ids.len() <= AUTO_PRUNE_STALE_THRESHOLD {
+        return;
+    }
+
+    let count = stale_ids.len();
+    // Log up-front so operators see the count even if the background
+    // thread crashes / is killed.
+    eprintln!("info: pruning {count} stale session files (>30 days, exited)");
+
+    // Background thread: perform the actual deletes without blocking ps.
+    std::thread::spawn(move || {
+        let dir = match session::sessions_dir() {
+            Ok(d) => d,
+            Err(e) => {
+                debug!("auto-prune background: sessions_dir failed: {e}");
+                return;
+            }
+        };
+        let mut removed = 0usize;
+        for id in &stale_ids {
+            let session_file = dir.join(format!("{id}.json"));
+            let events_file = dir.join(format!("{id}.events.ndjson"));
+
+            // Same defense-in-depth as run_prune: refuse symlinks.
+            if let Ok(md) = std::fs::symlink_metadata(&session_file) {
+                if md.file_type().is_symlink() {
+                    debug!("auto-prune skipping symlink: {}", session_file.display());
+                    continue;
+                }
+            }
+            if std::fs::remove_file(&session_file).is_ok() {
+                removed += 1;
+            }
+            let _ = std::fs::remove_file(&events_file); // best effort
+        }
+        debug!("auto-prune background: removed {removed}/{count} stale session files");
+    });
+}
+
 pub fn run_ps(args: &PsArgs) -> Result<()> {
+    auto_prune_if_needed();
     let sessions = session::list_sessions()?;
 
     // Filter: by default show live sessions
@@ -299,12 +420,7 @@ pub fn run_attach(args: &AttachArgs) -> Result<()> {
         .read(true)
         .write(true)
         .open(&data_pipe_name)
-        .map_err(|e| {
-            NonoError::Setup(format!(
-                "Failed to connect to session data pipe: {}. Is another client already attached?",
-                e
-            ))
-        })?;
+        .map_err(|e| translate_attach_open_error(&e, &session.session_id))?;
 
     println!(
         "\n{} to session {}. Press {} to detach.",
@@ -417,37 +533,101 @@ pub fn run_inspect(args: &InspectArgs) -> Result<()> {
     if let Some(ref rollback) = record.rollback_session {
         println!("Rollback:   {}", rollback);
     }
+    if let Some(limits) = record.limits.as_ref() {
+        if !limits.is_empty() {
+            println!("\nLimits:");
+            if let Some(pct) = limits.cpu_percent {
+                println!("  cpu:     {pct}% (hard cap)");
+            }
+            if let Some(bytes) = limits.memory_bytes {
+                println!("  memory:  {} (job-wide)", format_bytes_human(bytes));
+            }
+            if let Some(secs) = limits.timeout_seconds {
+                println!(
+                    "  timeout: {}",
+                    format_duration_human(std::time::Duration::from_secs(secs))
+                );
+            }
+            if let Some(procs) = limits.max_processes {
+                println!("  procs:   {procs} (active)");
+            }
+        }
+    }
 
     Ok(())
 }
 
+/// Render bytes using binary (1024-based) units. Picks the largest unit that
+/// yields an integer representation; falls back to raw bytes for values that
+/// are not a clean multiple of any unit. Mirrors the input parser
+/// (`crate::cli::parse_byte_size`) which uses the same K/M/G/T multipliers.
+fn format_bytes_human(bytes: u64) -> String {
+    const K: u64 = 1024;
+    const M: u64 = K * 1024;
+    const G: u64 = M * 1024;
+    const T: u64 = G * 1024;
+    if bytes >= T && bytes % T == 0 {
+        format!("{} TiB", bytes / T)
+    } else if bytes >= G && bytes % G == 0 {
+        format!("{} GiB", bytes / G)
+    } else if bytes >= M && bytes % M == 0 {
+        format!("{} MiB", bytes / M)
+    } else if bytes >= K && bytes % K == 0 {
+        format!("{} KiB", bytes / K)
+    } else {
+        format!("{bytes} bytes")
+    }
+}
+
+/// Render a `Duration` as `"5 minutes"` / `"1 hour"` / `"45 seconds"`. Not a
+/// general-purpose formatter — tuned for the `parse_duration` accepted forms
+/// (s/m/h/d), which always produce whole-second durations.
+fn format_duration_human(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    if secs >= 86_400 && secs % 86_400 == 0 {
+        let n = secs / 86_400;
+        format!("{n} {}", if n == 1 { "day" } else { "days" })
+    } else if secs >= 3600 && secs % 3600 == 0 {
+        let n = secs / 3600;
+        format!("{n} {}", if n == 1 { "hour" } else { "hours" })
+    } else if secs >= 60 && secs % 60 == 0 {
+        let n = secs / 60;
+        format!("{n} {}", if n == 1 { "minute" } else { "minutes" })
+    } else {
+        format!("{secs} {}", if secs == 1 { "second" } else { "seconds" })
+    }
+}
+
+/// Dispatch `nono prune` (Windows).
+///
+/// Mirrors the Unix `run_prune` (session_commands.rs) — shared retention rule
+/// via `session::is_prunable`, mutually exclusive `--all-exited` / `--older-than`
+/// handling, canonicalization + symlink guards (T-19-04-02/03).
 pub fn run_prune(args: &PruneArgs) -> Result<()> {
     reject_if_sandboxed("prune")?;
+
     let sessions = session::list_sessions()?;
-
-    let now = chrono::Utc::now();
-    let mut to_remove: Vec<&SessionRecord> = Vec::new();
-
-    for s in &sessions {
-        if s.status == SessionStatus::Running {
-            continue;
+    let now_epoch = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => d.as_secs(),
+        Err(e) => {
+            return Err(NonoError::ConfigParse(format!(
+                "system clock before UNIX epoch: {e}"
+            )));
         }
+    };
 
-        let should_remove = if let Some(days) = args.older_than {
-            if let Ok(started) = chrono::DateTime::parse_from_rfc3339(&s.started) {
-                let age = now.signed_duration_since(started);
-                age.num_days() >= days as i64
-            } else {
-                false
-            }
-        } else {
-            true
-        };
+    let retention_secs: u64 = if args.all_exited {
+        0
+    } else if let Some(d) = args.older_than {
+        d.as_secs()
+    } else {
+        30 * 86_400
+    };
 
-        if should_remove {
-            to_remove.push(s);
-        }
-    }
+    let mut to_remove: Vec<&SessionRecord> = sessions
+        .iter()
+        .filter(|s| session::is_prunable(s, now_epoch, retention_secs))
+        .collect();
 
     if let Some(keep) = args.keep {
         if to_remove.len() > keep {
@@ -471,6 +651,25 @@ pub fn run_prune(args: &PruneArgs) -> Result<()> {
         if args.dry_run {
             eprintln!("Would remove: {} (started {})", s.session_id, s.started);
         } else {
+            match session_file.canonicalize() {
+                Ok(resolved) => {
+                    let dir_canon = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+                    if !resolved.starts_with(&dir_canon) {
+                        debug!(
+                            "Refusing to prune {}: outside sessions dir",
+                            session_file.display()
+                        );
+                        continue;
+                    }
+                }
+                Err(_) => { /* file may be gone already; remove_file errs benignly */ }
+            }
+            if let Ok(md) = std::fs::symlink_metadata(&session_file) {
+                if md.file_type().is_symlink() {
+                    debug!("Refusing to prune {}: is a symlink", session_file.display());
+                    continue;
+                }
+            }
             if let Err(e) = std::fs::remove_file(&session_file) {
                 debug!(
                     "Failed to remove session file {}: {}",
@@ -589,5 +788,160 @@ fn follow_event_log(path: &Path, tail: Option<usize>, as_json: bool) -> Result<(
             continue;
         }
         print!("{}", line);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- Plan 19-04 CLEAN-04: T-19-04-07 sandbox-guard regression test ----
+
+    #[test]
+    fn auto_prune_is_noop_when_sandboxed() {
+        use crate::test_env::{lock_env, EnvVarGuard};
+
+        // Acquire the process-wide env lock (tests run in parallel).
+        let _lock = lock_env();
+        // Save-and-restore guard flips NONO_CAP_FILE to a placeholder path
+        // for the duration of the test, then restores the original value.
+        let _guard = EnvVarGuard::set_all(&[("NONO_CAP_FILE", "/tmp/fake-cap-file")]);
+
+        // Should return immediately without touching the filesystem.
+        // Success criterion: function returns at all (no panic, no hang,
+        // no error). Since auto_prune_if_needed returns () and the sandbox
+        // early-return is the FIRST statement, reaching this line after
+        // the call is itself the assertion. We also re-check the env var
+        // is still set as a sanity guard against the test machinery losing
+        // it mid-call.
+        auto_prune_if_needed();
+        assert!(
+            std::env::var_os("NONO_CAP_FILE").is_some(),
+            "NONO_CAP_FILE should still be set — EnvVarGuard regressed"
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod inspect_formatting_tests {
+    use super::{format_bytes_human, format_duration_human};
+    use std::time::Duration;
+
+    #[test]
+    fn bytes_512_mib() {
+        assert_eq!(format_bytes_human(512 * 1024 * 1024), "512 MiB");
+    }
+
+    #[test]
+    fn bytes_1_gib() {
+        assert_eq!(format_bytes_human(1024 * 1024 * 1024), "1 GiB");
+    }
+
+    #[test]
+    fn bytes_256_kib() {
+        assert_eq!(format_bytes_human(256 * 1024), "256 KiB");
+    }
+
+    #[test]
+    fn bytes_1_tib() {
+        assert_eq!(format_bytes_human(1024u64.pow(4)), "1 TiB");
+    }
+
+    #[test]
+    fn bytes_non_clean_multiple_falls_back_to_bytes() {
+        // 1000 is not a clean multiple of 1024 → rendered as raw bytes.
+        assert_eq!(format_bytes_human(1000), "1000 bytes");
+    }
+
+    #[test]
+    fn bytes_zero_renders_as_zero_bytes() {
+        assert_eq!(format_bytes_human(0), "0 bytes");
+    }
+
+    #[test]
+    fn duration_45_seconds() {
+        assert_eq!(format_duration_human(Duration::from_secs(45)), "45 seconds");
+    }
+
+    #[test]
+    fn duration_1_second_is_singular() {
+        assert_eq!(format_duration_human(Duration::from_secs(1)), "1 second");
+    }
+
+    #[test]
+    fn duration_5_minutes() {
+        assert_eq!(format_duration_human(Duration::from_secs(300)), "5 minutes");
+    }
+
+    #[test]
+    fn duration_1_minute_is_singular() {
+        assert_eq!(format_duration_human(Duration::from_secs(60)), "1 minute");
+    }
+
+    #[test]
+    fn duration_1_hour_is_singular() {
+        assert_eq!(format_duration_human(Duration::from_secs(3600)), "1 hour");
+    }
+
+    #[test]
+    fn duration_2_hours() {
+        assert_eq!(format_duration_human(Duration::from_secs(7200)), "2 hours");
+    }
+
+    #[test]
+    fn duration_1_day_is_singular() {
+        assert_eq!(format_duration_human(Duration::from_secs(86_400)), "1 day");
+    }
+
+    #[test]
+    fn duration_90s_not_clean_minute() {
+        // 90s is not a clean minute → falls back to seconds.
+        assert_eq!(format_duration_human(Duration::from_secs(90)), "90 seconds");
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod attach_busy_translation_tests {
+    use super::translate_attach_open_error;
+    use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
+
+    #[test]
+    fn translates_pipe_busy_to_friendly_setup() {
+        let err = std::io::Error::from_raw_os_error(ERROR_PIPE_BUSY as i32);
+        let translated = translate_attach_open_error(&err, "abc123");
+        let msg = format!("{translated}");
+        assert!(msg.contains("abc123"), "expected session id in: {msg}");
+        assert!(
+            msg.contains("already attached"),
+            "expected 'already attached' in: {msg}"
+        );
+        assert!(
+            msg.contains("nono detach"),
+            "expected 'nono detach' hint in: {msg}"
+        );
+    }
+
+    #[test]
+    fn passes_through_other_errors() {
+        // ERROR_FILE_NOT_FOUND (2)
+        let err = std::io::Error::from_raw_os_error(2);
+        let translated = translate_attach_open_error(&err, "abc123");
+        let msg = format!("{translated}");
+        assert!(
+            msg.contains("Failed to connect"),
+            "expected fallback wording in: {msg}"
+        );
+    }
+
+    #[test]
+    fn passes_through_arbitrary_io_errors() {
+        let err = std::io::Error::other("foo");
+        let translated = translate_attach_open_error(&err, "abc123");
+        let msg = format!("{translated}");
+        assert!(
+            msg.contains("Failed to connect"),
+            "expected fallback wording in: {msg}"
+        );
     }
 }

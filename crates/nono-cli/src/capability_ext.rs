@@ -373,6 +373,17 @@ impl CapabilitySetExt for CapabilitySet {
             caps.add_blocked_command(cmd);
         }
 
+        // --allow-gpu wiring (D-12 upstream parity port).
+        //
+        // On Windows the warning fires and the capability is deliberately
+        // NOT added — proof that the Windows sandbox state is byte-identical
+        // with and without the flag (D-21 invariant).
+        args.warn_if_allow_gpu_unsupported_on_platform();
+        #[cfg(not(target_os = "windows"))]
+        if args.allow_gpu {
+            caps.set_gpu(true);
+        }
+
         finalize_caps(&mut caps, &mut resolved, &loaded_policy, args, &[])?;
 
         Ok((caps, resolved.needs_unlink_overrides))
@@ -749,6 +760,17 @@ fn add_cli_overrides(caps: &mut CapabilitySet, args: &SandboxArgs) -> Result<()>
         caps.add_blocked_command(cmd);
     }
 
+    // --allow-gpu CLI override (D-12 upstream parity port).
+    //
+    // On Windows, the warning fires and the capability is deliberately NOT
+    // added — the Windows sandbox state is byte-identical with and without
+    // the flag (D-21 invariant).
+    args.warn_if_allow_gpu_unsupported_on_platform();
+    #[cfg(not(target_os = "windows"))]
+    if args.allow_gpu {
+        caps.set_gpu(true);
+    }
+
     Ok(())
 }
 
@@ -862,6 +884,93 @@ mod tests {
         });
     }
 
+    // --allow-gpu wiring (D-12 upstream parity port).
+    //
+    // T-20-04-05 Windows-invariance regression guards:
+    // On Windows, the CapabilitySet produced from `from_args` MUST have
+    // `gpu() == false` regardless of the CLI flag. The enforcement layer
+    // (CLI warning) lives in cli.rs; the capability bit is deliberately
+    // NOT set so the Windows sandbox backend (sandbox/windows.rs) never
+    // observes a GPU-related capability.
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn test_from_args_allow_gpu_sets_capability_on_unix() {
+        let args = SandboxArgs {
+            allow_gpu: true,
+            ..sandbox_args()
+        };
+
+        let (caps, _) = from_args_locked(&args).expect("build caps with --allow-gpu");
+        assert!(
+            caps.gpu(),
+            "on Linux/macOS, --allow-gpu must set CapabilitySet::gpu()"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_from_args_allow_gpu_is_noop_on_windows() {
+        let args = SandboxArgs {
+            allow_gpu: true,
+            ..sandbox_args()
+        };
+
+        let (caps, _) = from_args_locked(&args).expect("build caps with --allow-gpu");
+        assert!(
+            !caps.gpu(),
+            "D-21 invariant: on Windows --allow-gpu must NOT set CapabilitySet::gpu() \
+             (the WFP + Job Object backend has no GPU primitive)"
+        );
+    }
+
+    #[test]
+    fn test_from_args_without_allow_gpu_never_sets_capability() {
+        let args = SandboxArgs {
+            allow_gpu: false,
+            ..sandbox_args()
+        };
+        let (caps, _) = from_args_locked(&args).expect("build caps");
+        assert!(
+            !caps.gpu(),
+            "T-20-04-01: without --allow-gpu the GPU bit must not be set"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_from_args_windows_sandbox_state_invariant_with_vs_without_allow_gpu() {
+        // D-21 must-have proof: the Windows sandbox state (captured via
+        // SandboxState::from_caps) is byte-identical with and without
+        // --allow-gpu. The GPU bit lives outside SandboxState by design,
+        // so even structurally no Windows sandbox capability changes.
+        use nono::SandboxState;
+
+        let args_on = SandboxArgs {
+            allow_gpu: true,
+            ..sandbox_args()
+        };
+        let args_off = SandboxArgs {
+            allow_gpu: false,
+            ..sandbox_args()
+        };
+
+        let (caps_on, _) = from_args_locked(&args_on).expect("build on");
+        let (caps_off, _) = from_args_locked(&args_off).expect("build off");
+
+        let state_on = SandboxState::from_caps(&caps_on)
+            .to_json()
+            .expect("serialize on");
+        let state_off = SandboxState::from_caps(&caps_off)
+            .to_json()
+            .expect("serialize off");
+
+        assert_eq!(
+            state_on, state_off,
+            "Windows sandbox state must be byte-identical with and without --allow-gpu"
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn test_from_args_skips_linux_temp_root_when_home_is_nested() {
@@ -942,14 +1051,18 @@ mod tests {
         std::fs::write(&read_file, "token=123").expect("write file");
 
         let profile_path = dir.path().join("read-file-profile.json");
+        // Use json_string() to emit a properly-escaped JSON string literal
+        // for the path. On Windows `read_file.display()` is a path like
+        // `C:\Users\...\config.txt` whose backslashes form invalid JSON
+        // escape sequences (`\U`, `\c`) when inlined into the raw string.
         std::fs::write(
             &profile_path,
             format!(
                 r#"{{
                 "meta": {{ "name": "read-file-profile" }},
-                "filesystem": {{ "read": ["{}"] }}
+                "filesystem": {{ "read": [{read}] }}
             }}"#,
-                read_file.display()
+                read = json_string(&read_file),
             ),
         )
         .expect("write profile");
@@ -1093,14 +1206,18 @@ mod tests {
         std::fs::create_dir_all(&lock_dir).expect("create lock dir");
 
         let profile_path = dir.path().join("lock-dir-profile.json");
+        // Use json_string() to emit a properly-escaped JSON string literal
+        // for the path. On Windows `lock_dir.display()` is a path like
+        // `C:\Users\...\claude.lock` whose backslashes form invalid JSON
+        // escape sequences when inlined into the raw string.
         std::fs::write(
             &profile_path,
             format!(
                 r#"{{
                 "meta": {{ "name": "lock-dir-profile" }},
-                "filesystem": {{ "allow_file": ["{}"] }}
+                "filesystem": {{ "allow_file": [{lock}] }}
             }}"#,
-                lock_dir.display()
+                lock = json_string(&lock_dir),
             ),
         )
         .expect("write profile");

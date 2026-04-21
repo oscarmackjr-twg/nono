@@ -9,6 +9,116 @@ use std::path::PathBuf;
 
 const STYLES: Styles = Styles::plain().header(Style::new().bold());
 
+/// Parse a byte-size value of the form `512M` / `1G` / `256K` / raw bytes `268435456`.
+/// Suffix is case-insensitive; multipliers are 1024-based (K=1024, M=1024^2, G=1024^3, T=1024^4).
+/// Rejects `0`, negative, empty, unrecognized suffixes, and values that overflow u64.
+pub(crate) fn parse_byte_size(s: &str) -> std::result::Result<u64, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("memory size cannot be empty".to_string());
+    }
+    let (num_str, multiplier): (&str, u64) = match s.chars().last() {
+        Some(c) if c.is_ascii_alphabetic() => {
+            let mult: u64 = match c.to_ascii_uppercase() {
+                'K' => 1024,
+                'M' => 1024 * 1024,
+                'G' => 1024 * 1024 * 1024,
+                'T' => 1024u64.pow(4),
+                other => {
+                    return Err(format!(
+                        "unrecognized memory suffix '{other}'; expected K/M/G/T"
+                    ))
+                }
+            };
+            (&s[..s.len() - 1], mult)
+        }
+        _ => (s, 1),
+    };
+    let n: u64 = num_str
+        .parse()
+        .map_err(|_| format!("invalid memory value '{s}'"))?;
+    if n == 0 {
+        return Err("memory value must be > 0".to_string());
+    }
+    n.checked_mul(multiplier)
+        .ok_or_else(|| format!("memory value '{s}' overflows u64"))
+}
+
+/// Parse a duration of the form `30s` / `5m` / `1h` / `1d` / raw seconds `300`.
+/// Rejects `0`, negative, empty, unrecognized suffixes, and overflow past u64 seconds.
+pub(crate) fn parse_duration(s: &str) -> std::result::Result<std::time::Duration, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("timeout cannot be empty".to_string());
+    }
+    let (num_str, multiplier): (&str, u64) = match s.chars().last() {
+        Some(c) if c.is_ascii_alphabetic() => {
+            let mult: u64 = match c.to_ascii_lowercase() {
+                's' => 1,
+                'm' => 60,
+                'h' => 3600,
+                'd' => 86_400,
+                other => {
+                    return Err(format!(
+                        "unrecognized duration suffix '{other}'; expected s/m/h/d"
+                    ))
+                }
+            };
+            (&s[..s.len() - 1], mult)
+        }
+        _ => (s, 1),
+    };
+    let n: u64 = num_str
+        .parse()
+        .map_err(|_| format!("invalid duration '{s}'"))?;
+    if n == 0 {
+        return Err("timeout must be > 0".to_string());
+    }
+    let secs = n
+        .checked_mul(multiplier)
+        .ok_or_else(|| format!("duration '{s}' overflows u64 seconds"))?;
+    Ok(std::time::Duration::from_secs(secs))
+}
+
+/// Validate an environment-variable filter pattern for `--env-allow` /
+/// `--env-deny`.
+///
+/// Accepted shapes (matching upstream v0.37.1 commit 1b412a7 semantics):
+/// - Exact variable name: `PATH`, `HOME` — must be non-empty and contain no `*`
+/// - Trailing-prefix glob: `AWS_*` — `*` must be the last character
+/// - Bare wildcard: `*` — matches all variables
+///
+/// Rejected (fails closed at clap parse time, BEFORE any child launch):
+/// - Empty pattern
+/// - `*` used as anything other than a trailing suffix (e.g. `A*B`, `*X`)
+///
+/// Security: fail-closed is mandated by CLAUDE.md § Fail Secure. A malformed
+/// filter that silently admitted everything would let sensitive parent-env
+/// vars leak into the sandboxed child. We reject at parse time so the child
+/// is never launched with an ambiguous filter.
+pub(crate) fn parse_env_filter_pattern(s: &str) -> std::result::Result<String, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("env filter pattern cannot be empty".to_string());
+    }
+    if s == "*" {
+        return Ok(s.to_string());
+    }
+    if s.contains('*') && !s.ends_with('*') {
+        return Err(format!(
+            "invalid env filter pattern '{s}': '*' is only valid as a trailing suffix \
+             (use 'AWS_*' or a bare '*', not 'A*B' or '*X')"
+        ));
+    }
+    if s.starts_with('*') && s.len() > 1 {
+        return Err(format!(
+            "invalid env filter pattern '{s}': use a bare '*' to match all variables, \
+             or a specific prefix like 'AWS_*'"
+        ));
+    }
+    Ok(s.to_string())
+}
+
 #[cfg(target_os = "windows")]
 const CLI_ABOUT: &str = "A capability-based shell for running untrusted AI agents and processes with OS-enforced isolation.\nUnsupported flows fail closed instead of implying full sandbox parity.";
 
@@ -292,7 +402,9 @@ const INSPECT_USAGE: &str = "\
 #[cfg(target_os = "windows")]
 const PRUNE_AFTER_HELP: &str = "\x1b[1mEXAMPLES\x1b[0m
   nono prune --dry-run                         # Preview what would be cleaned
-  nono prune --older-than 7                    # Remove sessions older than 7 days
+  nono prune --older-than 7d                   # Remove exited sessions older than 7 days
+  nono prune --older-than 12h                  # Remove exited sessions older than 12 hours
+  nono prune --all-exited                      # Remove every exited session (escape hatch)
   nono prune --keep 10                         # Keep only 10 most recent sessions
 ";
 
@@ -301,8 +413,11 @@ const PRUNE_AFTER_HELP: &str = "EXAMPLES:
     # Preview what would be cleaned
     nono prune --dry-run
 
-    # Remove sessions older than 7 days
-    nono prune --older-than 7
+    # Remove exited sessions older than 7 days (suffix REQUIRED)
+    nono prune --older-than 7d
+
+    # Remove every exited session (ignore age — escape hatch)
+    nono prune --all-exited
 
     # Keep only 10 most recent sessions
     nono prune --keep 10
@@ -1039,6 +1154,41 @@ pub struct SandboxArgs {
     )]
     pub env_credential_map: Vec<String>,
 
+    // ── Environment filter (upstream v0.37.1 #688 / 1b412a7) ─────────────────────────────────
+    /// Allow-list pattern for environment variables inherited by the
+    /// sandboxed child. Accepts an exact name (`PATH`), a trailing-prefix
+    /// glob (`AWS_*`), or a bare `*` to match all variables. Repeatable.
+    /// Malformed patterns fail closed at parse time with a clap error,
+    /// BEFORE the sandbox is launched. When any `--env-allow` is set, only
+    /// matching variables (plus nono-injected credentials) reach the child.
+    /// Upstream parity shim: full propagation to the child env boundary
+    /// lives in profile-surface code owned by a sibling plan; the flag is
+    /// accepted here with fail-closed validation so a future profile-wiring
+    /// patch can consume it without re-plumbing the CLI surface.
+    #[arg(
+        long,
+        value_name = "PATTERN",
+        value_parser = parse_env_filter_pattern,
+        action = clap::ArgAction::Append,
+        help_heading = "ENVIRONMENT"
+    )]
+    pub env_allow: Vec<String>,
+
+    /// Deny-list pattern for environment variables inherited by the
+    /// sandboxed child. Accepts an exact name or a trailing-prefix glob
+    /// (e.g. `AWS_*`). Repeatable. Malformed patterns fail closed at
+    /// parse time. When both `--env-allow` and `--env-deny` match, deny
+    /// takes precedence — this prevents an overly-broad allow from
+    /// accidentally admitting something listed in deny.
+    #[arg(
+        long,
+        value_name = "PATTERN",
+        value_parser = parse_env_filter_pattern,
+        action = clap::ArgAction::Append,
+        help_heading = "ENVIRONMENT"
+    )]
+    pub env_deny: Vec<String>,
+
     // ── Commands ─────────────────────────────────────────────────────────
     /// Allow a normally-blocked dangerous command (use with caution)
     #[arg(long, value_name = "CMD", help_heading = "COMMANDS")]
@@ -1062,6 +1212,12 @@ pub struct SandboxArgs {
     /// Allow direct LaunchServices opens on macOS (temporary login/setup flows)
     #[arg(long, help_heading = "OPTIONS")]
     pub allow_launch_services: bool,
+
+    /// Grant the sandboxed process access to GPU device nodes (Linux) or GPU
+    /// framework paths (macOS). On Windows, accepted but not enforced — emits
+    /// a warning (upstream v0.31–0.33 D-12 + v0.34 D-13).
+    #[arg(long, help_heading = "OPTIONS")]
+    pub allow_gpu: bool,
 
     /// Internal: force WFP readiness for test-built Windows binaries.
     #[cfg(debug_assertions)]
@@ -1102,6 +1258,55 @@ impl SandboxArgs {
             || !self.allow_proxy.is_empty()
             || !self.proxy_credential.is_empty()
             || self.external_proxy.is_some()
+    }
+
+    /// Emit a `tracing::warn!` for `--allow-gpu` when the flag is set but the
+    /// current platform's sandbox backend cannot enforce GPU passthrough.
+    ///
+    /// Upstream parity D-12 (v0.31–0.33) ships the flag with a three-platform
+    /// behavior split:
+    ///
+    /// - **Linux (Landlock):** allowlist NVIDIA/AMD/DRM device nodes +
+    ///   NVIDIA procfs (D-13). Enforced.
+    /// - **macOS (Seatbelt):** emit IOKit Metal/AGX GPU user-client rules.
+    ///   Enforced.
+    /// - **Windows (WFP + Job Object):** no kernel-level GPU sandboxing
+    ///   primitive exists. The flag is accepted for CLI parity so scripts
+    ///   are portable, but a warning is emitted so operators do not falsely
+    ///   assume GPU passthrough is sandboxed. Mirrors the Phase 16
+    ///   RESL-01..04 pattern (`collect_unix_resource_limit_warnings`) for
+    ///   unsupported flags, but lives at the CLI layer — per D-21, the
+    ///   Windows sandbox backend (`crates/nono/src/sandbox/windows.rs`) is
+    ///   NOT touched by this port and receives no GPU-related capability
+    ///   bit. The Windows sandbox state is byte-identical with and without
+    ///   `--allow-gpu`.
+    ///
+    /// Callers should invoke this at most once per sandbox launch. The
+    /// capability-wiring layer (`capability_ext::CapabilitySetExt::from_args`)
+    /// calls this before deciding whether to set
+    /// `CapabilitySet::allow_gpu()` — on Windows the warning fires and the
+    /// capability is deliberately NOT added to the set, which is the
+    /// enforcement-boundary proof that the Windows sandbox state does not
+    /// change.
+    pub fn warn_if_allow_gpu_unsupported_on_platform(&self) {
+        if !self.allow_gpu {
+            return;
+        }
+        #[cfg(target_os = "windows")]
+        {
+            tracing::warn!(
+                "--allow-gpu is not enforced on Windows: GPU access on Windows is \
+                 not supported by nono's sandbox backend (WFP + Job Object has no \
+                 GPU-passthrough primitive). The flag is accepted for CLI parity \
+                 with Linux/macOS; no capability is added to the Windows sandbox \
+                 state. See REQUIREMENTS.md § UPST-04."
+            );
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            // No-op on Linux/macOS — the flag is enforced by the respective
+            // sandbox backends (Landlock / Seatbelt).
+        }
     }
 }
 
@@ -1201,6 +1406,41 @@ pub struct WrapSandboxArgs {
     )]
     pub env_credential_map: Vec<String>,
 
+    // ── Environment filter (upstream v0.37.1 #688 / 1b412a7) ─────────────────────────────────
+    /// Allow-list pattern for environment variables inherited by the
+    /// sandboxed child. Accepts an exact name (`PATH`), a trailing-prefix
+    /// glob (`AWS_*`), or a bare `*` to match all variables. Repeatable.
+    /// Malformed patterns fail closed at parse time with a clap error,
+    /// BEFORE the sandbox is launched. When any `--env-allow` is set, only
+    /// matching variables (plus nono-injected credentials) reach the child.
+    /// Upstream parity shim: full propagation to the child env boundary
+    /// lives in profile-surface code owned by a sibling plan; the flag is
+    /// accepted here with fail-closed validation so a future profile-wiring
+    /// patch can consume it without re-plumbing the CLI surface.
+    #[arg(
+        long,
+        value_name = "PATTERN",
+        value_parser = parse_env_filter_pattern,
+        action = clap::ArgAction::Append,
+        help_heading = "ENVIRONMENT"
+    )]
+    pub env_allow: Vec<String>,
+
+    /// Deny-list pattern for environment variables inherited by the
+    /// sandboxed child. Accepts an exact name or a trailing-prefix glob
+    /// (e.g. `AWS_*`). Repeatable. Malformed patterns fail closed at
+    /// parse time. When both `--env-allow` and `--env-deny` match, deny
+    /// takes precedence — this prevents an overly-broad allow from
+    /// accidentally admitting something listed in deny.
+    #[arg(
+        long,
+        value_name = "PATTERN",
+        value_parser = parse_env_filter_pattern,
+        action = clap::ArgAction::Append,
+        help_heading = "ENVIRONMENT"
+    )]
+    pub env_deny: Vec<String>,
+
     // ── Commands ─────────────────────────────────────────────────────────
     /// Allow a normally-blocked dangerous command (use with caution)
     #[arg(long, value_name = "CMD", help_heading = "COMMANDS")]
@@ -1224,6 +1464,12 @@ pub struct WrapSandboxArgs {
     /// Allow direct LaunchServices opens on macOS (temporary login/setup flows)
     #[arg(long, help_heading = "OPTIONS")]
     pub allow_launch_services: bool,
+
+    /// Grant the sandboxed process access to GPU device nodes (Linux) or GPU
+    /// framework paths (macOS). On Windows, accepted but not enforced — emits
+    /// a warning (upstream v0.31–0.33 D-12 + v0.34 D-13).
+    #[arg(long, help_heading = "OPTIONS")]
+    pub allow_gpu: bool,
 
     /// Capability manifest file (JSON). A fully-resolved sandbox specification —
     /// mutually exclusive with all other sandbox configuration flags.
@@ -1278,8 +1524,11 @@ impl From<WrapSandboxArgs> for SandboxArgs {
             env_credential_map: args.env_credential_map,
             allow_command: args.allow_command,
             block_command: args.block_command,
+            env_allow: args.env_allow,
+            env_deny: args.env_deny,
             profile: args.profile,
             allow_launch_services: args.allow_launch_services,
+            allow_gpu: args.allow_gpu,
             config: args.config,
             verbose: args.verbose,
             #[cfg(debug_assertions)]
@@ -1367,6 +1616,55 @@ pub struct RunArgs {
     /// initial capability set via interactive prompts.
     #[arg(long, env = "NONO_CAPABILITY_ELEVATION", help_heading = "OPTIONS")]
     pub capability_elevation: bool,
+
+    // ── Resource Limits ──────────────────────────────────────────────
+    /// Cap the sandboxed agent tree's CPU to this percentage of one logical core.
+    /// Kernel-enforced on Windows via `JOB_OBJECT_CPU_RATE_CONTROL_ENABLE` with hard-cap.
+    /// Range: 1..=100. On Linux/macOS: accepted with a "not enforced on this platform"
+    /// warning pending a cross-platform follow-up. See REQUIREMENTS.md § RESL-01.
+    #[arg(
+        long,
+        value_name = "PERCENT",
+        value_parser = clap::value_parser!(u16).range(1..=100),
+        help_heading = "RESOURCE LIMITS"
+    )]
+    pub cpu_percent: Option<u16>,
+
+    /// Cap the sandboxed agent tree's total memory. Accepts `512M`, `1G`, `256K`,
+    /// or raw bytes. Kernel-enforced job-wide on Windows via `JobMemoryLimit`.
+    /// On Linux/macOS: accepted with a warning pending cross-platform follow-up.
+    /// See REQUIREMENTS.md § RESL-02.
+    #[arg(
+        long,
+        value_name = "SIZE",
+        value_parser = parse_byte_size,
+        help_heading = "RESOURCE LIMITS"
+    )]
+    pub memory: Option<u64>,
+
+    /// Kill the sandboxed agent tree after this wall-clock duration.
+    /// Accepts `30s`, `5m`, `1h`, `1d`, or raw seconds. Enforced by supervisor-side
+    /// timer + `TerminateJobObject` on Windows (see REQUIREMENTS.md § RESL-03).
+    /// On Linux/macOS: accepted with a warning pending cross-platform follow-up.
+    #[arg(
+        long,
+        value_name = "DURATION",
+        value_parser = parse_duration,
+        help_heading = "RESOURCE LIMITS"
+    )]
+    pub timeout: Option<std::time::Duration>,
+
+    /// Cap the number of active processes in the sandboxed agent tree.
+    /// Kernel-enforced on Windows via `ActiveProcessLimit`. Range: 1..=65535.
+    /// On Linux/macOS: accepted with a warning pending cross-platform follow-up.
+    /// See REQUIREMENTS.md § RESL-04.
+    #[arg(
+        long,
+        value_name = "N",
+        value_parser = clap::value_parser!(u32).range(1..=65535),
+        help_heading = "RESOURCE LIMITS"
+    )]
+    pub max_processes: Option<u32>,
 
     /// Command to run inside the sandbox
     #[arg(required = true, hide = true)]
@@ -1870,15 +2168,41 @@ pub struct InspectArgs {
     pub changes: bool,
 }
 
+/// Parse a duration for prune's `--older-than`, REQUIRING a suffix.
+///
+/// Unlike `parse_duration` directly, this rejects raw integers because
+/// `--older-than 30` used to mean "30 days" (pre-CLEAN-04) but would
+/// suddenly mean "30 seconds" under parse_duration's rules. We refuse
+/// ambiguous input instead of silently changing behavior.
+pub(crate) fn parse_prune_duration(s: &str) -> std::result::Result<std::time::Duration, String> {
+    let trimmed = s.trim();
+    // A suffix is any trailing non-digit char. parse_duration accepts both
+    // raw ("30") and suffixed ("30d") forms; we gate on the former.
+    if !trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_digit()) {
+        return Err(format!(
+            "ambiguous duration '{trimmed}' — please specify a suffix: \
+             {trimmed}s (seconds), {trimmed}m (minutes), {trimmed}h (hours), {trimmed}d (days)"
+        ));
+    }
+    parse_duration(trimmed)
+}
+
 #[derive(Parser, Debug)]
 pub struct PruneArgs {
     /// Show what would be removed without deleting
     #[arg(long)]
     pub dry_run: bool,
 
-    /// Remove sessions older than N days
-    #[arg(long, value_name = "DAYS")]
-    pub older_than: Option<u64>,
+    /// Remove exited sessions older than this duration.
+    /// Accepts 30s, 5m, 1h, 30d (no raw integers — specify a suffix).
+    /// Default when unset: 30 days.
+    #[arg(long, value_name = "DURATION", value_parser = parse_prune_duration)]
+    pub older_than: Option<std::time::Duration>,
+
+    /// Ignore age and prune every exited session (escape hatch).
+    /// Mutually exclusive with --older-than.
+    #[arg(long, conflicts_with = "older_than")]
+    pub all_exited: bool,
 
     /// Keep only the N most recent sessions
     #[arg(long, value_name = "N")]
@@ -2090,6 +2414,440 @@ pub struct TrustExportKeyArgs {
     /// Print help
     #[arg(long, short = 'h', action = clap::ArgAction::Help, help_heading = "OPTIONS")]
     pub help: Option<bool>,
+}
+
+#[cfg(test)]
+mod parser_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn parse_byte_size_accepts_kmgt_suffixes() {
+        assert_eq!(parse_byte_size("256K"), Ok(256 * 1024));
+        assert_eq!(parse_byte_size("512M"), Ok(512 * 1024 * 1024));
+        assert_eq!(parse_byte_size("1G"), Ok(1u64 << 30));
+        assert_eq!(parse_byte_size("2T"), Ok(2u64 * 1024u64.pow(4)));
+        assert_eq!(parse_byte_size("1g"), Ok(1u64 << 30));
+    }
+
+    #[test]
+    fn parse_byte_size_accepts_raw_bytes() {
+        assert_eq!(parse_byte_size("268435456"), Ok(268_435_456));
+    }
+
+    #[test]
+    fn parse_byte_size_rejects_invalid() {
+        assert!(parse_byte_size("0").is_err());
+        assert!(parse_byte_size("-1").is_err());
+        assert!(parse_byte_size("").is_err());
+        assert!(parse_byte_size("foo").is_err());
+        assert!(parse_byte_size("1X").is_err());
+    }
+
+    #[test]
+    fn parse_byte_size_rejects_overflow() {
+        let huge = format!("{}T", u64::MAX);
+        assert!(parse_byte_size(&huge).is_err());
+    }
+
+    #[test]
+    fn parse_duration_accepts_suffixes() {
+        assert_eq!(parse_duration("30s"), Ok(Duration::from_secs(30)));
+        assert_eq!(parse_duration("5m"), Ok(Duration::from_secs(300)));
+        assert_eq!(parse_duration("1h"), Ok(Duration::from_secs(3600)));
+        assert_eq!(parse_duration("1d"), Ok(Duration::from_secs(86_400)));
+    }
+
+    #[test]
+    fn parse_duration_accepts_raw_seconds() {
+        assert_eq!(parse_duration("300"), Ok(Duration::from_secs(300)));
+    }
+
+    #[test]
+    fn parse_duration_rejects_invalid() {
+        assert!(parse_duration("0").is_err());
+        assert!(parse_duration("-1").is_err());
+        assert!(parse_duration("").is_err());
+        assert!(parse_duration("5x").is_err());
+    }
+
+    #[test]
+    fn cpu_percent_range_enforced_by_clap() {
+        let err_zero =
+            Cli::try_parse_from(["nono", "run", "--cpu-percent", "0", "--allow", ".", "echo"]);
+        assert!(err_zero.is_err());
+        let err_over = Cli::try_parse_from([
+            "nono",
+            "run",
+            "--cpu-percent",
+            "101",
+            "--allow",
+            ".",
+            "echo",
+        ]);
+        assert!(err_over.is_err());
+        let ok =
+            Cli::try_parse_from(["nono", "run", "--cpu-percent", "25", "--allow", ".", "echo"]);
+        assert!(ok.is_ok());
+    }
+
+    #[test]
+    fn max_processes_range_enforced_by_clap() {
+        let err_zero = Cli::try_parse_from([
+            "nono",
+            "run",
+            "--max-processes",
+            "0",
+            "--allow",
+            ".",
+            "echo",
+        ]);
+        assert!(err_zero.is_err());
+        let err_over = Cli::try_parse_from([
+            "nono",
+            "run",
+            "--max-processes",
+            "65536",
+            "--allow",
+            ".",
+            "echo",
+        ]);
+        assert!(err_over.is_err());
+        let ok = Cli::try_parse_from([
+            "nono",
+            "run",
+            "--max-processes",
+            "10",
+            "--allow",
+            ".",
+            "echo",
+        ]);
+        assert!(ok.is_ok());
+    }
+
+    #[test]
+    fn memory_zero_rejected_by_parser() {
+        let err = Cli::try_parse_from(["nono", "run", "--memory", "0", "--allow", ".", "echo"]);
+        assert!(err.is_err());
+    }
+
+    // ==================================================================
+    // Environment-variable filter flags (upstream v0.37.1 #688 / 1b412a7)
+    // D-09 scoped port — CLI surface + parse-time validator only.
+    // ==================================================================
+
+    #[test]
+    fn parse_env_filter_pattern_accepts_exact_names() {
+        assert_eq!(parse_env_filter_pattern("PATH"), Ok("PATH".to_string()));
+        assert_eq!(parse_env_filter_pattern("HOME"), Ok("HOME".to_string()));
+        assert_eq!(
+            parse_env_filter_pattern("MY_CUSTOM_VAR"),
+            Ok("MY_CUSTOM_VAR".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_env_filter_pattern_accepts_prefix_glob() {
+        assert_eq!(parse_env_filter_pattern("AWS_*"), Ok("AWS_*".to_string()));
+        assert_eq!(parse_env_filter_pattern("LANG_*"), Ok("LANG_*".to_string()));
+    }
+
+    #[test]
+    fn parse_env_filter_pattern_accepts_bare_wildcard() {
+        assert_eq!(parse_env_filter_pattern("*"), Ok("*".to_string()));
+    }
+
+    #[test]
+    fn parse_env_filter_pattern_rejects_empty() {
+        assert!(parse_env_filter_pattern("").is_err());
+        assert!(parse_env_filter_pattern("   ").is_err());
+    }
+
+    #[test]
+    fn parse_env_filter_pattern_rejects_middle_wildcard() {
+        let err = parse_env_filter_pattern("INVALID*PATTERN")
+            .expect_err("middle wildcard should fail closed");
+        assert!(err.contains("trailing suffix"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_env_filter_pattern_rejects_leading_wildcard() {
+        let err =
+            parse_env_filter_pattern("*SUFFIX").expect_err("leading wildcard should fail closed");
+        assert!(
+            err.contains("bare '*'") || err.contains("trailing suffix"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn env_allow_accepts_exact_and_glob_via_clap() {
+        let cli = Cli::try_parse_from([
+            "nono",
+            "run",
+            "--env-allow",
+            "PATH",
+            "--env-allow",
+            "AWS_*",
+            "--env-allow",
+            "*",
+            "--allow",
+            ".",
+            "echo",
+        ]);
+        assert!(cli.is_ok(), "valid allow patterns should parse: {cli:?}");
+        if let Ok(Cli {
+            command: Commands::Run(args),
+            ..
+        }) = cli
+        {
+            assert_eq!(args.sandbox.env_allow, vec!["PATH", "AWS_*", "*"]);
+        } else {
+            panic!("expected Run command");
+        }
+    }
+
+    #[test]
+    fn env_deny_accepts_exact_and_glob_via_clap() {
+        let cli = Cli::try_parse_from([
+            "nono",
+            "run",
+            "--env-deny",
+            "SECRET_KEY",
+            "--env-deny",
+            "AWS_SECRET_*",
+            "--allow",
+            ".",
+            "echo",
+        ]);
+        assert!(cli.is_ok(), "valid deny patterns should parse");
+        if let Ok(Cli {
+            command: Commands::Run(args),
+            ..
+        }) = cli
+        {
+            assert_eq!(args.sandbox.env_deny, vec!["SECRET_KEY", "AWS_SECRET_*"]);
+        }
+    }
+
+    #[test]
+    fn env_allow_malformed_pattern_fails_closed_at_parse() {
+        // Plan-required: malformed pattern fails closed BEFORE sandbox launch.
+        let cli = Cli::try_parse_from([
+            "nono",
+            "run",
+            "--env-allow",
+            "MIDDLE*STAR",
+            "--allow",
+            ".",
+            "echo",
+        ]);
+        assert!(cli.is_err(), "malformed --env-allow must reject at parse");
+        let err = cli
+            .expect_err("malformed --env-allow must reject at parse")
+            .to_string();
+        assert!(
+            err.contains("trailing suffix") || err.contains("invalid"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn env_deny_malformed_pattern_fails_closed_at_parse() {
+        let cli = Cli::try_parse_from([
+            "nono",
+            "run",
+            "--env-deny",
+            "*LEADING_STAR",
+            "--allow",
+            ".",
+            "echo",
+        ]);
+        assert!(cli.is_err(), "malformed --env-deny must reject at parse");
+    }
+
+    #[test]
+    fn env_filter_flags_do_not_collide_with_phase16_flags() {
+        // Regression guard: Phase 16's --cpu-percent / --memory / --timeout /
+        // --max-processes remain parseable alongside the new env filter flags.
+        let cli = Cli::try_parse_from([
+            "nono",
+            "run",
+            "--env-allow",
+            "PATH",
+            "--env-deny",
+            "SECRET",
+            "--cpu-percent",
+            "25",
+            "--memory",
+            "512M",
+            "--timeout",
+            "30s",
+            "--max-processes",
+            "10",
+            "--allow",
+            ".",
+            "echo",
+        ]);
+        assert!(
+            cli.is_ok(),
+            "env-filter + Phase 16 flags must coexist: {cli:?}"
+        );
+    }
+
+    #[test]
+    fn env_filter_flags_available_on_shell_and_wrap() {
+        let shell_cli =
+            Cli::try_parse_from(["nono", "shell", "--env-allow", "PATH", "--allow", "."]);
+        assert!(
+            shell_cli.is_ok(),
+            "shell env-allow should parse: {shell_cli:?}"
+        );
+
+        let wrap_cli = Cli::try_parse_from([
+            "nono",
+            "wrap",
+            "--env-deny",
+            "SECRET_*",
+            "--allow",
+            ".",
+            "echo",
+        ]);
+        assert!(wrap_cli.is_ok(), "wrap env-deny should parse: {wrap_cli:?}");
+    }
+
+    #[test]
+    fn env_allow_default_is_empty_vec() {
+        let cli = Cli::try_parse_from(["nono", "run", "--allow", ".", "echo"])
+            .expect("baseline `nono run --allow . echo` must parse");
+        if let Commands::Run(args) = &cli.command {
+            assert!(args.sandbox.env_allow.is_empty());
+            assert!(args.sandbox.env_deny.is_empty());
+        }
+    }
+
+    // --allow-gpu CLI surface (D-12 upstream parity port).
+
+    #[test]
+    fn allow_gpu_default_is_false() {
+        // T-20-04-01 mitigation: flag must default to off.
+        let cli = Cli::try_parse_from(["nono", "run", "--allow", ".", "echo"])
+            .expect("baseline nono run should parse");
+        if let Commands::Run(args) = &cli.command {
+            assert!(!args.sandbox.allow_gpu);
+        } else {
+            panic!("expected Run subcommand");
+        }
+    }
+
+    #[test]
+    fn allow_gpu_parses_on_run() {
+        let cli = Cli::try_parse_from(["nono", "run", "--allow-gpu", "--allow", ".", "echo"])
+            .expect("nono run --allow-gpu should parse");
+        if let Commands::Run(args) = &cli.command {
+            assert!(args.sandbox.allow_gpu);
+        } else {
+            panic!("expected Run subcommand");
+        }
+    }
+
+    #[test]
+    fn allow_gpu_parses_on_wrap() {
+        let cli = Cli::try_parse_from(["nono", "wrap", "--allow-gpu", "--allow", ".", "echo"])
+            .expect("wrap --allow-gpu should parse");
+        if let Commands::Wrap(args) = &cli.command {
+            assert!(args.sandbox.allow_gpu);
+        } else {
+            panic!("expected Wrap subcommand");
+        }
+    }
+
+    #[test]
+    fn allow_gpu_parses_on_shell() {
+        let cli = Cli::try_parse_from(["nono", "shell", "--allow-gpu", "--allow", "."])
+            .expect("shell --allow-gpu should parse");
+        // Shell uses the same SandboxArgs surface — presence alone is enough.
+        assert!(matches!(cli.command, Commands::Shell(_)));
+    }
+
+    #[test]
+    fn allow_gpu_coexists_with_phase16_and_env_filter_flags() {
+        // Regression guard: --allow-gpu does NOT collide with Phase 16's
+        // resource-limit flags or Plan 20-03's env-filter flags. All four
+        // sets land on SandboxArgs via the same clap surface.
+        let cli = Cli::try_parse_from([
+            "nono",
+            "run",
+            "--allow-gpu",
+            "--env-allow",
+            "PATH",
+            "--env-deny",
+            "SECRET",
+            "--cpu-percent",
+            "25",
+            "--memory",
+            "512M",
+            "--timeout",
+            "30s",
+            "--max-processes",
+            "10",
+            "--allow",
+            ".",
+            "echo",
+        ]);
+        assert!(
+            cli.is_ok(),
+            "--allow-gpu must coexist with Phase 16 + Plan 20-03 flags: {cli:?}"
+        );
+    }
+
+    #[test]
+    fn wrap_to_sandbox_args_propagates_allow_gpu() {
+        // The WrapSandboxArgs → SandboxArgs conversion must carry allow_gpu
+        // across. A regression here would silently drop the flag on
+        // `nono wrap --allow-gpu` even though the parser accepts it.
+        let wrap_cli = Cli::try_parse_from(["nono", "wrap", "--allow-gpu", "--allow", ".", "echo"])
+            .expect("nono wrap --allow-gpu should parse");
+        if let Commands::Wrap(args) = wrap_cli.command {
+            let sandbox: SandboxArgs = args.sandbox.clone().into();
+            assert!(sandbox.allow_gpu);
+        } else {
+            panic!("expected Wrap subcommand");
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn allow_gpu_windows_warning_helper_is_callable() {
+        // T-20-04-05 mitigation: on Windows, `warn_if_allow_gpu_unsupported_on_platform`
+        // emits a `tracing::warn!`. We don't intercept tracing events here
+        // (that requires `tracing-test`), but we verify the helper is callable
+        // without panic on both branches (flag off and flag on).
+        let args_off = SandboxArgs {
+            allow_gpu: false,
+            ..SandboxArgs::default()
+        };
+        args_off.warn_if_allow_gpu_unsupported_on_platform(); // no-op branch
+
+        let args_on = SandboxArgs {
+            allow_gpu: true,
+            ..SandboxArgs::default()
+        };
+        args_on.warn_if_allow_gpu_unsupported_on_platform(); // emits warn!, no panic
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn allow_gpu_non_windows_warning_helper_is_noop() {
+        // On Linux/macOS the helper must be a total no-op even when the flag
+        // is set — enforcement happens in the sandbox backend, not at CLI
+        // parse time.
+        let args = SandboxArgs {
+            allow_gpu: true,
+            ..SandboxArgs::default()
+        };
+        args.warn_if_allow_gpu_unsupported_on_platform();
+    }
 }
 
 #[cfg(test)]

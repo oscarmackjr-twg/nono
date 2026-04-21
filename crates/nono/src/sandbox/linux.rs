@@ -347,6 +347,159 @@ fn is_device_directory(path: &Path) -> bool {
     path.starts_with("/dev") && path.is_dir()
 }
 
+/// Predicate matching NVIDIA compute device filenames under `/dev/`.
+///
+/// Upstream parity port of `is_nvidia_compute_device` (upstream d6be972).
+/// Matches:
+/// - `nvidiactl` — control device (required for all CUDA operations)
+/// - `nvidia-uvm` — Unified Virtual Memory (CUDA managed memory)
+/// - `nvidia-uvm-tools` — UVM tool device (CUDA 12.8 / driver 570+, b162b5c)
+/// - `nvidia0`, `nvidia1`, ..., `nvidiaN` — per-GPU device nodes
+///
+/// Deliberately excludes `nvidia-modeset` (display control, not compute,
+/// same rationale as `/dev/dri/card*`).
+#[cfg(target_os = "linux")]
+#[must_use]
+fn is_nvidia_compute_device(name: &str) -> bool {
+    if name == "nvidiactl" || name == "nvidia-uvm" || name == "nvidia-uvm-tools" {
+        return true;
+    }
+    // nvidia[0-9]+ — ASCII-only suffix check avoids allocating
+    if let Some(suffix) = name.strip_prefix("nvidia") {
+        return !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit());
+    }
+    false
+}
+
+/// Enumerate GPU-related filesystem paths to allowlist when
+/// `CapabilitySet::gpu()` is true.
+///
+/// Returns `(paths, nvidia_present)` where `paths` is the list of
+/// `(path, access_mode, is_file)` tuples and `nvidia_present` is true when
+/// any NVIDIA device or MIG cap was discovered. NVIDIA presence triggers
+/// procfs grants (upstream 4df0a8e — required for CUDA init under driver
+/// 570+).
+///
+/// Path list mirrors upstream `maybe_enable_gpu`:
+/// - `/dev/dri/renderD*` (rw, file) — DRM render nodes (compute-only)
+/// - `/dev/nvidia*` (rw, file) — NVIDIA compute devices (see
+///   `is_nvidia_compute_device`)
+/// - `/dev/nvidia-caps/*` (rw, file) — MIG capability devices (A100/H100)
+/// - `/dev/kfd` (rw, file) — AMD KFD (ROCm/HIP)
+/// - `/dev/dxg` (rw, file) — WSL2 GPU passthrough (DirectX paravirt)
+/// - `/usr/lib/wsl/lib` (r, dir) — WSL2 CUDA/D3D12 libraries
+/// - `/proc/driver/nvidia` (r, dir) — NVIDIA procfs (when NVIDIA present)
+/// - `/proc/driver/nvidia-uvm` (r, dir) — UVM procfs (when NVIDIA present)
+/// - `/proc/self` (r, dir) — /proc/self/maps, /proc/self/status, etc.
+/// - `/proc/self/task` (rw, dir) — driver writes /proc/self/task/<tid>/comm
+///   for thread names; EACCES here manifests as CUDA Error 304
+/// - `/usr/share/vulkan` (r, dir) — Vulkan ICD manifests
+/// - `/etc/vulkan` (r, dir) — Vulkan ICD manifests (alt location)
+/// - `/sys/class/drm` (r, dir) — GPU-specific sysfs (scoped to drm subtree
+///   rather than full /sys/devices)
+///
+/// Absent paths are silently skipped — the same CapabilitySet runs under
+/// WSL2 (dxg but no NVIDIA devfs), a pure DRM render-node headless box
+/// (dri but no nvidia), an MIG-only A100 host (caps but no plain nvidia0),
+/// etc.
+///
+/// `CVE-2024-0090` note: `nvidia-uvm` has a privilege-escalation CVE
+/// history. Per upstream, access is accepted risk under explicit
+/// `--allow-gpu` opt-in; it is NOT granted absent the flag (T-20-04-02
+/// mitigation — gated by `caps.gpu()` at the caller).
+#[cfg(target_os = "linux")]
+fn collect_linux_gpu_paths() -> (Vec<(std::path::PathBuf, AccessMode, bool)>, bool) {
+    use std::path::PathBuf;
+
+    let mut out: Vec<(PathBuf, AccessMode, bool)> = Vec::new();
+    let mut nvidia_present = false;
+
+    // DRM render nodes (/dev/dri/renderD*).
+    if let Ok(entries) = std::fs::read_dir("/dev/dri") {
+        for entry in entries.filter_map(|e| e.ok()) {
+            if entry
+                .file_name()
+                .to_str()
+                .is_some_and(|n| n.starts_with("renderD"))
+            {
+                out.push((entry.path(), AccessMode::ReadWrite, true));
+            }
+        }
+    }
+
+    // NVIDIA compute devices (/dev/nvidia*, nvidiactl, nvidia-uvm,
+    // nvidia-uvm-tools, nvidia0..N). MIG caps are enumerated separately.
+    if let Ok(entries) = std::fs::read_dir("/dev") {
+        for entry in entries.filter_map(|e| e.ok()) {
+            if let Some(name) = entry.file_name().to_str() {
+                if is_nvidia_compute_device(name) {
+                    out.push((entry.path(), AccessMode::ReadWrite, true));
+                    nvidia_present = true;
+                }
+            }
+        }
+    }
+
+    // NVIDIA MIG caps (/dev/nvidia-caps/*) — individually enumerated
+    // rather than granting the full directory.
+    if let Ok(entries) = std::fs::read_dir("/dev/nvidia-caps") {
+        for entry in entries.filter_map(|e| e.ok()) {
+            out.push((entry.path(), AccessMode::ReadWrite, true));
+            nvidia_present = true;
+        }
+    }
+
+    // AMD KFD (/dev/kfd).
+    let kfd = Path::new("/dev/kfd");
+    if kfd.exists() {
+        out.push((kfd.to_path_buf(), AccessMode::ReadWrite, true));
+    }
+
+    // WSL2 DirectX GPU passthrough (/dev/dxg).
+    let dxg = Path::new("/dev/dxg");
+    if dxg.exists() {
+        out.push((dxg.to_path_buf(), AccessMode::ReadWrite, true));
+    }
+
+    // WSL2 CUDA/D3D12 libraries (/usr/lib/wsl/lib).
+    let wsl_lib = Path::new("/usr/lib/wsl/lib");
+    if wsl_lib.is_dir() {
+        out.push((wsl_lib.to_path_buf(), AccessMode::Read, false));
+    }
+
+    // NVIDIA procfs paths — only granted when NVIDIA devices are present
+    // (pure DRM/AMD/WSL setups don't need them). Upstream 4df0a8e: CUDA
+    // init reads /proc/driver/nvidia and /proc/driver/nvidia-uvm, and
+    // the driver writes /proc/self/task/<tid>/comm for thread names.
+    // EACCES on that write surfaces as CUDA Error 304.
+    if nvidia_present {
+        for name in ["nvidia", "nvidia-uvm"] {
+            let path = PathBuf::from("/proc/driver").join(name);
+            if path.is_dir() {
+                out.push((path, AccessMode::Read, false));
+            }
+        }
+        // /proc/self read; /proc/self/task rw. These are guaranteed on
+        // Linux so we include them unconditionally when NVIDIA is present.
+        out.push((PathBuf::from("/proc/self"), AccessMode::Read, false));
+        out.push((
+            PathBuf::from("/proc/self/task"),
+            AccessMode::ReadWrite,
+            false,
+        ));
+    }
+
+    // Vulkan ICD manifests + GPU sysfs — read-only, scoped narrowly.
+    for dir in ["/usr/share/vulkan", "/etc/vulkan", "/sys/class/drm"] {
+        let p = Path::new(dir);
+        if p.is_dir() {
+            out.push((p.to_path_buf(), AccessMode::Read, false));
+        }
+    }
+
+    (out, nvidia_present)
+}
+
 /// Determine which Landlock scopes must be enabled for these capabilities.
 ///
 /// Only `SignalMode::AllowSameSandbox` has an exact Landlock mapping today.
@@ -642,6 +795,64 @@ pub fn apply_with_abi(caps: &CapabilitySet, abi: &DetectedAbi) -> Result<Seccomp
                     e
                 ))
             })?;
+    }
+
+    // GPU capability dispatch (D-12 upstream parity port, Linux Landlock).
+    //
+    // When `--allow-gpu` is set the Landlock allowlist includes NVIDIA
+    // compute devices, NVIDIA procfs entries (D-13), DRM render nodes,
+    // AMD KFD, and WSL2 /dev/dxg where present. The exact path list
+    // mirrors upstream `maybe_enable_gpu` in `sandbox_prepare.rs`
+    // (scparkinson 4535473 + 4df0a8e, Kexin-xu-01 b162b5c).
+    //
+    // Per-platform discovery: we probe the filesystem at apply-time so
+    // headless setups (no `/dev/dri`), NVIDIA-only systems, AMD-only
+    // systems, and WSL2 hosts each get exactly the devices they have.
+    // Absent devices are skipped rather than erroring so the same
+    // `--allow-gpu` invocation works across diverse hosts.
+    if caps.gpu() {
+        let (gpu_paths, nvidia_present) = collect_linux_gpu_paths();
+        let mut nvidia_device_count = 0usize;
+        for (gpu_path, gpu_access, is_file) in &gpu_paths {
+            let result = access_to_landlock(*gpu_access, target_abi);
+            let mut access = result.effective;
+
+            // Device nodes under /dev on ABI v5+ need IoctlDev for ioctls
+            // like DRM_IOCTL_GEM_*, NVIDIA UVM ioctls, AMD KFD ioctls.
+            if ioctl_dev_available
+                && matches!(gpu_access, AccessMode::Write | AccessMode::ReadWrite)
+                && (is_device_path(gpu_path) || is_device_directory(gpu_path))
+            {
+                access |= AccessFs::IoctlDev;
+            }
+
+            debug!(
+                "Adding GPU Landlock rule: {} (access {:?}, file={})",
+                gpu_path.display(),
+                access,
+                is_file
+            );
+            let path_fd = PathFd::new(gpu_path)?;
+            ruleset = ruleset
+                .add_rule(PathBeneath::new(path_fd, access))
+                .map_err(|e| {
+                    NonoError::SandboxInit(format!(
+                        "Cannot add Landlock GPU rule for {}: {}",
+                        gpu_path.display(),
+                        e
+                    ))
+                })?;
+            if gpu_path.starts_with("/dev/nvidia") || gpu_path.starts_with("/proc/driver/nvidia") {
+                nvidia_device_count = nvidia_device_count.saturating_add(1);
+            }
+        }
+        info!(
+            "--allow-gpu Landlock allowlist: {} path(s) granted ({} NVIDIA-related, \
+             nvidia_present={})",
+            gpu_paths.len(),
+            nvidia_device_count,
+            nvidia_present
+        );
     }
 
     // Apply the ruleset - THIS IS IRREVERSIBLE
@@ -3158,6 +3369,102 @@ mod tests {
             assert!(
                 is_supported(),
                 "Landlock must be available when WSL2 or native Linux"
+            );
+        }
+    }
+
+    // --allow-gpu Linux Landlock path list (D-13 upstream parity port)
+    //
+    // Tests the pure predicate `is_nvidia_compute_device` and asserts
+    // that `collect_linux_gpu_paths` produces a list shape consistent
+    // with the upstream contract. File-level checks (path existence) are
+    // not asserted — those depend on the host having NVIDIA/AMD hardware.
+
+    #[test]
+    fn test_is_nvidia_compute_device_accepts_upstream_list() {
+        // Upstream upstream parity list: nvidiactl + nvidia-uvm +
+        // nvidia-uvm-tools + nvidia[0-9]+.
+        for name in [
+            "nvidiactl",
+            "nvidia-uvm",
+            "nvidia-uvm-tools",
+            "nvidia0",
+            "nvidia1",
+            "nvidia9",
+            "nvidia42",
+        ] {
+            assert!(
+                is_nvidia_compute_device(name),
+                "{name} should be accepted as NVIDIA compute device"
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_nvidia_compute_device_rejects_non_compute() {
+        // Explicitly-rejected: nvidia-modeset (display control, not compute).
+        // Also rejected: bare "nvidia" (no numeric suffix), arbitrary
+        // non-NVIDIA names, and cousin-kernel modules that happen to start
+        // with "nvidia" like "nvidia-fs" (not compute, and not on the
+        // upstream allowlist).
+        for name in [
+            "nvidia-modeset",
+            "nvidia",
+            "nvidia-fs",
+            "nvidia-peermem",
+            "nvidiaxyz",
+            "random",
+            "",
+            "nvidia_uvm", // underscore, not hyphen
+            "NVIDIA0",    // uppercase
+        ] {
+            assert!(
+                !is_nvidia_compute_device(name),
+                "{name} should NOT be accepted as NVIDIA compute device"
+            );
+        }
+    }
+
+    #[test]
+    fn test_collect_linux_gpu_paths_is_callable_without_panic() {
+        // Smoke: on any Linux host (CI with no NVIDIA, dev laptop,
+        // headless ARM VM) `collect_linux_gpu_paths` must return without
+        // panic and without unwrap violations. Absent devices are
+        // silently skipped.
+        let (paths, _nvidia_present) = collect_linux_gpu_paths();
+        // No assertion on the length — CI hosts vary. But every returned
+        // tuple must reference an existing filesystem path (we only add
+        // paths after probing).
+        for (path, _access, _is_file) in &paths {
+            assert!(
+                path.exists(),
+                "collect_linux_gpu_paths returned non-existent {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_collect_linux_gpu_paths_nvidia_procfs_gated_on_nvidia_presence() {
+        // Contract: procfs NVIDIA grants (/proc/driver/nvidia*, /proc/self,
+        // /proc/self/task) appear ONLY when NVIDIA compute devices are
+        // actually present. Pure DRM / AMD / WSL /dev/dxg setups should
+        // NOT get the procfs grants (least-privilege per upstream 4df0a8e).
+        let (paths, nvidia_present) = collect_linux_gpu_paths();
+        let has_procfs_nvidia = paths
+            .iter()
+            .any(|(p, _, _)| p.starts_with("/proc/driver/nvidia"));
+        let has_procfs_self = paths
+            .iter()
+            .any(|(p, _, _)| p.to_string_lossy().starts_with("/proc/self"));
+
+        if !nvidia_present {
+            assert!(
+                !has_procfs_nvidia,
+                "procfs NVIDIA grant must NOT appear without NVIDIA device"
+            );
+            assert!(
+                !has_procfs_self,
+                "procfs self grant must NOT appear without NVIDIA device"
             );
         }
     }

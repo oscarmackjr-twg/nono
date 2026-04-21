@@ -118,6 +118,8 @@ pub(crate) fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
         cmd_args: vec![],
         caps: prepared.caps,
         loaded_secrets: prepared.secrets,
+        // Plan 18.1-03 G-06: `nono shell` accepts a profile; carry it forward.
+        loaded_profile: prepared.loaded_profile,
         flags: ExecutionFlags {
             workdir: resolve_requested_workdir(args.sandbox.workdir.as_ref()),
             no_diagnostics: true,
@@ -194,6 +196,10 @@ pub(crate) fn run_wrap(wrap_args: WrapArgs, silent: bool) -> Result<()> {
         cmd_args,
         caps: prepared.caps,
         loaded_secrets: prepared.secrets,
+        // Plan 18.1-03 G-06: `nono wrap` is Direct-strategy only (no
+        // supervisor, no capability pipe). The field is carried for
+        // struct-literal completeness; the Direct path never consults it.
+        loaded_profile: prepared.loaded_profile,
         flags: ExecutionFlags {
             strategy: exec_strategy::ExecStrategy::Direct,
             workdir: resolve_requested_workdir(args.workdir.as_ref()),

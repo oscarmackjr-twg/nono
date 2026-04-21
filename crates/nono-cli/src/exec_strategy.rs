@@ -41,6 +41,78 @@ use tracing::{debug, info, warn};
 pub(crate) use env_sanitization::is_dangerous_env_var;
 use env_sanitization::should_skip_env_var;
 
+/// Collect "not enforced on this platform" warnings for each set resource-limit
+/// field. Pure (returns `Vec<String>`) so unit tests don't need to capture stderr.
+///
+/// On Windows this returns an empty `Vec` — the limits are kernel-enforced by
+/// `apply_resource_limits` in `exec_strategy_windows::launch`. On Linux/macOS,
+/// one warning line is produced per `Some(_)` field.
+///
+/// Callers that want to print the warnings should call [`warn_unix_resource_limits`]
+/// which delegates to this helper and `eprintln!`s each line. Honors `silent`:
+/// when `silent` is true, returns an empty `Vec` regardless of platform.
+pub(crate) fn collect_unix_resource_limit_warnings(
+    limits: &crate::launch_runtime::ResourceLimits,
+    silent: bool,
+) -> Vec<String> {
+    if silent {
+        return Vec::new();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let os_name = if cfg!(target_os = "linux") {
+            "linux"
+        } else {
+            "macos"
+        };
+        let mut out = Vec::new();
+        if limits.cpu_percent.is_some() {
+            out.push(format!(
+                "warning: --cpu-percent is not enforced on {os_name}; \
+                 the native backend is a follow-up cross-platform milestone \
+                 (see REQUIREMENTS.md § Cross-platform note). The flag is \
+                 accepted for CLI parity with Windows."
+            ));
+        }
+        if limits.memory_bytes.is_some() {
+            out.push(format!(
+                "warning: --memory is not enforced on {os_name}; \
+                 the native backend is a follow-up cross-platform milestone."
+            ));
+        }
+        if limits.timeout.is_some() {
+            out.push(format!(
+                "warning: --timeout is not enforced on {os_name}; \
+                 the native backend is a follow-up cross-platform milestone."
+            ));
+        }
+        if limits.max_processes.is_some() {
+            out.push(format!(
+                "warning: --max-processes is not enforced on {os_name}; \
+                 the native backend is a follow-up cross-platform milestone."
+            ));
+        }
+        out
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = limits;
+        Vec::new()
+    }
+}
+
+/// Emit one warning line per active resource-limit flag on Unix builds.
+/// On Windows this is a no-op (limits are kernel-enforced in `apply_resource_limits`).
+/// Honors `--silent` by delegating to [`collect_unix_resource_limit_warnings`].
+pub(crate) fn warn_unix_resource_limits(
+    limits: &crate::launch_runtime::ResourceLimits,
+    silent: bool,
+) {
+    for line in collect_unix_resource_limit_warnings(limits, silent) {
+        eprintln!("{line}");
+    }
+}
+
 /// Resolve a program name to its absolute path.
 ///
 /// This should be called BEFORE the sandbox is applied to ensure the program
@@ -2996,6 +3068,70 @@ fn open_canonical_path_no_symlinks(
 
     let file_fd = unsafe { OwnedFd::from_raw_fd(file_fd) };
     Ok(std::fs::File::from(file_fd))
+}
+
+#[cfg(test)]
+mod unix_warning_tests {
+    use super::*;
+    use crate::launch_runtime::ResourceLimits;
+    use std::time::Duration;
+
+    fn limits_all_set() -> ResourceLimits {
+        ResourceLimits {
+            cpu_percent: Some(25),
+            memory_bytes: Some(512 * 1024 * 1024),
+            timeout: Some(Duration::from_secs(300)),
+            max_processes: Some(10),
+        }
+    }
+
+    #[test]
+    fn silent_always_returns_empty() {
+        let out = collect_unix_resource_limit_warnings(&limits_all_set(), true);
+        assert!(out.is_empty());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_returns_empty_even_when_not_silent() {
+        let out = collect_unix_resource_limit_warnings(&limits_all_set(), false);
+        assert!(out.is_empty());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn unix_emits_one_line_per_set_field() {
+        let out = collect_unix_resource_limit_warnings(&limits_all_set(), false);
+        assert_eq!(out.len(), 4);
+        assert!(out.iter().any(|s| s.contains("--cpu-percent")));
+        assert!(out.iter().any(|s| s.contains("--memory")));
+        assert!(out.iter().any(|s| s.contains("--timeout")));
+        assert!(out.iter().any(|s| s.contains("--max-processes")));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn unix_emits_only_for_set_fields() {
+        let limits = ResourceLimits {
+            cpu_percent: Some(50),
+            memory_bytes: None,
+            timeout: Some(Duration::from_secs(60)),
+            max_processes: None,
+        };
+        let out = collect_unix_resource_limit_warnings(&limits, false);
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().any(|s| s.contains("--cpu-percent")));
+        assert!(out.iter().any(|s| s.contains("--timeout")));
+        assert!(out.iter().all(|s| !s.contains("--memory")));
+        assert!(out.iter().all(|s| !s.contains("--max-processes")));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn unix_empty_limits_emits_nothing() {
+        let out = collect_unix_resource_limit_warnings(&ResourceLimits::default(), false);
+        assert!(out.is_empty());
+    }
 }
 
 #[cfg(test)]

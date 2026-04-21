@@ -1,5 +1,16 @@
 use super::*;
 
+// Phase 17: Anonymous-pipe stdio for the Windows detached path.
+// These imports are NOT in the parent module (mod.rs) by default — they live
+// only in launch.rs because they are exclusively used by the new
+// DetachedStdioPipes struct + spawn_windows_child wiring.
+use windows_sys::Win32::Foundation::{
+    SetHandleInformation, BOOL, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+};
+use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+use windows_sys::Win32::System::Pipes::CreatePipe;
+use windows_sys::Win32::System::Threading::STARTF_USESTDHANDLES;
+
 impl OwnedHandle {
     fn raw(&self) -> HANDLE {
         self.0
@@ -28,6 +39,162 @@ impl Drop for ProcessContainment {
             }
         }
     }
+}
+
+/// Phase 17: Anonymous-pipe stdio for the Windows detached path (ATCH-01).
+///
+/// Holds three pairs of anonymous pipe handles (stdin, stdout, stderr).
+/// At spawn time:
+///   - The CHILD-end handles (`stdin_read`, `stdout_write`, `stderr_write`) are
+///     bound to `STARTUPINFOW.hStd*` and inherited by the child via
+///     `CreateProcessW(.., bInheritHandles=TRUE, ..)`.
+///   - The PARENT-end handles (`stdout_read`, `stderr_read`, `stdin_write`) are
+///     flipped non-inheritable via `SetHandleInformation(HANDLE_FLAG_INHERIT, 0)`
+///     so the child does NOT receive duplicates of them.
+///   - After `CreateProcessW` returns successfully, the supervisor calls
+///     `close_child_ends()` to release its copy of the child-end handles. The
+///     child still holds its own duplicates (inherited at spawn).
+///
+/// Lifetime: parent-end handles must outlive the bridge threads in
+/// `start_logging` / `start_data_pipe_server`. Owned by `WindowsSupervisorRuntime`
+/// for the duration of the child process. `Drop` closes every handle exactly once,
+/// guarded by `INVALID_HANDLE_VALUE` / null checks so post-`close_child_ends`
+/// fields are not double-closed.
+///
+/// See `.planning/phases/17-attach-streaming/17-RESEARCH.md` Code Example 1
+/// and 17-PATTERNS.md § DetachedStdioPipes for the full mechanical contract.
+#[derive(Debug)]
+pub(super) struct DetachedStdioPipes {
+    /// Parent end — supervisor reads child stdout from this.
+    pub stdout_read: HANDLE,
+    /// Parent end — supervisor reads child stderr from this.
+    pub stderr_read: HANDLE,
+    /// Parent end — supervisor writes child stdin to this.
+    pub stdin_write: HANDLE,
+    /// Child end — set in STARTUPINFOW.hStdInput; closed by supervisor after CreateProcess.
+    pub stdin_read: HANDLE,
+    /// Child end — set in STARTUPINFOW.hStdOutput; closed by supervisor after CreateProcess.
+    pub stdout_write: HANDLE,
+    /// Child end — set in STARTUPINFOW.hStdError; closed by supervisor after CreateProcess.
+    pub stderr_write: HANDLE,
+}
+
+impl DetachedStdioPipes {
+    pub fn create() -> Result<Self> {
+        let sa = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: std::ptr::null_mut(),
+            // Both ends inheritable initially; flip parent ends OFF below via
+            // SetHandleInformation. This is the canonical Win32 idiom for
+            // "child sees one end, parent sees the other" (RESEARCH.md A1).
+            bInheritHandle: 1,
+        };
+
+        let (stdin_read, stdin_write) = create_one_pipe(&sa, "stdin")?;
+        let (stdout_read, stdout_write) = create_one_pipe(&sa, "stdout").inspect_err(|_| {
+            // SAFETY: stdin_read / stdin_write were returned by CreatePipe in the
+            // same scope and not yet returned to caller; close on the error path
+            // before propagating to avoid leaking on the failure cascade.
+            unsafe {
+                CloseHandle(stdin_read);
+                CloseHandle(stdin_write);
+            }
+        })?;
+        let (stderr_read, stderr_write) = create_one_pipe(&sa, "stderr").inspect_err(|_| {
+            // SAFETY: same scope, same lifetime guarantees as the stdout-error
+            // arm above; close all four prior handles before propagating.
+            unsafe {
+                CloseHandle(stdin_read);
+                CloseHandle(stdin_write);
+                CloseHandle(stdout_read);
+                CloseHandle(stdout_write);
+            }
+        })?;
+
+        // SAFETY: parent-end handles are owned by this thread and not yet
+        // inherited by any child. Flipping HANDLE_FLAG_INHERIT off here ensures
+        // the supervisor-side ends are NOT duplicated into the child during
+        // CreateProcessW(.., bInheritHandles=TRUE, ..). Threat T-17-01.
+        unsafe {
+            SetHandleInformation(stdin_write, HANDLE_FLAG_INHERIT, 0);
+            SetHandleInformation(stdout_read, HANDLE_FLAG_INHERIT, 0);
+            SetHandleInformation(stderr_read, HANDLE_FLAG_INHERIT, 0);
+        }
+
+        Ok(Self {
+            stdout_read,
+            stderr_read,
+            stdin_write,
+            stdin_read,
+            stdout_write,
+            stderr_write,
+        })
+    }
+
+    /// Close the child-end handles after `CreateProcess` inherits them.
+    ///
+    /// Must be called AFTER `CreateProcessW` returns successfully (so the child
+    /// already holds its own duplicates) and BEFORE `ResumeThread` (so the child
+    /// observes EOF on stdin only when the supervisor's parent-end write handle
+    /// is closed later). After this call, the three child-end fields equal
+    /// `INVALID_HANDLE_VALUE`; the call is idempotent.
+    ///
+    /// # Safety
+    /// Caller must guarantee `CreateProcessW` has returned successfully and the
+    /// child already holds its own duplicate of the inheritable handles.
+    pub unsafe fn close_child_ends(&mut self) {
+        if self.stdin_read != INVALID_HANDLE_VALUE {
+            CloseHandle(self.stdin_read);
+            self.stdin_read = INVALID_HANDLE_VALUE;
+        }
+        if self.stdout_write != INVALID_HANDLE_VALUE {
+            CloseHandle(self.stdout_write);
+            self.stdout_write = INVALID_HANDLE_VALUE;
+        }
+        if self.stderr_write != INVALID_HANDLE_VALUE {
+            CloseHandle(self.stderr_write);
+            self.stderr_write = INVALID_HANDLE_VALUE;
+        }
+    }
+}
+
+impl Drop for DetachedStdioPipes {
+    fn drop(&mut self) {
+        // SAFETY: every handle was returned by CreatePipe in `create()` and is
+        // owned by Self. `close_child_ends` may have already zeroed three of
+        // them — guarded by the INVALID / null check below. Each close happens
+        // at most once across the struct's lifetime.
+        unsafe {
+            for h in [
+                self.stdin_read,
+                self.stdout_write,
+                self.stderr_write,
+                self.stdin_write,
+                self.stdout_read,
+                self.stderr_read,
+            ] {
+                if h != INVALID_HANDLE_VALUE && !h.is_null() {
+                    CloseHandle(h);
+                }
+            }
+        }
+    }
+}
+
+fn create_one_pipe(sa: &SECURITY_ATTRIBUTES, label: &str) -> Result<(HANDLE, HANDLE)> {
+    let mut read: HANDLE = INVALID_HANDLE_VALUE;
+    let mut write: HANDLE = INVALID_HANDLE_VALUE;
+    // SAFETY: CreatePipe writes into the two HANDLE locals (out-params) and
+    // returns nonzero on success. `sa` is a valid SECURITY_ATTRIBUTES with
+    // non-null nLength constructed by the caller.
+    let ok = unsafe { CreatePipe(&mut read, &mut write, sa as *const _, 0) };
+    if ok == 0 {
+        return Err(NonoError::SandboxInit(format!(
+            "CreatePipe({label}) failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok((read, write))
 }
 
 pub(super) fn create_process_containment(session_id: Option<&str>) -> Result<ProcessContainment> {
@@ -115,6 +282,40 @@ pub(super) fn terminate_suspended_process(process: HANDLE, reason: &str) {
     tracing::debug!("terminated suspended Windows child after containment failure: {reason}");
 }
 
+/// Exit code embedded in the Job Object when the supervisor terminates the
+/// tree for a `--timeout` wall-clock expiry. Equals `STATUS_TIMEOUT` /
+/// `WAIT_TIMEOUT` (`0x00000102` = 258 decimal). Users see this as the
+/// supervisor's exit code when the `--timeout` deadline fires.
+pub(super) const STATUS_TIMEOUT_EXIT_CODE: u32 = 0x0000_0102;
+
+/// Terminate every process in the given Job Object with the supplied exit code.
+/// Used by the supervisor to honor `--timeout` (RESL-03) and potentially by any
+/// future supervisor-initiated kill paths.
+///
+/// Returns `Err(NonoError::CommandExecution(...))` when the FFI call fails.
+/// The Job Object's `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` flag (set by
+/// `create_process_containment`) remains the safety-net if this FFI call
+/// misfires — when `ProcessContainment` drops, the kernel still tears the
+/// tree down. See `.planning/phases/16-resource-limits/16-CONTEXT.md`
+/// § Failure Modes.
+pub(super) fn terminate_job_object(job: HANDLE, exit_code: u32) -> Result<()> {
+    let ok = unsafe {
+        // SAFETY: `job` is a live Job Object handle borrowed from
+        // `ProcessContainment`. `TerminateJobObject` requires
+        // JOB_OBJECT_TERMINATE access, which the handle returned by
+        // `CreateJobObjectW` has by default.
+        TerminateJobObject(job, exit_code)
+    };
+    if ok == 0 {
+        return Err(NonoError::CommandExecution(std::io::Error::other(format!(
+            "TerminateJobObject failed (exit_code={}, GetLastError={})",
+            exit_code,
+            unsafe { GetLastError() }
+        ))));
+    }
+    Ok(())
+}
+
 pub(super) fn resume_contained_process(process: HANDLE, thread: HANDLE) -> Result<()> {
     let resume_result = unsafe {
         // SAFETY: `thread` is the live primary thread handle returned by
@@ -128,6 +329,127 @@ pub(super) fn resume_contained_process(process: HANDLE, thread: HANDLE) -> Resul
             "Failed to resume Windows child process after attaching containment".to_string(),
         ));
     }
+    Ok(())
+}
+
+/// Apply Phase-16 resource limits (CPU / memory / process-count) to the given
+/// Job Object via `SetInformationJobObject`. Must be called AFTER
+/// `apply_process_handle_to_containment` and BEFORE `resume_contained_process`
+/// so the child never executes without the caps in effect.
+///
+/// * **CPU (RESL-01):** `JobObjectCpuRateControlInformation` with
+///   `ControlFlags = JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | HARD_CAP` and
+///   `CpuRate = percent * 100`.
+/// * **Memory (RESL-02) + max-processes (RESL-04):** Read-modify-write on
+///   `JobObjectExtendedLimitInformation` so the OR-in of new flag bits
+///   preserves `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE |
+///   JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION` that
+///   `create_process_containment` set.
+///
+/// RESL-03 (wall-clock timeout) is NOT applied here — it is enforced by a
+/// supervisor-side timer in Plan 16-02 Task 1 via `TerminateJobObject`.
+///
+/// Fail-closed: any `SetInformationJobObject` or `QueryInformationJobObject`
+/// failure returns `Err(NonoError::SandboxInit(...))` naming the failing limit
+/// and the Win32 last-error; the caller is expected to run
+/// `terminate_suspended_process` on the child.
+pub(super) fn apply_resource_limits(
+    containment: &ProcessContainment,
+    limits: &crate::launch_runtime::ResourceLimits,
+) -> Result<()> {
+    if limits.is_empty() {
+        return Ok(());
+    }
+
+    // CPU — separate info class from the extended-limit struct.
+    if let Some(percent) = limits.cpu_percent {
+        let mut info: JOBOBJECT_CPU_RATE_CONTROL_INFORMATION = unsafe {
+            // SAFETY: FFI POD struct, zero-init is valid.
+            std::mem::zeroed()
+        };
+        info.ControlFlags =
+            JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP;
+        // CpuRate field lives inside an anonymous union representing CpuRate xor MinRate/MaxRate.
+        // 100% == 10000; percent * 100 is safe for u16 → u32 since 1..=100 * 100 <= 10000.
+        info.Anonymous.CpuRate = u32::from(percent) * 100;
+        let ok = unsafe {
+            // SAFETY: `containment.job` is a live Job Object handle; `info` is a
+            // fully-initialized FFI struct owned by this frame; size matches the info class.
+            SetInformationJobObject(
+                containment.job,
+                JobObjectCpuRateControlInformation,
+                std::ptr::addr_of!(info) as *const _,
+                size_of::<JOBOBJECT_CPU_RATE_CONTROL_INFORMATION>() as u32,
+            )
+        };
+        if ok == 0 {
+            return Err(NonoError::SandboxInit(format!(
+                "Failed to apply --cpu-percent={percent} to Windows Job Object (GetLastError={})",
+                unsafe { GetLastError() }
+            )));
+        }
+    }
+
+    // Memory + max-processes share JobObjectExtendedLimitInformation.
+    if limits.memory_bytes.is_some() || limits.max_processes.is_some() {
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe {
+            // SAFETY: FFI POD struct, zero-init is valid prior to the readback.
+            std::mem::zeroed()
+        };
+        let mut returned: u32 = 0;
+        let ok = unsafe {
+            // SAFETY: `containment.job` is live; `info` is writable for
+            // size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() bytes; size matches info class.
+            QueryInformationJobObject(
+                containment.job,
+                JobObjectExtendedLimitInformation,
+                std::ptr::addr_of_mut!(info) as *mut _,
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                &mut returned,
+            )
+        };
+        if ok == 0 {
+            return Err(NonoError::SandboxInit(format!(
+                "Failed to read current Windows Job Object extended limit info (GetLastError={})",
+                unsafe { GetLastError() }
+            )));
+        }
+
+        if let Some(mem) = limits.memory_bytes {
+            info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_JOB_MEMORY;
+            info.JobMemoryLimit = mem as usize;
+        }
+        if let Some(procs) = limits.max_processes {
+            info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+            info.BasicLimitInformation.ActiveProcessLimit = procs;
+        }
+
+        let ok = unsafe {
+            // SAFETY: `info` was populated by Query above and mutated in place; size matches.
+            SetInformationJobObject(
+                containment.job,
+                JobObjectExtendedLimitInformation,
+                std::ptr::addr_of!(info) as *const _,
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if ok == 0 {
+            let which = match (
+                limits.memory_bytes.is_some(),
+                limits.max_processes.is_some(),
+            ) {
+                (true, true) => "--memory + --max-processes",
+                (true, false) => "--memory",
+                (false, true) => "--max-processes",
+                (false, false) => "(none)",
+            };
+            return Err(NonoError::SandboxInit(format!(
+                "Failed to apply {which} to Windows Job Object (GetLastError={})",
+                unsafe { GetLastError() }
+            )));
+        }
+    }
+
     Ok(())
 }
 
@@ -789,40 +1111,15 @@ pub(super) fn create_low_integrity_primary_token() -> Result<OwnedHandle> {
     Ok(primary_token)
 }
 
-pub(super) fn execute_direct_with_low_integrity(
-    config: &ExecConfig<'_>,
-    launch_program: &Path,
-    containment: &ProcessContainment,
-    cmd_args: &[String],
-    session_id: Option<&str>,
-) -> Result<i32> {
-    let mut child = spawn_windows_child(
-        config,
-        launch_program,
-        containment,
-        cmd_args,
-        None,
-        session_id,
-    )?;
-    let Some(exit_code) = child.poll_exit_code()? else {
-        loop {
-            if let Some(exit_code) = child.poll_exit_code()? {
-                return Ok(exit_code);
-            }
-            std::thread::sleep(WINDOWS_SUPERVISOR_POLL_INTERVAL);
-        }
-    };
-    Ok(exit_code)
-}
-
 pub(super) fn spawn_windows_child(
     config: &ExecConfig<'_>,
     launch_program: &Path,
     containment: &ProcessContainment,
     cmd_args: &[String],
     pty: Option<&pty_proxy::PtyPair>,
+    limits: &crate::launch_runtime::ResourceLimits,
     _session_id: Option<&str>,
-) -> Result<WindowsSupervisedChild> {
+) -> Result<(WindowsSupervisedChild, Option<DetachedStdioPipes>)> {
     let env_pairs = build_child_env(config);
     let mut environment_block = build_windows_environment_block(&env_pairs);
 
@@ -833,7 +1130,18 @@ pub(super) fn spawn_windows_child(
     // yielding ERROR_INVALID_HANDLE (6).
     let _restricted_holder: Option<restricted_token::RestrictedToken>;
     let _low_integrity_holder: Option<OwnedHandle>;
-    let h_token: HANDLE = if let Some(ref sid) = config.session_sid {
+    // On the Windows detached launch path, the WRITE_RESTRICTED + session-SID
+    // token combines with DETACHED_PROCESS + no-PTY to trigger STATUS_DLL_INIT_FAILED
+    // (0xC0000142) in console-application grandchildren. The only configuration that
+    // initializes the loader cleanly is a null token. Kernel-level network enforcement
+    // falls back to AppID-based WFP filtering; per-session SID WFP is not available
+    // on this path. See .planning/debug/resolved/windows-supervised-exec-cascade.md.
+    let is_windows_detached_launch = is_windows_detached_launch();
+    let h_token: HANDLE = if is_windows_detached_launch {
+        _restricted_holder = None;
+        _low_integrity_holder = None;
+        std::ptr::null_mut()
+    } else if let Some(ref sid) = config.session_sid {
         let holder = restricted_token::create_restricted_token_with_sid(sid)?;
         let raw = holder.h_token;
         _restricted_holder = Some(holder);
@@ -860,6 +1168,12 @@ pub(super) fn spawn_windows_child(
     let current_dir_u16 = to_u16_null_terminated(&current_dir.to_string_lossy());
 
     let mut process_info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+
+    // Phase 17: parent-end stdio handles for the Windows detached path.
+    // Allocated lazily inside the non-PTY arm of `let created = ...` below;
+    // declared here so it remains in scope for the post-CreateProcess
+    // close_child_ends() call and the eventual return.
+    let mut detached_stdio: Option<DetachedStdioPipes> = None;
 
     let created = if let Some(pty_pair) = pty {
         let mut attr_size: usize = 0;
@@ -961,11 +1275,42 @@ pub(super) fn spawn_windows_child(
         }
         created
     } else {
+        // Phase 17 (ATCH-01): on the Windows detached path (no PTY,
+        // NONO_DETACHED_LAUNCH=1), allocate three anonymous pipe pairs and
+        // bind the child-end handles to STARTUPINFOW.hStd*. The PTY branch
+        // above is unchanged — pipe + ConPTY are mutually exclusive at the
+        // gate (RESEARCH.md A6 + supervised_runtime.rs:88-94 should_allocate_pty).
+        detached_stdio = if pty.is_none() && is_windows_detached_launch {
+            Some(DetachedStdioPipes::create()?)
+        } else {
+            None
+        };
+
         let mut startup_info: STARTUPINFOW = unsafe {
             // SAFETY: STARTUPINFOW is a plain Win32 FFI struct; zero-init is valid.
             std::mem::zeroed()
         };
         startup_info.cb = size_of::<STARTUPINFOW>() as u32;
+
+        if let Some(ref pipes) = detached_stdio {
+            // D-04 + CONTEXT.md <specifics> line 127: merge stderr into stdout
+            // for visual consistency with the PTY path. The kernel routes child
+            // fd 1 and fd 2 writes through the same pipe write end; supported
+            // by Win32 (RESEARCH.md A5). The unused stderr_write child end
+            // is still closed by close_child_ends() / Drop.
+            startup_info.dwFlags = STARTF_USESTDHANDLES;
+            startup_info.hStdInput = pipes.stdin_read;
+            startup_info.hStdOutput = pipes.stdout_write;
+            startup_info.hStdError = pipes.stdout_write;
+        }
+
+        // CRITICAL: bInheritHandles MUST be 1 when STARTF_USESTDHANDLES is set
+        // with inheritable handles (RESEARCH.md Pitfall 3 / A1). The PTY
+        // branch passes 0 (uses PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE instead)
+        // and stays at 0. Detached-stdio branch passes 1 — but only the three
+        // child-end pipe handles are inheritable; parent ends were flipped
+        // non-inheritable in DetachedStdioPipes::create() (threat T-17-08).
+        let inherit_handles: BOOL = if detached_stdio.is_some() { 1 } else { 0 };
 
         if !h_token.is_null() {
             unsafe {
@@ -976,7 +1321,7 @@ pub(super) fn spawn_windows_child(
                     command_line.as_mut_ptr(),
                     std::ptr::null(),
                     std::ptr::null(),
-                    0,
+                    inherit_handles,
                     CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
                     environment_block.as_mut_ptr() as *mut _,
                     current_dir_u16.as_ptr(),
@@ -992,7 +1337,7 @@ pub(super) fn spawn_windows_child(
                     command_line.as_mut_ptr(),
                     std::ptr::null(),
                     std::ptr::null(),
-                    0,
+                    inherit_handles,
                     CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
                     environment_block.as_mut_ptr() as *mut _,
                     current_dir_u16.as_ptr(),
@@ -1013,56 +1358,339 @@ pub(super) fn spawn_windows_child(
     let process = OwnedHandle(process_info.hProcess);
     let thread = OwnedHandle(process_info.hThread);
 
+    // Phase 17: close the supervisor's copy of the child-end pipe handles AFTER
+    // CreateProcess succeeded (so the child holds its own duplicates) and BEFORE
+    // ResumeThread (so the child observes EOF on stdin only when supervisor's
+    // parent-end write handle closes later). RESEARCH.md Code Example 2,
+    // Pitfall 3 ordering. No-op when detached_stdio is None.
+    if let Some(ref mut pipes) = detached_stdio {
+        // SAFETY: CreateProcess succeeded above; the child has its own duplicates
+        // of the inheritable handles. close_child_ends is idempotent.
+        unsafe {
+            pipes.close_child_ends();
+        }
+    }
+
     if let Err(err) = apply_process_handle_to_containment(containment, process.raw()) {
         terminate_suspended_process(process.raw(), "AssignProcessToJobObject failed");
         return Err(err);
     }
+    // Phase 16 RESL-01/02/04: apply the four resource-limit info classes BEFORE
+    // ResumeThread so the child never runs with an uncapped Job Object. Any
+    // failure here is fail-closed — terminate the suspended child and propagate.
+    if let Err(err) = apply_resource_limits(containment, limits) {
+        terminate_suspended_process(process.raw(), "apply_resource_limits failed");
+        return Err(err);
+    }
     resume_contained_process(process.raw(), thread.raw())?;
 
-    Ok(WindowsSupervisedChild::Native {
-        process,
-        _thread: thread,
-    })
+    Ok((
+        WindowsSupervisedChild::Native {
+            process,
+            _thread: thread,
+        },
+        detached_stdio,
+    ))
 }
 
-pub(super) fn spawn_supervised_with_low_integrity(
-    config: &ExecConfig<'_>,
-    launch_program: &Path,
-    containment: &ProcessContainment,
-    session_id: Option<&str>,
-) -> Result<WindowsSupervisedChild> {
-    let cmd_args = prepare_runtime_hardened_args(
-        launch_program,
-        &config.command[1..],
-        config.interactive_shell,
-    );
-    spawn_windows_child(
-        config,
-        launch_program,
-        containment,
-        &cmd_args,
-        None,
-        session_id,
-    )
+/// Returns true when the current process is the inner detached supervisor launched by
+/// `startup_runtime::run_detached_launch`. The outer `nono run --detached` invocation
+/// re-execs itself with `NONO_DETACHED_LAUNCH=1` + `DETACHED_PROCESS`; the inner
+/// supervisor then spawns the sandboxed grandchild via `spawn_windows_child`. Only the
+/// inner path requires the null-token shape — outer invocations and non-detached runs
+/// keep their WRITE_RESTRICTED + session-SID token.
+pub(crate) fn is_windows_detached_launch() -> bool {
+    std::env::var("NONO_DETACHED_LAUNCH")
+        .map(|v| v == "1")
+        .unwrap_or(false)
 }
 
-pub(super) fn spawn_supervised_with_standard_token(
-    config: &ExecConfig<'_>,
-    launch_program: &Path,
-    containment: &ProcessContainment,
-    session_id: Option<&str>,
-) -> Result<WindowsSupervisedChild> {
-    let cmd_args = prepare_runtime_hardened_args(
-        launch_program,
-        &config.command[1..],
-        config.interactive_shell,
-    );
-    spawn_windows_child(
-        config,
-        launch_program,
-        containment,
-        &cmd_args,
-        None,
-        session_id,
-    )
+#[cfg(test)]
+mod detached_token_gate_tests {
+    use super::is_windows_detached_launch;
+    use crate::test_env::{lock_env, EnvVarGuard};
+
+    #[test]
+    fn returns_false_when_env_unset() {
+        let _lock = lock_env();
+        // Ensure the env var is cleared for the duration of the assertion.
+        let g = EnvVarGuard::set_all(&[("NONO_DETACHED_LAUNCH", "1")]);
+        g.remove("NONO_DETACHED_LAUNCH");
+        assert!(!is_windows_detached_launch());
+    }
+
+    #[test]
+    fn returns_true_when_env_is_one() {
+        let _lock = lock_env();
+        let _g = EnvVarGuard::set_all(&[("NONO_DETACHED_LAUNCH", "1")]);
+        assert!(is_windows_detached_launch());
+    }
+
+    #[test]
+    fn returns_false_when_env_is_other_value() {
+        let _lock = lock_env();
+        let _g = EnvVarGuard::set_all(&[("NONO_DETACHED_LAUNCH", "0")]);
+        assert!(!is_windows_detached_launch());
+        let _g2 = EnvVarGuard::set_all(&[("NONO_DETACHED_LAUNCH", "true")]);
+        assert!(!is_windows_detached_launch());
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod apply_resource_limits_tests {
+    use super::*;
+    use crate::launch_runtime::ResourceLimits;
+
+    fn read_extended(job: HANDLE) -> JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        let mut returned: u32 = 0;
+        let ok = unsafe {
+            QueryInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                std::ptr::addr_of_mut!(info) as *mut _,
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                &mut returned,
+            )
+        };
+        assert_ne!(
+            ok, 0,
+            "QueryInformationJobObject(ExtendedLimitInformation) must succeed"
+        );
+        info
+    }
+
+    fn read_cpu(job: HANDLE) -> JOBOBJECT_CPU_RATE_CONTROL_INFORMATION {
+        let mut info: JOBOBJECT_CPU_RATE_CONTROL_INFORMATION = unsafe { std::mem::zeroed() };
+        let mut returned: u32 = 0;
+        let ok = unsafe {
+            QueryInformationJobObject(
+                job,
+                JobObjectCpuRateControlInformation,
+                std::ptr::addr_of_mut!(info) as *mut _,
+                size_of::<JOBOBJECT_CPU_RATE_CONTROL_INFORMATION>() as u32,
+                &mut returned,
+            )
+        };
+        assert_ne!(
+            ok, 0,
+            "QueryInformationJobObject(CpuRateControl) must succeed"
+        );
+        info
+    }
+
+    #[test]
+    fn cpu_rate_control_readback_matches_applied_value() {
+        let containment = create_process_containment(None).expect("create containment");
+        let limits = ResourceLimits {
+            cpu_percent: Some(25),
+            ..ResourceLimits::default()
+        };
+        apply_resource_limits(&containment, &limits).expect("apply cpu limit");
+
+        let info = read_cpu(containment.job);
+        assert_eq!(unsafe { info.Anonymous.CpuRate }, 25 * 100);
+        assert!(info.ControlFlags & JOB_OBJECT_CPU_RATE_CONTROL_ENABLE != 0);
+        assert!(info.ControlFlags & JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP != 0);
+    }
+
+    #[test]
+    fn memory_readback_matches_applied_value() {
+        let containment = create_process_containment(None).expect("create containment");
+        let limits = ResourceLimits {
+            memory_bytes: Some(512 * 1024 * 1024),
+            ..ResourceLimits::default()
+        };
+        apply_resource_limits(&containment, &limits).expect("apply memory limit");
+
+        let info = read_extended(containment.job);
+        assert_eq!(info.JobMemoryLimit, 512 * 1024 * 1024);
+        assert!(info.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_JOB_MEMORY != 0);
+    }
+
+    #[test]
+    fn max_processes_readback_matches_applied_value() {
+        let containment = create_process_containment(None).expect("create containment");
+        let limits = ResourceLimits {
+            max_processes: Some(10),
+            ..ResourceLimits::default()
+        };
+        apply_resource_limits(&containment, &limits).expect("apply max-processes limit");
+
+        let info = read_extended(containment.job);
+        assert_eq!(info.BasicLimitInformation.ActiveProcessLimit, 10);
+        assert!(info.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_ACTIVE_PROCESS != 0);
+    }
+
+    #[test]
+    fn all_three_limits_coexist() {
+        let containment = create_process_containment(None).expect("create containment");
+        let limits = ResourceLimits {
+            cpu_percent: Some(50),
+            memory_bytes: Some(256 * 1024 * 1024),
+            max_processes: Some(20),
+            timeout: None,
+        };
+        apply_resource_limits(&containment, &limits).expect("apply all three limits");
+
+        let ext = read_extended(containment.job);
+        assert_eq!(ext.JobMemoryLimit, 256 * 1024 * 1024);
+        assert_eq!(ext.BasicLimitInformation.ActiveProcessLimit, 20);
+        assert!(ext.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_JOB_MEMORY != 0);
+        assert!(ext.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_ACTIVE_PROCESS != 0);
+
+        let cpu = read_cpu(containment.job);
+        assert_eq!(unsafe { cpu.Anonymous.CpuRate }, 50 * 100);
+        assert!(cpu.ControlFlags & JOB_OBJECT_CPU_RATE_CONTROL_ENABLE != 0);
+        assert!(cpu.ControlFlags & JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP != 0);
+    }
+
+    #[test]
+    fn empty_limits_is_noop() {
+        let containment = create_process_containment(None).expect("create containment");
+        apply_resource_limits(&containment, &ResourceLimits::default())
+            .expect("empty limits is a no-op and must succeed");
+        // Readback should show the defaults from create_process_containment (no memory/process caps),
+        // i.e. JobMemoryLimit == 0 and ActiveProcessLimit == 0.
+        let info = read_extended(containment.job);
+        assert_eq!(info.JobMemoryLimit, 0);
+        assert_eq!(info.BasicLimitInformation.ActiveProcessLimit, 0);
+    }
+
+    /// Regression guard: `apply_resource_limits` must preserve the flags set by
+    /// `create_process_containment` (KILL_ON_JOB_CLOSE + DIE_ON_UNHANDLED_EXCEPTION).
+    /// The implementation read-modifies-writes the ExtendedLimitInformation struct;
+    /// a naive write-only would clear these.
+    #[test]
+    fn preserves_kill_on_job_close() {
+        let containment = create_process_containment(None).expect("create containment");
+        let limits = ResourceLimits {
+            memory_bytes: Some(64 * 1024 * 1024),
+            max_processes: Some(8),
+            ..ResourceLimits::default()
+        };
+        apply_resource_limits(&containment, &limits).expect("apply");
+
+        let info = read_extended(containment.job);
+        assert!(
+            info.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE != 0,
+            "KILL_ON_JOB_CLOSE must be preserved after apply_resource_limits"
+        );
+        assert!(
+            info.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION
+                != 0,
+            "DIE_ON_UNHANDLED_EXCEPTION must be preserved after apply_resource_limits"
+        );
+    }
+
+    #[test]
+    fn idempotent_same_limits_twice() {
+        let containment = create_process_containment(None).expect("create containment");
+        let limits = ResourceLimits {
+            cpu_percent: Some(30),
+            memory_bytes: Some(128 * 1024 * 1024),
+            ..ResourceLimits::default()
+        };
+        apply_resource_limits(&containment, &limits).expect("first apply");
+        apply_resource_limits(&containment, &limits).expect("second apply must also succeed");
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+#[allow(clippy::unwrap_used)]
+mod detached_stdio_tests {
+    use super::DetachedStdioPipes;
+    use windows_sys::Win32::Foundation::{
+        GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+    };
+
+    fn handle_inherit_flag(handle: HANDLE) -> u32 {
+        let mut flags: u32 = 0;
+        let ok = unsafe { GetHandleInformation(handle, &mut flags) };
+        assert_ne!(ok, 0, "GetHandleInformation failed for handle {:?}", handle);
+        flags & HANDLE_FLAG_INHERIT
+    }
+
+    #[test]
+    fn detached_stdio_pipes_create_succeeds() {
+        let pipes = DetachedStdioPipes::create().expect("create DetachedStdioPipes");
+        for (label, h) in [
+            ("stdin_read", pipes.stdin_read),
+            ("stdin_write", pipes.stdin_write),
+            ("stdout_read", pipes.stdout_read),
+            ("stdout_write", pipes.stdout_write),
+            ("stderr_read", pipes.stderr_read),
+            ("stderr_write", pipes.stderr_write),
+        ] {
+            assert_ne!(h, INVALID_HANDLE_VALUE, "{label} should not be INVALID");
+            assert!(!h.is_null(), "{label} should not be null");
+        }
+    }
+
+    #[test]
+    fn parent_ends_are_non_inheritable() {
+        let pipes = DetachedStdioPipes::create().expect("create DetachedStdioPipes");
+        assert_eq!(
+            handle_inherit_flag(pipes.stdin_write),
+            0,
+            "parent stdin_write must NOT be inheritable"
+        );
+        assert_eq!(
+            handle_inherit_flag(pipes.stdout_read),
+            0,
+            "parent stdout_read must NOT be inheritable"
+        );
+        assert_eq!(
+            handle_inherit_flag(pipes.stderr_read),
+            0,
+            "parent stderr_read must NOT be inheritable"
+        );
+    }
+
+    #[test]
+    fn child_ends_are_inheritable() {
+        let pipes = DetachedStdioPipes::create().expect("create DetachedStdioPipes");
+        assert_ne!(
+            handle_inherit_flag(pipes.stdin_read),
+            0,
+            "child stdin_read MUST be inheritable"
+        );
+        assert_ne!(
+            handle_inherit_flag(pipes.stdout_write),
+            0,
+            "child stdout_write MUST be inheritable"
+        );
+        assert_ne!(
+            handle_inherit_flag(pipes.stderr_write),
+            0,
+            "child stderr_write MUST be inheritable"
+        );
+    }
+
+    #[test]
+    fn close_child_ends_zeroes_them() {
+        let mut pipes = DetachedStdioPipes::create().expect("create DetachedStdioPipes");
+        unsafe { pipes.close_child_ends() };
+        assert_eq!(pipes.stdin_read, INVALID_HANDLE_VALUE);
+        assert_eq!(pipes.stdout_write, INVALID_HANDLE_VALUE);
+        assert_eq!(pipes.stderr_write, INVALID_HANDLE_VALUE);
+        // Idempotent — second call must not panic / double-close.
+        unsafe { pipes.close_child_ends() };
+        assert_eq!(pipes.stdin_read, INVALID_HANDLE_VALUE);
+    }
+
+    #[test]
+    fn drop_closes_all_remaining_handles_without_panic() {
+        // Construct + immediate drop must not panic and must not propagate any
+        // CloseHandle errors. Drop always runs at scope exit.
+        {
+            let _pipes = DetachedStdioPipes::create().expect("create DetachedStdioPipes");
+        }
+        // Repeat to ensure no global state was corrupted.
+        {
+            let mut pipes2 =
+                DetachedStdioPipes::create().expect("create second DetachedStdioPipes");
+            unsafe { pipes2.close_child_ends() };
+        }
+    }
 }

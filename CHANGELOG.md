@@ -2,25 +2,45 @@
 
 ## [Unreleased]
 
+### Security
+
+- *(deps)* Upgrade `rustls-webpki` from `0.103.10` to `0.103.12` to clear **RUSTSEC-2026-0098** and **RUSTSEC-2026-0099** (cherry-pick of upstream `8876d89`, Phase 20 plan 20-01)
+
 ### Documentation
 
+- *(windows, attach)* REQUIREMENTS.md ATCH-01 acceptance #3 (resize via `ResizePseudoConsole`) downgraded to a documented limitation per Phase 17 design decision D-07 — resize requires ConPTY which is structurally exclusive of the anonymous-pipe stdio mandated by Phase 15's `0xC0000142` fix on the detached path. See `.planning/phases/17-attach-streaming/17-02-SUMMARY.md § "Acceptance #3 downgrade rationale"`. (Phase 17 plan 17-02, ATCH-01)
+- *(windows, attach)* `docs/cli/attach.md` gains a "Limitations on Windows detached sessions" section covering: no terminal resize on the detached path; cmd.exe UNC-path warnings when `--allow-cwd` is paired with extended-length paths; tools requiring console-attached stdin (`timeout.exe`, `choice.exe`) being incompatible with detached attach. Workarounds: use `nono shell` or non-detached `nono run` for full TUI fidelity. (Phase 17 plan 17-02, ATCH-01, D-06)
 - *(windows)* Publish Windows filesystem parity contract and align preview/security docs with the current native subset
 - *(windows)* Correct Phase 13 UAT runbook typos — `--detach` → `--detached` (P05-HV-1), `--proxy-only` → `--network-profile` / `--credential` / `--upstream-proxy` (P09-HV-1)
 
 ### Features
 
+- *(windows, attach)* `nono attach <session-id>` now streams child stdout live, accepts stdin from the attach client, and supports clean detach (Ctrl-]d) + re-attach on Windows detached sessions. Anonymous-pipe stdio is wired into the supervisor at child spawn time and bridged to the existing per-session log file (always-on) and named attach pipe (when a client is connected). The Phase 15 `0xC0000142` fix (PTY-disable + null-token + AppID WFP on detached path) is preserved structurally — the `should_allocate_pty()` gate is byte-identical and ConPTY is never allocated on the detached path. (Phase 17 plan 17-01, ATCH-01)
+- *(windows, attach)* When a second `nono attach <id>` runs while another client holds the data pipe, the second client now sees `Session <id> is already attached. Use 'nono detach <id>' to release the existing client first.` (translated from kernel `ERROR_PIPE_BUSY (231)` returned by the single-instance named pipe). (Phase 17 plan 17-01, ATCH-01, D-08)
 - *(windows)* Expand the native filesystem subset to accept exact-file grants, write-only directory rules, Windows-aware path comparisons, and policy-preprocessed `override_deny`
+- *(cli, linux, macos)* Add `--allow-gpu` flag on `nono run` / `nono shell` / `nono wrap` with per-platform dispatch: Linux Landlock allowlist for `/dev/nvidia*` + DRM render nodes + AMD KFD + WSL2 DXG device nodes plus NVIDIA procfs + `/dev/nvidia-uvm-tools`; macOS Seatbelt IOKit Metal / AGX GPU user-client grants; Windows CLI-layer `tracing::warn!("--allow-gpu is not enforced on this platform")` with byte-identical sandbox state (D-21 invariant). Upstream port of `cb6de49` + `4535473` + `b162b5c` + `4df0a8e` (Phase 20 plans 20-04, D-12/D-13)
+- *(keystore)* Add `keyring://service/account[?decode=go-keyring]` credential URI scheme with fail-closed validator (rejects malformed URIs, unknown codecs, and path-traversal inputs without filesystem I/O). Manual port of upstream `5bccbc4` + `23e9a87` (Phase 20 plan 20-03, D-08)
+- *(cli)* Add `--env-allow PATTERN` and `--env-deny PATTERN` (both repeatable) environment-variable filter flags on `nono run` / `nono shell` / `nono wrap`, with parse-time fail-closed pattern validator (exact names, trailing-prefix globs like `AWS_*`, and bare `*` accepted; middle/leading globs rejected before sandbox launches). CLI-surface subset of upstream PR #688 / `1b412a7`; full propagation to the sandboxed child's env boundary is deferred to a future profile-surface plan (Phase 20 plan 20-03, D-09)
+- *(trust)* Add GitLab ID tokens for trust signing with `url::Url` component-equality issuer validator that fails closed against prefix-match anti-patterns, mirroring the existing GitHub Actions trust surface. Upstream port of `ab5a064` (Phase 20 plan 20-04, D-11)
+- *(hooks)* Wire `.claude.json` symlink at Claude Code hook install time with canonicalized `Path::starts_with` root-containment validation (rejects sibling-tempdir escapes) and Windows fail-open behavior on unprivileged symlink creation (tracing::warn! instead of hook-install failure). Upstream port of `97f7294` (Phase 20 plan 20-02, D-07)
 
 ### Bug Fixes
 
+- *(windows)* Repair three latent Windows session-id mismatches surfaced by Phase 17's first end-to-end exercise of `nono attach` against a detached Windows session. (1) `create_process_containment` job-name format string contained a literal newline byte (`0x0a`) instead of the intended `\n` escape (`0x5c 0x6e`), causing `OpenJobObjectW` to return NULL and `reconcile_session_record` to falsely flip running sessions to `status: Exited, exit_code: -1` (latent since `13f9ca3`). (2) `start_data_pipe_server` named the data pipe with the supervisor correlation ID instead of the user-facing 16-hex session ID, so `nono attach` lookups hit `ERROR_FILE_NOT_FOUND` (the parallel of the `start_control_pipe_server` fix Phase 15 commit `2c414d8` already shipped). (3) `start_logging` had the same wrong-ID pattern for the per-session log file path. Fix preserves D-21 Windows-invariance and the Phase 15 `0xC0000142` fix byte-identically. (Phase 17, debug `.planning/debug/resolved/17-detached-child-immediate-exit.md`, fix commit `7db6595`)
 - *(windows)* `nono setup --check-only` no longer self-contradicts about `nono wrap` — removes the stale "remain intentionally unavailable" sentence and adds the canonical "`'nono wrap' is available on Windows with Job Object + WFP enforcement (no exec-replace, unlike Unix)`" line (Phase 14 plan 14-02, closes P07-HV-2)
+- *(windows, detached)* Fixed `STATUS_DLL_INIT_FAILED (0xC0000142)` for console-application grandchildren spawned in detached-supervisor mode (`nono run --detached`). Root cause: `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` combined with `DETACHED_PROCESS` prevents DLL loader initialization in console children; the WRITE_RESTRICTED + session-SID token amplifies the failure. Fix (direction-b): PTY allocation is now skipped for Windows detached supervisors, and when the inner detached supervisor runs (`NONO_DETACHED_LAUNCH=1`), `spawn_windows_child` launches the grandchild with a null token (caller's token). Kernel network identity on the detached path falls back to AppID-based WFP filtering; per-session SID WFP is retained for non-detached (`nono run`, `nono shell`). Security waivers scoped to the detached path only: Low-Integrity isolation and per-session SID WFP — documented in the commit body. Phase 13 UAT items `P05-HV-1`, `P07-HV-3`, `P11-HV-1`, `P11-HV-3` promoted from `waived (v2.0-known-issue)` to `pass`. (Phase 15-02, fix commits `802c958` + `2c414d8`; Phase 15-03 bookkeeping commits `eda3d6f` + CHANGELOG.)
 
-### Known Issues
+### Refactoring
 
-- *(windows, detached)* Sandboxed **console** grandchildren spawned via `nono run --detached` fail DLL loader initialization with NT status `0xC0000142` (`STATUS_DLL_INIT_FAILED`). Root cause per the debug-session matrix (`.planning/debug/windows-supervised-exec-cascade.md`) is a `DETACHED_PROCESS` supervisor + ConPTY + restricted-token interaction. GUI apps (e.g. `notepad.exe`) initialize fine under the same conditions; only console apps are affected.
-  - **Workaround:** use non-detached mode (`nono run -- <cmd>`) for sandboxed console use cases on Windows. Non-detached path is fully functional end-to-end.
-  - **Tracking:** Phase 15 (`.planning/phases/15-detached-console-conpty-investigation/README.md`). Phase 13 UAT items `P05-HV-1`, `P07-HV-3`, `P11-HV-1`, `P11-HV-3` carry forward as `v1.0-known-issue` and will be re-verified under Phase 15's fix.
-  - **Scope:** Windows-only. Linux and macOS detached-sandbox paths are unaffected.
+- *(profile)* Add end-to-end regression coverage for the profile `extends` cycle guard (self-reference + indirect A→B→A + linear chain), driven through the public `load_profile` API against per-test `XDG_CONFIG_HOME` / `APPDATA` tempdirs. Upstream port of `c1bc439` (Phase 20 plan 20-02, D-06)
+
+### Miscellaneous
+
+- *(cli, deprecation)* Backport `command_blocking_deprecation` module from upstream v0.33+ and wire it into CLI startup as a warnings-only surface (`collect_cli_warnings` + `print_warnings` called after legacy-network warnings, before `run_cli`). Emits deprecation warnings for the documented deprecated command list without changing any command's enforcement behavior. Upstream port of `0ca641b` + `4af0c3e` (Phase 20 plan 20-03, D-10)
+
+### Build
+
+- *(workspace)* Realign all workspace crate versions from `0.30.1` to `0.37.1` (`nono`, `nono-cli`, `nono-proxy`, and `nono-ffi` — the last reconciled from the stale `0.1.0` pin). Internal path-dep pins updated in lockstep so Cargo does not fall back to resolving against old registry versions. (Phase 20 plan 20-01, UPST-01)
 
 ## [0.30.1] - 2026-04-09
 

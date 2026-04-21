@@ -123,9 +123,7 @@ pub(super) fn create_restricted_token_with_sid(session_sid_str: &str) -> Result<
 #[cfg(all(test, target_os = "windows"))]
 mod tests {
     use super::*;
-    use windows_sys::Win32::Security::{
-        GetTokenInformation, TokenRestrictedSids, TOKEN_GROUPS,
-    };
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenRestrictedSids, TOKEN_GROUPS};
 
     /// Regression test for the cascading `nono run --allow-cwd` failures that
     /// blocked Phase 13 UAT (debug session
@@ -151,7 +149,10 @@ mod tests {
         let sid = generate_session_sid();
         let token = create_restricted_token_with_sid(&sid)
             .expect("create_restricted_token_with_sid must succeed for a freshly-generated SID");
-        assert!(!token.h_token.is_null(), "restricted token handle is non-null");
+        assert!(
+            !token.h_token.is_null(),
+            "restricted token handle is non-null"
+        );
 
         // Query TokenRestrictedSids — it must contain exactly one SID, our
         // session SID. If the flag were not WRITE_RESTRICTED the test would

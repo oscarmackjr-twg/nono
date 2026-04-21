@@ -18,22 +18,27 @@ use crate::sandbox::{
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use windows_sys::Win32::Foundation::LocalFree;
-use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
+use windows_sys::Win32::Security::Authorization::{
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, GetNamedSecurityInfoW,
+    SetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT,
+};
 use windows_sys::Win32::Security::{
-    GetAce, GetSidSubAuthority, GetSidSubAuthorityCount, ACE_HEADER, ACL,
-    LABEL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SYSTEM_MANDATORY_LABEL_ACE,
+    GetAce, GetSecurityDescriptorSacl, GetSidSubAuthority, GetSidSubAuthorityCount, ACE_HEADER,
+    ACL, LABEL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SYSTEM_MANDATORY_LABEL_ACE,
 };
 use windows_sys::Win32::System::SystemServices::{
     SECURITY_MANDATORY_LOW_RID, SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+    SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP, SYSTEM_MANDATORY_LABEL_NO_READ_UP,
+    SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
 };
 
 const WINDOWS_PREVIEW_SUPPORTED: bool = true;
 const WINDOWS_SUPPORTED_DETAILS: &str =
-    "Windows sandbox enforcement supports directory read and directory read-write grants, \
+    "Windows sandbox enforcement supports directory and single-file grants in read, \
+     write, and read-write modes (enforced via per-path mandatory integrity labels), \
      blocked network mode, port-level network filtering (connect, bind, and localhost ports), \
-     and default signal/process/ipc modes. Single-file grants, \
-     write-only directory grants, runtime capability \
-     expansion, and platform-specific rules are not in the supported subset. \
+     and default signal/process/ipc modes. Runtime capability expansion \
+     and platform-specific rules are not in the supported subset. \
      `nono shell` is supported on Windows 10 build 17763+ via ConPTY \
      (CreatePseudoConsole); the supervisor stays alive as Job Object owner. \
      `nono wrap` is also supported.";
@@ -46,6 +51,25 @@ pub fn apply(caps: &CapabilitySet) -> Result<()> {
             "Windows sandbox does not support: {}",
             fs_policy.unsupported_messages().join(", ")
         )));
+    }
+
+    // 1b. Phase 21: apply a SYSTEM_MANDATORY_LABEL_ACE (Low IL RID + mode-derived
+    // mask) to each compiled filesystem rule. Fail-closed (I-01) — any label
+    // application error aborts `apply()` with `NonoError::LabelApplyFailed`
+    // carrying the exact path + Win32 HRESULT + actionable hint. Never silently
+    // degrades to a broader grant.
+    //
+    // Order: apply labels BEFORE the network/signal/ipc checks so a later
+    // validation failure (e.g., WFP service absent) does not leave behind
+    // partially-labeled files. CAVEAT: if the labels-applied loop returns Err
+    // partway through, the files already labeled in this invocation are NOT
+    // reverted here — revert-on-error is handled by the RAII guard in
+    // `exec_strategy_windows/` (Plan 21-04). This library-level `apply()` is
+    // the bare primitive, intentionally stateless; the CLI always wraps the
+    // call site in a guard.
+    for rule in &fs_policy.rules {
+        let mask = label_mask_for_access_mode(rule.access);
+        try_set_mandatory_label(&rule.path, mask)?;
     }
 
     // 2. Network shape validation
@@ -446,6 +470,365 @@ impl Drop for OwnedSecurityDescriptor {
     }
 }
 
+/// Maps an `AccessMode` to the `SYSTEM_MANDATORY_LABEL_ACE.Mask` bits per
+/// CONTEXT.md D-01 mask-encoding table.
+///
+/// - `Read` → `NO_WRITE_UP | NO_EXECUTE_UP` (Low IL subject can read, not write/execute-up)
+/// - `Write` → `NO_READ_UP | NO_EXECUTE_UP` (Low IL subject can write, not read/execute-up)
+/// - `ReadWrite` → `NO_EXECUTE_UP` only (Low IL subject can read + write, not execute-up)
+///
+/// Execute is never granted through a filesystem capability in the nono model —
+/// executability is controlled by the profile's command allowlist and the Low
+/// IL restricted token's execute rights. Always set `NO_EXECUTE_UP`.
+#[must_use]
+pub fn label_mask_for_access_mode(mode: crate::AccessMode) -> u32 {
+    match mode {
+        crate::AccessMode::Read => {
+            SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP
+        }
+        crate::AccessMode::Write => {
+            SYSTEM_MANDATORY_LABEL_NO_READ_UP | SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP
+        }
+        crate::AccessMode::ReadWrite => SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP,
+    }
+}
+
+/// Applies (or replaces) a `SYSTEM_MANDATORY_LABEL_ACE` at
+/// `SECURITY_MANDATORY_LOW_RID` on `path`, with the ACE `Mask` field set to
+/// `mask` (typically the return value of `label_mask_for_access_mode`).
+///
+/// Uses `SetNamedSecurityInfoW(SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, ..)`.
+/// Fail-closed: any non-zero return from the FFI surfaces as
+/// `NonoError::LabelApplyFailed`.
+///
+/// The SACL passed to `SetNamedSecurityInfoW` is constructed in-process via
+/// `ConvertStringSecurityDescriptorToSecurityDescriptorW` using an SDDL string
+/// of the form `"S:(ML;;{mask_hex};;;LW)"` where `LW` is the
+/// Low-Integrity-Mandatory-Level alias. This avoids hand-rolling a
+/// `SYSTEM_MANDATORY_LABEL_ACE` byte layout.
+///
+/// # Errors
+///
+/// Returns `NonoError::LabelApplyFailed` if the SDDL cannot be parsed, the
+/// SACL cannot be extracted, or `SetNamedSecurityInfoW` returns non-zero.
+pub fn try_set_mandatory_label(path: &Path, mask: u32) -> Result<()> {
+    use windows_sys::Win32::Foundation::{
+        ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED,
+    };
+
+    let wide_path: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    // Build SDDL: "S:(ML;;<mask-in-hex>;;;LW)" — mandatory-label ACE, Low IL.
+    // SDDL is ASCII-only, so encode_utf16 produces the correct wide form.
+    let sddl = format!("S:(ML;;0x{mask:X};;;LW)");
+    let wide_sddl: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
+
+    let mut security_descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    let ok = unsafe {
+        // SAFETY: `wide_sddl` is a valid nul-terminated UTF-16 buffer; the
+        // output pointer is a valid mutable out-pointer for the duration of
+        // the call. On success, the returned SD must be freed with LocalFree
+        // (handled by the OwnedSecurityDescriptor guard below).
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            wide_sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut security_descriptor,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        let hresult = unsafe {
+            // SAFETY: GetLastError has no preconditions.
+            windows_sys::Win32::Foundation::GetLastError()
+        };
+        return Err(NonoError::LabelApplyFailed {
+            path: path.to_path_buf(),
+            hresult,
+            hint: format!("Failed to construct mandatory-label SDDL (mask=0x{mask:X})"),
+        });
+    }
+    let _sd_guard = OwnedSecurityDescriptor(security_descriptor);
+
+    // Extract the SACL from the security descriptor.
+    let mut sacl: *mut ACL = std::ptr::null_mut();
+    let mut sacl_present: i32 = 0;
+    let mut sacl_defaulted: i32 = 0;
+    let ok = unsafe {
+        // SAFETY: `security_descriptor` is a valid SD returned by the
+        // conversion above; the output pointers are valid out-pointers.
+        GetSecurityDescriptorSacl(
+            security_descriptor,
+            &mut sacl_present,
+            &mut sacl,
+            &mut sacl_defaulted,
+        )
+    };
+    if ok == 0 || sacl_present == 0 || sacl.is_null() {
+        let hresult = unsafe {
+            // SAFETY: GetLastError has no preconditions.
+            windows_sys::Win32::Foundation::GetLastError()
+        };
+        return Err(NonoError::LabelApplyFailed {
+            path: path.to_path_buf(),
+            hresult,
+            hint: "Failed to extract SACL from constructed mandatory-label SD".to_string(),
+        });
+    }
+
+    let status = unsafe {
+        // SAFETY: `wide_path` is a valid nul-terminated UTF-16 buffer; `sacl`
+        // points into `security_descriptor` which lives as long as `_sd_guard`.
+        // SetNamedSecurityInfoW in windows-sys 0.59 signature:
+        //   fn SetNamedSecurityInfoW(
+        //     pobjectname: PCWSTR, objecttype: SE_OBJECT_TYPE,
+        //     securityinfo: OBJECT_SECURITY_INFORMATION,
+        //     psidowner: PSID, psidgroup: PSID,
+        //     pdacl: *const ACL, psacl: *const ACL
+        //   ) -> WIN32_ERROR
+        SetNamedSecurityInfoW(
+            wide_path.as_ptr(),
+            SE_FILE_OBJECT,
+            LABEL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            sacl,
+        )
+    };
+
+    if status == 0 {
+        return Ok(());
+    }
+
+    // Fail-closed: map common Win32 error codes to actionable hints.
+    let hint = match status {
+        x if x == ERROR_ACCESS_DENIED
+            || x == ERROR_INVALID_FUNCTION
+            || x == ERROR_NOT_SUPPORTED =>
+        {
+            "Ensure the target file is writable by the current user and is on NTFS (not ReFS or a network share).".to_string()
+        }
+        x if x == ERROR_FILE_NOT_FOUND => {
+            "Target path does not exist. Single-file Write / ReadWrite grants must name an existing file; use a directory-scope grant for file creation.".to_string()
+        }
+        other => {
+            format!("Unexpected Win32 error while applying mandatory label (raw=0x{other:08X}); see support triage docs.")
+        }
+    };
+    Err(NonoError::LabelApplyFailed {
+        path: path.to_path_buf(),
+        hresult: status,
+        hint,
+    })
+}
+
+/// Returns `Ok(true)` if `path`'s NTFS owner SID equals the current process
+/// user SID; `Ok(false)` otherwise. Returns `Err(NonoError::LabelApplyFailed)`
+/// if the owner cannot be read or the current-user token cannot be queried.
+///
+/// # Why
+///
+/// `SetNamedSecurityInfoW(LABEL_SECURITY_INFORMATION)` requires `WRITE_OWNER`
+/// on the target. Unprivileged users do not hold `WRITE_OWNER` on system paths
+/// like `C:\Windows`, so attempting to label them fails with
+/// `ERROR_ACCESS_DENIED` (HRESULT 0x5). The Low-IL integrity model is
+/// subtractive — system paths are Medium-IL by default and are already
+/// readable by Low-IL subjects through existing OS ACLs, so labeling them
+/// was never necessary. This helper lets the label guard skip paths the
+/// current user does not own without suppressing fatal errors from the
+/// ownership query itself (fail-closed: `Err` propagates).
+///
+/// # Errors
+///
+/// * `NonoError::LabelApplyFailed` if `GetNamedSecurityInfoW`,
+///   `OpenProcessToken`, `GetTokenInformation`, or the owner-SID extraction
+///   fails.
+pub fn path_is_owned_by_current_user(path: &Path) -> Result<bool> {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
+    use windows_sys::Win32::Security::{
+        EqualSid, GetTokenInformation, TokenUser, OWNER_SECURITY_INFORMATION, PSID, TOKEN_QUERY,
+        TOKEN_USER,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let wide_path: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    // 1. Read the NTFS owner SID for the path.
+    let mut owner_sid: PSID = std::ptr::null_mut();
+    let mut security_descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    let status = unsafe {
+        // SAFETY: `wide_path` is a valid nul-terminated UTF-16 buffer; the
+        // two out-pointers refer to live local storage for the duration of
+        // the call. On success the SD is heap-allocated by the kernel and
+        // must be freed with LocalFree (handled by `_sd_guard` below).
+        GetNamedSecurityInfoW(
+            wide_path.as_ptr(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner_sid,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut security_descriptor,
+        )
+    };
+    if status != 0 {
+        return Err(NonoError::LabelApplyFailed {
+            path: path.to_path_buf(),
+            hresult: status,
+            hint: format!(
+                "GetNamedSecurityInfoW(OWNER_SECURITY_INFORMATION) returned 0x{status:08X} while \
+                 reading owner SID for {}",
+                path.display()
+            ),
+        });
+    }
+    let _sd_guard = OwnedSecurityDescriptor(security_descriptor);
+    if owner_sid.is_null() {
+        return Err(NonoError::LabelApplyFailed {
+            path: path.to_path_buf(),
+            hresult: 0,
+            hint: format!(
+                "GetNamedSecurityInfoW returned a null owner SID for {}",
+                path.display()
+            ),
+        });
+    }
+
+    // 2. Open the current process token (read-only) to query TokenUser.
+    let mut token: HANDLE = std::ptr::null_mut();
+    let ok = unsafe {
+        // SAFETY: `GetCurrentProcess()` returns a pseudo-handle valid for
+        // the lifetime of this process; `&mut token` is a valid out-pointer.
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)
+    };
+    if ok == 0 {
+        let hresult = unsafe {
+            // SAFETY: GetLastError has no preconditions.
+            GetLastError()
+        };
+        return Err(NonoError::LabelApplyFailed {
+            path: path.to_path_buf(),
+            hresult,
+            hint: format!(
+                "OpenProcessToken(TOKEN_QUERY) failed (GetLastError=0x{hresult:08X}) while \
+                 resolving current-user SID for ownership check on {}",
+                path.display()
+            ),
+        });
+    }
+    // SAFETY guard: close the token handle on every exit path.
+    struct OwnedTokenHandle(HANDLE);
+    impl Drop for OwnedTokenHandle {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe {
+                    // SAFETY: `self.0` was returned by `OpenProcessToken`
+                    // above and has not been closed yet.
+                    let _ = CloseHandle(self.0);
+                }
+            }
+        }
+    }
+    let _token_guard = OwnedTokenHandle(token);
+
+    // 3. Probe TokenUser buffer size (first call returns
+    //    ERROR_INSUFFICIENT_BUFFER and fills `required`).
+    let mut required: u32 = 0;
+    let _ = unsafe {
+        // SAFETY: `token` is a valid token handle; passing null + 0 is the
+        // documented pattern to ask Windows for the required buffer size.
+        GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut required)
+    };
+    if required == 0 {
+        let hresult = unsafe {
+            // SAFETY: GetLastError has no preconditions.
+            GetLastError()
+        };
+        return Err(NonoError::LabelApplyFailed {
+            path: path.to_path_buf(),
+            hresult,
+            hint: format!(
+                "GetTokenInformation(TokenUser) size probe returned 0 \
+                 (GetLastError=0x{hresult:08X}) for ownership check on {}",
+                path.display()
+            ),
+        });
+    }
+
+    // 4. Allocate buffer and fetch TOKEN_USER.
+    let mut buffer: Vec<u8> = vec![0u8; required as usize];
+    let mut actual: u32 = required;
+    let ok = unsafe {
+        // SAFETY: `token` is a valid token handle; `buffer` has `required`
+        // bytes of live storage; `&mut actual` is a valid out-pointer.
+        GetTokenInformation(
+            token,
+            TokenUser,
+            buffer.as_mut_ptr().cast(),
+            required,
+            &mut actual,
+        )
+    };
+    if ok == 0 {
+        let hresult = unsafe {
+            // SAFETY: GetLastError has no preconditions.
+            GetLastError()
+        };
+        return Err(NonoError::LabelApplyFailed {
+            path: path.to_path_buf(),
+            hresult,
+            hint: format!(
+                "GetTokenInformation(TokenUser) failed (GetLastError=0x{hresult:08X}) while \
+                 resolving current-user SID for ownership check on {}",
+                path.display()
+            ),
+        });
+    }
+
+    // 5. Extract the current-user SID from the filled TOKEN_USER and compare
+    //    it to the path's owner SID via EqualSid.
+    //
+    // Buffer layout: TOKEN_USER { User: SID_AND_ATTRIBUTES { Sid: PSID, .. }, .. }.
+    // The PSID points INTO the same buffer allocation (it is not a separate
+    // heap allocation), so the comparison is safe as long as `buffer` outlives
+    // the EqualSid call — which it does (it lives to end of function).
+    let token_user = unsafe {
+        // SAFETY: GetTokenInformation succeeded above, so the first
+        // `required` bytes of `buffer` hold a valid TOKEN_USER.
+        &*(buffer.as_ptr() as *const TOKEN_USER)
+    };
+    let user_sid: PSID = token_user.User.Sid;
+    if user_sid.is_null() {
+        return Err(NonoError::LabelApplyFailed {
+            path: path.to_path_buf(),
+            hresult: 0,
+            hint: format!(
+                "GetTokenInformation(TokenUser) returned a null Sid pointer for ownership check \
+                 on {}",
+                path.display()
+            ),
+        });
+    }
+
+    let equal = unsafe {
+        // SAFETY: both `user_sid` (into `buffer`) and `owner_sid` (into the
+        // security descriptor owned by `_sd_guard`) are valid for the
+        // duration of this call. EqualSid is a leaf-safe Win32 call that
+        // does not retain the pointers.
+        EqualSid(user_sid, owner_sid)
+    };
+    Ok(equal != 0)
+}
+
 fn low_integrity_label_rid(path: &Path) -> Option<u32> {
     let wide_path: Vec<u16> = path
         .as_os_str()
@@ -536,6 +919,102 @@ fn low_integrity_label_rid(path: &Path) -> Option<u32> {
     None
 }
 
+/// Reads back the mandatory-label ACE on `path`, returning `Some((rid, mask))`
+/// if a label is present. Returns `None` if the path has no SACL, no
+/// mandatory-label ACE, or the FFI fails.
+///
+/// Companion to `try_set_mandatory_label` for verification in tests.
+#[must_use]
+pub fn low_integrity_label_and_mask(path: &Path) -> Option<(u32, u32)> {
+    let wide_path: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut sacl: *mut ACL = std::ptr::null_mut();
+    let mut security_descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+
+    let status = unsafe {
+        // SAFETY: `wide_path` is a valid nul-terminated UTF-16 buffer; the
+        // output pointers refer to live local storage for the duration of the
+        // call. On success, the SD is freed by OwnedSecurityDescriptor's Drop.
+        GetNamedSecurityInfoW(
+            wide_path.as_ptr(),
+            SE_FILE_OBJECT,
+            LABEL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut sacl,
+            &mut security_descriptor,
+        )
+    };
+    if status != 0 {
+        return None;
+    }
+    let _sd_guard = OwnedSecurityDescriptor(security_descriptor);
+    if sacl.is_null() {
+        return None;
+    }
+
+    let ace_count = unsafe {
+        // SAFETY: `sacl` is populated by GetNamedSecurityInfoW on success.
+        (*sacl).AceCount
+    };
+    for index in 0..ace_count {
+        let mut ace = std::ptr::null_mut();
+        let ok = unsafe {
+            // SAFETY: `sacl` is a valid ACL pointer; `ace` is a valid out-pointer.
+            GetAce(sacl, u32::from(index), &mut ace)
+        };
+        if ok == 0 || ace.is_null() {
+            continue;
+        }
+        let header = unsafe {
+            // SAFETY: `ace` points to a valid ACE entry returned by GetAce.
+            &*(ace as *const ACE_HEADER)
+        };
+        if u32::from(header.AceType) != SYSTEM_MANDATORY_LABEL_ACE_TYPE {
+            continue;
+        }
+        let label_ace = unsafe {
+            // SAFETY: AceType checked above; bytes are a SYSTEM_MANDATORY_LABEL_ACE.
+            &*(ace as *const SYSTEM_MANDATORY_LABEL_ACE)
+        };
+        let mask = label_ace.Mask;
+        let sid = (&label_ace.SidStart as *const u32).cast_mut().cast();
+        let subauthority_count = unsafe {
+            // SAFETY: `sid` points to the SID embedded in the label ACE.
+            GetSidSubAuthorityCount(sid)
+        };
+        if subauthority_count.is_null() {
+            continue;
+        }
+        let subauthority_count = unsafe {
+            // SAFETY: subauthority_count was just checked for non-null.
+            *subauthority_count
+        };
+        if subauthority_count == 0 {
+            continue;
+        }
+        let rid = unsafe {
+            // SAFETY: SID has at least one subauthority; final RID pointer is valid.
+            GetSidSubAuthority(sid, u32::from(subauthority_count) - 1)
+        };
+        if rid.is_null() {
+            continue;
+        }
+        return Some((
+            unsafe {
+                // SAFETY: `rid` was just checked for non-null and points into the ACE buffer.
+                *rid
+            },
+            mask,
+        ));
+    }
+    None
+}
+
 #[must_use]
 pub fn is_low_integrity_compatible_dir(path: &Path) -> bool {
     let canonical = path.canonicalize().ok();
@@ -563,24 +1042,21 @@ pub fn compile_filesystem_policy(caps: &CapabilitySet) -> WindowsFilesystemPolic
     let mut unsupported: Vec<crate::sandbox::WindowsUnsupportedIssue> = Vec::new();
 
     for cap in caps.fs_capabilities() {
-        if cap.is_file {
-            unsupported.push(crate::sandbox::WindowsUnsupportedIssue {
-                kind: crate::sandbox::WindowsUnsupportedIssueKind::SingleFileGrant,
-                path: normalize_windows_path(&cap.resolved),
-            });
-        } else if cap.access == crate::AccessMode::Write {
-            unsupported.push(crate::sandbox::WindowsUnsupportedIssue {
-                kind: crate::sandbox::WindowsUnsupportedIssueKind::WriteOnlyDirectoryGrant,
-                path: normalize_windows_path(&cap.resolved),
-            });
-        } else {
-            rules.push(WindowsFilesystemRule {
-                path: normalize_windows_path(&cap.resolved),
-                access: cap.access,
-                is_file: cap.is_file,
-                source: cap.source.clone(),
-            });
-        }
+        // Phase 21: single-file grants (any mode) and write-only directory grants
+        // are now enforced via per-path SYSTEM_MANDATORY_LABEL_ACE (see
+        // `try_set_mandatory_label` + `label_mask_for_access_mode`). All three
+        // AccessMode variants x both path kinds (file/dir) compile to a
+        // WindowsFilesystemRule; no branch emits `unsupported`.
+        //
+        // The WindowsUnsupportedIssueKind::SingleFileGrant and
+        // WriteOnlyDirectoryGrant variants are retained in the enum as reserved
+        // shapes for future unsupported cases (D-06 defers enum retirement).
+        rules.push(WindowsFilesystemRule {
+            path: normalize_windows_path(&cap.resolved),
+            access: cap.access,
+            is_file: cap.is_file,
+            source: cap.source.clone(),
+        });
     }
 
     rules.sort_by(|a, b| a.path.cmp(&b.path));
@@ -1399,6 +1875,35 @@ mod tests {
     }
 
     #[test]
+    fn label_mask_for_access_mode_read_denies_write_and_execute_up() {
+        let mask = label_mask_for_access_mode(crate::AccessMode::Read);
+        assert_eq!(
+            mask,
+            SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP,
+            "Read mode must deny WRITE_UP and EXECUTE_UP; got 0x{mask:X}"
+        );
+    }
+
+    #[test]
+    fn label_mask_for_access_mode_write_denies_read_and_execute_up() {
+        let mask = label_mask_for_access_mode(crate::AccessMode::Write);
+        assert_eq!(
+            mask,
+            SYSTEM_MANDATORY_LABEL_NO_READ_UP | SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP,
+            "Write mode must deny READ_UP and EXECUTE_UP; got 0x{mask:X}"
+        );
+    }
+
+    #[test]
+    fn label_mask_for_access_mode_read_write_denies_only_execute_up() {
+        let mask = label_mask_for_access_mode(crate::AccessMode::ReadWrite);
+        assert_eq!(
+            mask, SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP,
+            "ReadWrite mode must deny only EXECUTE_UP; got 0x{mask:X}"
+        );
+    }
+
+    #[test]
     fn apply_accepts_minimal_supported_windows_subset() {
         let dir = tempdir().expect("tempdir");
         let caps = CapabilitySet::new()
@@ -1414,29 +1919,268 @@ mod tests {
     }
 
     #[test]
-    fn apply_rejects_unsupported_single_file_grant() {
+    fn compile_filesystem_policy_emits_rule_for_single_file_read_grant() {
         let dir = tempdir().expect("tempdir");
         let file = dir.path().join("note.txt");
         std::fs::write(&file, "x").expect("write file");
         let mut caps = CapabilitySet::new();
         caps.add_fs(FsCapability::new_file(&file, AccessMode::Read).expect("file cap"));
-        let err = apply(&caps).expect_err("single-file grant must be rejected");
-        assert!(matches!(err, NonoError::UnsupportedPlatform(_)));
-        // message must be explicit, not generic
-        let msg = err.to_string();
-        assert!(
-            msg.contains("single-file") || msg.contains("SingleFile"),
-            "expected named error message, got: {msg}"
+        let policy = compile_filesystem_policy(&caps);
+        assert_eq!(
+            policy.unsupported.len(),
+            0,
+            "single-file read grant must not emit unsupported entry"
+        );
+        assert_eq!(
+            policy.rules.len(),
+            1,
+            "single-file read grant must emit one rule"
+        );
+        let rule = &policy.rules[0];
+        assert!(rule.is_file, "rule must carry is_file=true");
+        assert_eq!(rule.access, AccessMode::Read);
+    }
+
+    #[test]
+    fn compile_filesystem_policy_emits_rule_for_single_file_write_grant() {
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("note.txt");
+        std::fs::write(&file, "x").expect("write file");
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability::new_file(&file, AccessMode::Write).expect("file cap"));
+        let policy = compile_filesystem_policy(&caps);
+        assert_eq!(policy.unsupported.len(), 0);
+        assert_eq!(policy.rules.len(), 1);
+        assert!(policy.rules[0].is_file);
+        assert_eq!(policy.rules[0].access, AccessMode::Write);
+    }
+
+    #[test]
+    fn compile_filesystem_policy_emits_rule_for_single_file_read_write_grant() {
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("note.txt");
+        std::fs::write(&file, "x").expect("write file");
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability::new_file(&file, AccessMode::ReadWrite).expect("file cap"));
+        let policy = compile_filesystem_policy(&caps);
+        assert_eq!(policy.unsupported.len(), 0);
+        assert_eq!(policy.rules.len(), 1);
+        assert!(policy.rules[0].is_file);
+        assert_eq!(policy.rules[0].access, AccessMode::ReadWrite);
+    }
+
+    #[test]
+    fn compile_filesystem_policy_emits_rule_for_write_only_directory_grant() {
+        let dir = tempdir().expect("tempdir");
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability::new_dir(dir.path(), AccessMode::Write).expect("dir cap"));
+        let policy = compile_filesystem_policy(&caps);
+        assert_eq!(
+            policy.unsupported.len(),
+            0,
+            "write-only dir grant must not emit unsupported entry"
+        );
+        assert_eq!(policy.rules.len(), 1);
+        assert!(!policy.rules[0].is_file);
+        assert_eq!(policy.rules[0].access, AccessMode::Write);
+    }
+
+    #[test]
+    fn apply_accepts_single_file_grant_and_labels_low_integrity() {
+        // Phase 21: single-file grants in all three access modes are now enforced
+        // via per-file mandatory-label ACE. This test replaces the pre-phase-21
+        // rejection test (apply_rejects_unsupported_single_file_grant).
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("note.txt");
+        std::fs::write(&file, "x").expect("write file");
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability::new_file(&file, AccessMode::Read).expect("file cap"));
+        apply(&caps).expect("Phase 21: single-file read grant must be accepted");
+        let (rid, mask) = low_integrity_label_and_mask(&file)
+            .expect("Phase 21: apply() must leave a mandatory-label ACE on the granted file");
+        assert_eq!(
+            rid, SECURITY_MANDATORY_LOW_RID as u32,
+            "label RID must be SECURITY_MANDATORY_LOW_RID; got 0x{rid:X}"
+        );
+        assert_eq!(
+            mask,
+            SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP,
+            "Read mode label mask must be NO_WRITE_UP | NO_EXECUTE_UP; got 0x{mask:X}"
         );
     }
 
     #[test]
-    fn apply_rejects_unsupported_write_only_directory_grant() {
+    fn apply_accepts_write_only_directory_grant_and_labels_low_integrity() {
+        // Phase 21: write-only directory grants are now enforced via directory-scope
+        // mandatory-label ACE with the NO_READ_UP mask. This test replaces the
+        // pre-phase-21 rejection test (apply_rejects_unsupported_write_only_directory_grant).
         let dir = tempdir().expect("tempdir");
         let mut caps = CapabilitySet::new();
         caps.add_fs(FsCapability::new_dir(dir.path(), AccessMode::Write).expect("dir cap"));
-        let err = apply(&caps).expect_err("write-only directory grant must be rejected");
-        assert!(matches!(err, NonoError::UnsupportedPlatform(_)));
+        apply(&caps).expect("Phase 21: write-only directory grant must be accepted");
+        let (rid, mask) = low_integrity_label_and_mask(dir.path())
+            .expect("Phase 21: apply() must leave a mandatory-label ACE on the granted directory");
+        assert_eq!(
+            rid, SECURITY_MANDATORY_LOW_RID as u32,
+            "label RID must be SECURITY_MANDATORY_LOW_RID; got 0x{rid:X}"
+        );
+        assert_eq!(
+            mask,
+            SYSTEM_MANDATORY_LABEL_NO_READ_UP | SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP,
+            "Write mode label mask must be NO_READ_UP | NO_EXECUTE_UP; got 0x{mask:X}"
+        );
+    }
+
+    #[test]
+    fn single_file_grant_does_not_label_parent_directory() {
+        // Phase 21 Plan 21-05 silent-degradation regression test (CONTEXT.md § specifics).
+        // Guards the I-01 fail-closed invariant: single-file grants must NEVER silently
+        // degrade into a parent-directory grant. Future refactors that accidentally
+        // route single-file grants through a parent-directory label path will fail this
+        // test — the parent directory's integrity-label RID must be unchanged across
+        // apply(), while the granted file's RID must transition to SECURITY_MANDATORY_LOW_RID.
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("only-this.txt");
+        std::fs::write(&file, "x").expect("write file");
+        let parent_label_before = low_integrity_label_rid(dir.path());
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability::new_file(&file, AccessMode::Read).expect("file cap"));
+        apply(&caps).expect("apply");
+        let parent_label_after = low_integrity_label_rid(dir.path());
+        assert_eq!(
+            parent_label_before, parent_label_after,
+            "single-file grant must not mutate parent directory's label"
+        );
+        // File itself should now be Low IL.
+        assert_eq!(
+            low_integrity_label_rid(&file),
+            Some(SECURITY_MANDATORY_LOW_RID as u32),
+            "granted file must carry Low IL label after apply"
+        );
+    }
+
+    #[test]
+    fn apply_labels_single_file_write_mode_with_correct_mask() {
+        // Phase 21 Plan 21-05 per-mode mask integration test for Write mode on a FILE
+        // (Read mode on a file is covered by apply_accepts_single_file_grant_and_labels_low_integrity;
+        // Write mode on a DIRECTORY is covered by apply_accepts_write_only_directory_grant_and_labels_low_integrity).
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("note.txt");
+        std::fs::write(&file, "x").expect("write file");
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability::new_file(&file, AccessMode::Write).expect("file cap"));
+        apply(&caps).expect("Phase 21: single-file write grant must be accepted");
+        let (rid, mask) = low_integrity_label_and_mask(&file)
+            .expect("Phase 21: apply() must leave a mandatory-label ACE on the granted file");
+        assert_eq!(rid, SECURITY_MANDATORY_LOW_RID as u32);
+        assert_eq!(
+            mask,
+            SYSTEM_MANDATORY_LABEL_NO_READ_UP | SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP,
+            "Write mode mask must be NO_READ_UP | NO_EXECUTE_UP per D-01; got 0x{mask:X}"
+        );
+    }
+
+    #[test]
+    fn apply_labels_single_file_read_write_mode_with_correct_mask() {
+        // Phase 21 Plan 21-05 per-mode mask integration test for ReadWrite mode on a FILE.
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("note.txt");
+        std::fs::write(&file, "x").expect("write file");
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability::new_file(&file, AccessMode::ReadWrite).expect("file cap"));
+        apply(&caps).expect("Phase 21: single-file read-write grant must be accepted");
+        let (rid, mask) = low_integrity_label_and_mask(&file)
+            .expect("Phase 21: apply() must leave a mandatory-label ACE on the granted file");
+        assert_eq!(rid, SECURITY_MANDATORY_LOW_RID as u32);
+        assert_eq!(
+            mask, SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP,
+            "ReadWrite mode mask must be NO_EXECUTE_UP only per D-01; got 0x{mask:X}"
+        );
+    }
+
+    #[test]
+    fn compile_filesystem_policy_accepts_git_config_shape() {
+        // Phase 21 motivator regression: the `claude-code` profile's `git_config`
+        // group grants read access to 5 single files. Pre-phase-21 this tripped
+        // 5 x WindowsUnsupportedIssueKind::SingleFileGrant. Post-phase-21 these
+        // compile to 5 WindowsFilesystemRule entries, enabling the Phase 18 UAT
+        // Path B + Path C to run. Mirrors crates/nono-cli/data/policy.json
+        // § git_config (lines 501-512) but anchored at tempdir for test isolation.
+        let dir = tempdir().expect("tempdir");
+        let files = [
+            dir.path().join(".gitconfig"),
+            dir.path().join(".gitignore_global"),
+            dir.path().join(".config_git_config"),
+            dir.path().join(".config_git_ignore"),
+            dir.path().join(".config_git_attributes"),
+        ];
+        for f in &files {
+            std::fs::write(f, "x").expect("write file");
+        }
+        let mut caps = CapabilitySet::new();
+        for f in &files {
+            caps.add_fs(FsCapability::new_file(f, AccessMode::Read).expect("file cap"));
+        }
+        let policy = compile_filesystem_policy(&caps);
+        assert_eq!(
+            policy.unsupported.len(),
+            0,
+            "git_config-shaped CapabilitySet must not emit any unsupported entries; got: {:?}",
+            policy.unsupported
+        );
+        assert_eq!(
+            policy.rules.len(),
+            5,
+            "git_config-shaped CapabilitySet must emit exactly 5 rules; got {} rules: {:?}",
+            policy.rules.len(),
+            policy.rules
+        );
+        for rule in &policy.rules {
+            assert!(
+                rule.is_file,
+                "every git_config rule must carry is_file=true"
+            );
+            assert_eq!(rule.access, AccessMode::Read);
+        }
+    }
+
+    #[test]
+    fn apply_labels_multiple_single_file_grants_all_succeed() {
+        // Phase 21 end-to-end motivator regression: the full `git_config`-shaped apply
+        // path, proving all 5 files are labeled Low IL with the Read-mode mask.
+        let dir = tempdir().expect("tempdir");
+        let files = [
+            dir.path().join(".gitconfig"),
+            dir.path().join(".gitignore_global"),
+            dir.path().join(".config_git_config"),
+            dir.path().join(".config_git_ignore"),
+            dir.path().join(".config_git_attributes"),
+        ];
+        for f in &files {
+            std::fs::write(f, "x").expect("write file");
+        }
+        let mut caps = CapabilitySet::new();
+        for f in &files {
+            caps.add_fs(FsCapability::new_file(f, AccessMode::Read).expect("file cap"));
+        }
+        apply(&caps).expect("Phase 21: 5 single-file grants must all succeed");
+        for f in &files {
+            let (rid, mask) = low_integrity_label_and_mask(f).unwrap_or_else(|| {
+                panic!("file {} must be Low-IL labeled after apply()", f.display())
+            });
+            assert_eq!(
+                rid,
+                SECURITY_MANDATORY_LOW_RID as u32,
+                "rid mismatch for {}",
+                f.display()
+            );
+            assert_eq!(
+                mask,
+                SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP,
+                "mask mismatch for {}; got 0x{mask:X}",
+                f.display()
+            );
+        }
     }
 
     #[test]
@@ -1467,23 +2211,28 @@ mod tests {
 
     #[test]
     fn apply_error_message_remains_explicit_for_unsupported_subset() {
-        // The error must name the specific unsupported feature, not emit a generic string
-        let dir = tempdir().expect("tempdir");
-        let file = dir.path().join("note.txt");
-        std::fs::write(&file, "x").expect("write file");
-        let mut caps = CapabilitySet::new();
-        caps.add_fs(FsCapability::new_file(&file, AccessMode::Read).expect("file cap"));
-        let err = apply(&caps).expect_err("must reject");
+        // Phase 21: single-file grants are now supported. The original unsupported-
+        // subset assertion was repointed from FsCapability::new_file to
+        // set_ipc_mode(IpcMode::Full) — a still-unsupported shape that is orthogonal
+        // to apply_rejects_capability_expansion_shape (which covers enable_extensions)
+        // and apply_rejects_non_default_ipc_mode (which asserts only the error
+        // *variant*, not the message content). This test's contribution is the
+        // message-quality assertion: the error string must name the specific
+        // unsupported feature, not emit a generic stub.
+        let caps = CapabilitySet::new().set_ipc_mode(IpcMode::Full);
+        let err = apply(&caps).expect_err("non-default IPC mode must be rejected");
+        assert!(matches!(err, NonoError::UnsupportedPlatform(_)));
         let msg = err.to_string();
         // Must not be the old generic stub message
         assert!(
             !msg.contains("library-wide `Sandbox::apply()` contract remains partial"),
             "error is still the old stub: {msg}"
         );
-        // Must contain a recognizable feature name
+        // Must contain a recognizable feature name — "IPC mode" per the
+        // Windows apply() branch for non-default IpcMode.
         assert!(
-            msg.contains("single-file") || msg.contains("not support"),
-            "expected named feature in error, got: {msg}"
+            msg.contains("IPC mode") || msg.contains("ipc mode"),
+            "expected named IPC-mode feature in error, got: {msg}"
         );
     }
 
@@ -1720,7 +2469,11 @@ mod tests {
     }
 
     #[test]
-    fn compile_filesystem_policy_classifies_single_file_as_unsupported() {
+    fn compile_filesystem_policy_classifies_single_file_as_rule() {
+        // Phase 21: single-file grants are now enforced via per-file mandatory-label
+        // ACE (see try_set_mandatory_label). Pre-phase-21 this test asserted the
+        // grant was classified as SingleFileGrant *unsupported*; post-phase-21 the
+        // grant MUST be classified as a WindowsFilesystemRule with is_file=true.
         let dir = tempdir().expect("tempdir");
         let file = dir.path().join("note.txt");
         std::fs::write(&file, "hello").expect("write file");
@@ -1728,29 +2481,60 @@ mod tests {
         caps.add_fs(FsCapability::new_file(&file, AccessMode::Read).expect("file cap"));
 
         let policy = compile_filesystem_policy(&caps);
-        assert!(!policy.is_fully_supported());
-        assert!(policy.rules.is_empty());
-        assert_eq!(policy.unsupported.len(), 1);
-        assert_eq!(
-            policy.unsupported[0].kind,
-            crate::sandbox::WindowsUnsupportedIssueKind::SingleFileGrant
+        assert!(
+            policy.is_fully_supported(),
+            "Phase 21: single-file grants are fully supported; got: {:?}",
+            policy.unsupported
         );
+        assert!(
+            policy.unsupported.is_empty(),
+            "Phase 21: no unsupported entries expected; got: {:?}",
+            policy.unsupported
+        );
+        assert_eq!(
+            policy.rules.len(),
+            1,
+            "single-file grant must emit one rule"
+        );
+        assert!(
+            policy.rules[0].is_file,
+            "single-file grant rule must carry is_file=true"
+        );
+        assert_eq!(policy.rules[0].access, AccessMode::Read);
     }
 
     #[test]
-    fn compile_filesystem_policy_classifies_write_only_directory_as_unsupported() {
+    fn compile_filesystem_policy_classifies_write_only_directory_as_rule() {
+        // Phase 21: write-only directory grants are now enforced via directory-scope
+        // mandatory-label ACE with the NO_READ_UP mask. Pre-phase-21 this test
+        // asserted the grant was classified as WriteOnlyDirectoryGrant *unsupported*;
+        // post-phase-21 the grant MUST be classified as a WindowsFilesystemRule with
+        // is_file=false and access=Write.
         let dir = tempdir().expect("tempdir");
         let mut caps = CapabilitySet::new();
         caps.add_fs(FsCapability::new_dir(dir.path(), AccessMode::Write).expect("dir cap"));
 
         let policy = compile_filesystem_policy(&caps);
-        assert!(!policy.is_fully_supported());
-        assert!(policy.rules.is_empty());
-        assert_eq!(policy.unsupported.len(), 1);
-        assert_eq!(
-            policy.unsupported[0].kind,
-            crate::sandbox::WindowsUnsupportedIssueKind::WriteOnlyDirectoryGrant
+        assert!(
+            policy.is_fully_supported(),
+            "Phase 21: write-only dir grants are fully supported; got: {:?}",
+            policy.unsupported
         );
+        assert!(
+            policy.unsupported.is_empty(),
+            "Phase 21: no unsupported entries expected; got: {:?}",
+            policy.unsupported
+        );
+        assert_eq!(
+            policy.rules.len(),
+            1,
+            "write-only dir grant must emit one rule"
+        );
+        assert!(
+            !policy.rules[0].is_file,
+            "write-only dir grant rule must carry is_file=false"
+        );
+        assert_eq!(policy.rules[0].access, AccessMode::Write);
     }
 
     #[test]
@@ -1864,7 +2648,12 @@ mod tests {
     }
 
     #[test]
-    fn validate_launch_paths_rejects_single_file_policy_shapes_as_unsupported() {
+    fn validate_launch_paths_accepts_single_file_policy_shapes() {
+        // Phase 21: single-file grants are now enforced via per-file mandatory-label
+        // ACE (see try_set_mandatory_label). Pre-phase-21 this test asserted that
+        // validate_launch_paths rejected single-file policies as unsupported;
+        // post-phase-21 the policy is fully supported and the launch-path check
+        // succeeds as long as the executable path is covered by the rule.
         let dir = tempdir().expect("tempdir");
         let file = dir.path().join("note.txt");
         std::fs::write(&file, "hello").expect("write file");
@@ -1872,9 +2661,10 @@ mod tests {
         caps.add_fs(FsCapability::new_file(&file, AccessMode::Read).expect("file cap"));
         let policy = compile_filesystem_policy(&caps);
 
-        // Single-file grants are classified as unsupported, so validate_launch_paths must reject
+        // Single-file grant now a supported WindowsFilesystemRule; the executable
+        // path (&file) is covered by the rule, so validate_launch_paths accepts.
         validate_launch_paths(&policy, &file, dir.path())
-            .expect_err("single-file policy shapes must be rejected as unsupported");
+            .expect("Phase 21: single-file policy covering the executable path must be accepted");
     }
 
     #[test]
@@ -1905,40 +2695,49 @@ mod tests {
     }
 
     #[test]
-    fn preview_runtime_status_reports_requires_enforcement_for_single_file_policy() {
+    fn preview_runtime_status_allows_advisory_only_for_single_file_policy() {
+        // Phase 21: single-file grants are now enforced via per-file mandatory-label
+        // ACE at launch time. Pre-phase-21 this test asserted that preview status
+        // reported RequiresEnforcement because single-file grants were classified
+        // as unsupported. Post-phase-21 a pure single-file policy has no
+        // unsupported entries and no user-intent directory rules, so no reasons
+        // are collected and the status is AdvisoryOnly (the label application
+        // itself happens during Sandbox::apply and is transparent to the preview).
         let dir = tempdir().expect("tempdir");
         let file = dir.path().join("note.txt");
         std::fs::write(&file, "hello").expect("write file");
         let mut caps = CapabilitySet::new();
         caps.add_fs(FsCapability::new_file(&file, AccessMode::Read).expect("file cap"));
 
-        // Single-file grants are now classified as unsupported, so preview status
-        // must report RequiresEnforcement with the single-file grants label.
         let status = preview_runtime_status(
             &caps,
             Path::new(r"C:\outside-workdir"),
             WindowsPreviewContext::default(),
         );
         assert!(
-            matches!(status, PreviewRuntimeStatus::RequiresEnforcement { .. }),
-            "single-file policy should require enforcement: {status:?}"
+            matches!(status, PreviewRuntimeStatus::AdvisoryOnly),
+            "Phase 21: single-file policy must be advisory-only; got: {status:?}"
         );
     }
 
     #[test]
-    fn preview_runtime_status_reports_requires_enforcement_for_write_only_directory() {
+    fn preview_runtime_status_allows_advisory_only_for_write_only_directory() {
+        // Phase 21: write-only directory grants are now enforced via directory-scope
+        // mandatory-label ACE with NO_READ_UP mask. Pre-phase-21 this test asserted
+        // RequiresEnforcement because write-only directory grants were unsupported.
+        // Post-phase-21 the grant compiles to a WindowsFilesystemRule and — as long
+        // as the execution directory is covered by the rule — no enforcement
+        // reasons are collected (parity with read-write directory grants).
         let dir = tempdir().expect("tempdir");
         let work_dir = dir.path().join("work");
         std::fs::create_dir_all(&work_dir).expect("mkdir work");
         let mut caps = CapabilitySet::new();
         caps.add_fs(FsCapability::new_dir(dir.path(), AccessMode::Write).expect("dir cap"));
 
-        // Write-only directory grants are now classified as unsupported, so preview status
-        // must report RequiresEnforcement.
         let status = preview_runtime_status(&caps, &work_dir, WindowsPreviewContext::default());
         assert!(
-            matches!(status, PreviewRuntimeStatus::RequiresEnforcement { .. }),
-            "write-only directory policy should require enforcement: {status:?}"
+            matches!(status, PreviewRuntimeStatus::AdvisoryOnly),
+            "Phase 21: write-only directory policy covering execution dir must be advisory-only; got: {status:?}"
         );
     }
 
@@ -2433,6 +3232,44 @@ mod tests {
         assert!(
             err.to_string().contains("absolute path argument")
                 || err.to_string().contains("comp file argument")
+        );
+    }
+
+    #[test]
+    fn path_is_owned_by_current_user_returns_true_for_tempfile() {
+        // Files we create in a tempdir are owned by the current user.
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("mine.txt");
+        std::fs::write(&file, "x").expect("write file");
+
+        let owned = path_is_owned_by_current_user(&file)
+            .expect("owner read must succeed for a user-created tempfile");
+        assert!(
+            owned,
+            "a file just created by the current user must be reported as owned"
+        );
+    }
+
+    #[test]
+    fn path_is_owned_by_current_user_returns_false_for_system_windows_dir() {
+        // C:\Windows is owned by TrustedInstaller (or the system) on a clean
+        // install and is NEVER owned by an unprivileged interactive user.
+        // This test is the whole reason path_is_owned_by_current_user exists:
+        // the label guard must skip labeling system paths to avoid
+        // ERROR_ACCESS_DENIED from SetNamedSecurityInfoW.
+        let system_root = std::env::var_os("SystemRoot")
+            .unwrap_or_else(|| std::ffi::OsString::from(r"C:\Windows"));
+        let system_root = PathBuf::from(system_root);
+        // Only assert the shape; if a developer is somehow running tests as
+        // the TrustedInstaller principal the assertion would flip — but in
+        // that environment the label guard wouldn't need to skip anyway, so
+        // the test would still reflect reality.
+        let is_current = path_is_owned_by_current_user(&system_root)
+            .expect("owner read must succeed for C:\\Windows (readable by everyone)");
+        assert!(
+            !is_current,
+            "an unprivileged user must not be reported as the owner of {}",
+            system_root.display()
         );
     }
 }

@@ -10,7 +10,7 @@ nono provides OS-enforced sandboxing where unauthorized operations are structura
 
 ```toml
 [dependencies]
-nono = "0.1"
+nono = "0.37"
 ```
 
 ## Usage

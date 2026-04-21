@@ -72,6 +72,12 @@ pub(crate) struct PreparedSandbox {
     pub(crate) open_url_origins: Vec<String>,
     pub(crate) open_url_allow_localhost: bool,
     pub(crate) override_deny_paths: Vec<PathBuf>,
+    /// Plan 18.1-03 G-06: the loaded profile (if any) is preserved past
+    /// profile destructuring so its `capabilities.aipc` widening can be
+    /// resolved at Windows supervisor construction time via
+    /// `Profile::resolve_aipc_allowlist`. `None` when the run has no
+    /// `--profile` argument; widening falls back to hard-coded defaults.
+    pub(crate) loaded_profile: Option<profile::Profile>,
 }
 
 fn finalize_prepared_sandbox(
@@ -251,6 +257,9 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
                 open_url_origins: Vec::new(),
                 open_url_allow_localhost: false,
                 override_deny_paths: Vec::new(),
+                // Plan 18.1-03 G-06: manifest path has no loaded Profile —
+                // AIPC widening defaults to hard-coded supervisor allowlist.
+                loaded_profile: None,
             },
             args,
             silent,
@@ -382,8 +391,14 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
         return Err(NonoError::NoCapabilities);
     }
 
+    // Plan 18.1-03 G-06: clone env_credentials.mappings out by reference so
+    // `loaded_profile` stays owned and can be preserved in `PreparedSandbox`
+    // for downstream AIPC-allowlist resolution at Windows supervisor
+    // construction time. The previous shape MOVED `loaded_profile` out here;
+    // G-06 wiring needs the profile to survive past this point.
     let profile_secrets = loaded_profile
-        .map(|profile| profile.env_credentials.mappings)
+        .as_ref()
+        .map(|profile| profile.env_credentials.mappings.clone())
         .unwrap_or_default();
     let loaded_secrets = load_env_credentials(args, &profile_secrets, silent)?;
 
@@ -407,6 +422,10 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
             open_url_origins,
             open_url_allow_localhost,
             override_deny_paths,
+            // Plan 18.1-03 G-06: preserve the loaded profile so
+            // `Profile::resolve_aipc_allowlist` can be consulted at the
+            // Windows supervisor construction site.
+            loaded_profile,
         },
         args,
         silent,

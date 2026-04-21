@@ -70,12 +70,17 @@ pub use diagnostic::{
 };
 pub use error::{NonoError, Result};
 pub use keystore::{
-    is_apple_password_uri, is_env_uri, is_file_uri, is_op_uri, load_secret_by_ref,
-    load_secret_file, load_secrets, redact_apple_password_uri, redact_file_uri, redact_op_uri,
-    store_secret_file, validate_apple_password_uri, validate_destination_env_var, validate_env_uri,
-    validate_file_uri, validate_op_uri, LoadedSecret,
+    is_apple_password_uri, is_env_uri, is_file_uri, is_keyring_uri, is_op_uri, load_secret_by_ref,
+    load_secret_file, load_secrets, redact_apple_password_uri, redact_file_uri, redact_keyring_uri,
+    redact_op_uri, store_secret_file, validate_apple_password_uri, validate_destination_env_var,
+    validate_env_uri, validate_file_uri, validate_keyring_uri, validate_op_uri, LoadedSecret,
 };
 pub use net_filter::{FilterResult, HostFilter};
+#[cfg(target_os = "windows")]
+pub use sandbox::windows::{
+    label_mask_for_access_mode, low_integrity_label_and_mask, path_is_owned_by_current_user,
+    try_set_mandatory_label,
+};
 #[cfg(target_os = "linux")]
 pub use sandbox::{detect_abi, is_wsl2, DetectedAbi};
 pub use sandbox::{PreviewRuntimeStatus, Sandbox, SupportInfo, SupportStatus};

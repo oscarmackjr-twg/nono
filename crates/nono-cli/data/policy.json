@@ -691,6 +691,15 @@
         ],
         "allow_localhost": true
       },
+      "capabilities": {
+        "aipc": {
+          "socket": ["connect"],
+          "pipe": ["read", "write"],
+          "job_object": ["query"],
+          "event": ["wait", "signal"],
+          "mutex": ["wait", "release"]
+        }
+      },
       "allow_launch_services": true,
       "hooks": {
         "claude-code": {
@@ -736,6 +745,15 @@
         ],
         "allow_localhost": true
       },
+      "capabilities": {
+        "aipc": {
+          "socket": ["connect"],
+          "pipe": ["read", "write"],
+          "job_object": ["query"],
+          "event": ["wait", "signal"],
+          "mutex": ["wait", "release"]
+        }
+      },
       "allow_launch_services": true,
       "network": { "block": false },
       "workdir": { "access": "readwrite" },
@@ -763,6 +781,15 @@
       },
       "network": { "block": false },
       "workdir": { "access": "read" },
+      "capabilities": {
+        "aipc": {
+          "socket": ["connect"],
+          "pipe": ["read", "write"],
+          "job_object": [],
+          "event": [],
+          "mutex": []
+        }
+      },
       "undo": {
         "exclude_patterns": ["node_modules", ".next"]
       },
@@ -793,6 +820,15 @@
       },
       "network": { "block": false },
       "workdir": { "access": "readwrite" },
+      "capabilities": {
+        "aipc": {
+          "socket": ["connect"],
+          "pipe": ["read", "write", "read+write"],
+          "job_object": ["query"],
+          "event": ["wait", "signal"],
+          "mutex": ["wait", "release"]
+        }
+      },
       "undo": {
         "exclude_patterns": ["node_modules", ".next"]
       },
@@ -896,6 +932,15 @@
       },
       "network": { "block": false },
       "workdir": { "access": "readwrite" },
+      "capabilities": {
+        "aipc": {
+          "socket": ["connect"],
+          "pipe": ["read", "write"],
+          "job_object": ["query"],
+          "event": ["wait", "signal"],
+          "mutex": ["wait", "release"]
+        }
+      },
       "undo": {
         "exclude_patterns": ["node_modules", "__pycache__", ".swival"],
         "exclude_globs": ["*.pyc"]

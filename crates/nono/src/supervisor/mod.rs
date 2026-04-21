@@ -27,6 +27,8 @@
 //! - Peer authentication via `SO_PEERCRED` (Linux) / `LOCAL_PEERPID` (macOS)
 //! - Path comparison uses [`Path::starts_with()`], never string operations
 
+pub mod aipc_sdk;
+pub mod policy;
 #[cfg(not(target_os = "windows"))]
 pub mod socket;
 #[cfg(target_os = "windows")]
@@ -34,12 +36,32 @@ pub mod socket;
 pub mod socket;
 pub mod types;
 
-#[cfg(target_os = "windows")]
-pub use socket::BrokerTargetProcess;
+pub use aipc_sdk::{
+    request_event, request_job_object, request_mutex, request_pipe, request_socket,
+    unsupported_platform_message, RawHandle, RawSocket,
+};
 pub use socket::SupervisorSocket;
+#[cfg(target_os = "windows")]
+pub use socket::{
+    bind_aipc_pipe, broker_event_to_process, broker_job_object_to_process, broker_mutex_to_process,
+    broker_pipe_to_process, broker_socket_to_process, broker_target_pid, BrokerTargetProcess,
+};
 pub use types::{
-    ApprovalDecision, AuditEntry, CapabilityRequest, GrantedResourceKind, ResourceGrant,
-    ResourceTransferKind, SupervisorMessage, SupervisorResponse, UrlOpenRequest,
+    ApprovalDecision,
+    AuditEntry,
+    CapabilityRequest,
+    GrantedResourceKind,
+    // Phase 18 additions:
+    HandleKind,
+    HandleTarget,
+    PipeDirection,
+    ResourceGrant,
+    ResourceTransferKind,
+    SocketProtocol,
+    SocketRole,
+    SupervisorMessage,
+    SupervisorResponse,
+    UrlOpenRequest,
 };
 
 use crate::error::Result;
@@ -131,6 +153,7 @@ mod tests {
         }
     }
 
+    #[allow(deprecated)]
     fn make_request() -> CapabilityRequest {
         CapabilityRequest {
             request_id: "test-001".to_string(),
@@ -140,6 +163,9 @@ mod tests {
             child_pid: 1234,
             session_id: "sess-001".to_string(),
             session_token: String::new(),
+            kind: crate::supervisor::types::HandleKind::File,
+            target: None,
+            access_mask: 0,
         }
     }
 

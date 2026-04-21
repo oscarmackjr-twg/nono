@@ -1,12 +1,12 @@
-# Roadmap: nono Windows Gap Closure
+# Roadmap: nono Windows Parity & Quality
 
-This roadmap tracks the path to full Windows/Unix parity for `nono`. The v2.0 milestone shipped 2026-04-18; Phase 15 is the first follow-on phase for the one carry-forward known issue.
+This roadmap tracks the path to full Windows/Unix parity and ongoing quality-of-life work for `nono`.
 
 ## Milestones
 
 - ✅ **v1.0 Windows Alpha** — Phases 1–4 (shipped 2026-03-31; tag `v1.0`)
-- ✅ **v2.0 Windows Gap Closure** — Phases 5–14 (shipped 2026-04-18 with v2.0-known-issue carry-forward; tag `v2.0`)
-- 🚧 **Next (unversioned; candidate v2.1)** — Phase 15 (detached console + ConPTY investigation)
+- ✅ **v2.0 Windows Gap Closure** — Phases 5–15 (shipped 2026-04-18; tag `v2.0`)
+- ✅ **v2.1 Resource Limits, Extended IPC, Attach-Streaming & Cleanup** — Phases 16–21 + 18.1 (shipped 2026-04-21; tag `v2.1`)
 
 ## Phases
 
@@ -14,14 +14,16 @@ This roadmap tracks the path to full Windows/Unix parity for `nono`. The v2.0 mi
 <summary>✅ v1.0 Windows Alpha (Phases 1–4) — SHIPPED 2026-03-31</summary>
 
 - [x] Phase 1: Windows Control Foundation (3/3 plans) — completed 2026-04-04
-- [x] Phase 2: Persistent Sessions — Detach/Attach (4/4 plans) — completed 2026-04-04
-- [x] Phase 3: Network Sandboxing — WFP Integration (4/4 plans) — completed 2026-04-04
+- [x] Phase 2: Persistent Sessions (4/4 plans) — completed 2026-04-04
+- [x] Phase 3: Network Sandboxing (4/4 plans) — completed 2026-04-04
 - [x] Phase 4: State Integrity & Deployment (3/3 plans) — completed 2026-04-05
+
+See `.planning/milestones/v1.0-*` if archived separately; the `v1.0` git tag points at the formal shipped state.
 
 </details>
 
 <details>
-<summary>✅ v2.0 Windows Gap Closure (Phases 5–14) — SHIPPED 2026-04-18 with carry-forward</summary>
+<summary>✅ v2.0 Windows Gap Closure (Phases 5–15) — SHIPPED 2026-04-18</summary>
 
 - [x] Phase 5: Windows Detach Readiness Fix (1/1 plan) — completed 2026-04-05
 - [x] Phase 6: WFP Enforcement Activation (2/2 plans) — completed 2026-04-06
@@ -31,22 +33,40 @@ This roadmap tracks the path to full Windows/Unix parity for `nono`. The v2.0 mi
 - [x] Phase 10: ETW-Based Learn Command (3/3 plans) — completed 2026-04-10
 - [x] Phase 11: Runtime Capability Expansion — stretch (2/2 plans) — completed 2026-04-11
 - [x] Phase 12: Milestone Bookkeeping Cleanup (3/3 plans) — completed 2026-04-11
-- [x] Phase 13: v2.0 Human Verification UAT (1/1 plan) — resolved 2026-04-18 (3 pass, 7 waived; all terminal)
-- [x] Phase 14: v2.0 Fix Pass (2/3 plans, 1 escalated) — complete-with-carry-forward 2026-04-18
+- [x] Phase 13: v2.0 Human Verification UAT (1/1 plan) — resolved 2026-04-18
+- [x] Phase 14: v2.0 Fix Pass (2/3 plans, 1 escalated to Phase 15) — complete-with-carry-forward 2026-04-18
+- [x] Phase 15: Detached Console + ConPTY Architecture Investigation (3/3 plans) — completed 2026-04-18
 
-Carry-forward → Phase 15: detached-console-grandchild `0xC0000142 STATUS_DLL_INIT_FAILED` bug. Affected UAT items P05-HV-1, P07-HV-3, P11-HV-1, P11-HV-3 waived as `v2.0-known-issue`. See `.planning/milestones/v2.0-ROADMAP.md` for the full v2.0 archive.
+Full details: `.planning/milestones/v2.0-ROADMAP.md`.
 
 </details>
 
-### 🚧 Next — candidate v2.1
+<details>
+<summary>✅ v2.1 Resource Limits, Extended IPC, Attach-Streaming & Cleanup (Phases 16–21 + 18.1) — SHIPPED 2026-04-21</summary>
 
-- [ ] **Phase 15: Detached Console + ConPTY Architecture Investigation** — Deliver either (a) a working token + ConPTY configuration for sandboxed console grandchildren spawned under a `DETACHED_PROCESS` supervisor, or (b) a documented architectural pivot (e.g. gated PTY-disable in detached mode, alternate detached IPC) with explicit functional trade-offs captured. Unblocks Phase 14 closure and the 4 Phase 13 UAT items carried forward as `v2.0-known-issue`.
+- [x] Phase 16: Resource Limits — RESL-01..04 (2/2 plans) — completed 2026-04-18
+- [x] Phase 17: Attach-Streaming — ATCH-01 (2/2 plans) — completed 2026-04-19
+- [x] Phase 18: Extended IPC — AIPC-01 (4/4 plans) — completed 2026-04-19
+- [x] Phase 18.1: Extended IPC Gap Closure (4/4 plans) — completed 2026-04-21
+- [x] Phase 19: Cleanup — CLEAN-01..04 (4/4 plans) — completed 2026-04-19
+- [x] Phase 20: Upstream Parity Sync — UPST-01..04 (4/4 plans) — completed 2026-04-19
+- [x] Phase 21: Windows Single-File Filesystem Grants — WSFG-01..03 (5/5 plans) — completed-with-issues 2026-04-20 (supervisor-pipe regression surfaced + resolved 2026-04-20; Phase 18.1 closed the 5 AIPC UAT gaps)
 
-  **Depends on:** Phase 14 paused state; `.planning/debug/windows-supervised-exec-cascade.md` test matrix; `.planning/phases/14-v1-fix-pass/14-01-SUMMARY.md` post-mortem.
+Full details: `.planning/milestones/v2.1-ROADMAP.md`.
 
-  **Scope context:** Phase 14 plan 14-01 established empirically that the ONE working detached-mode configuration is `null token + no PTY`. The three paths tried in 14-01 (TokenGroups promotion, AllocConsole, null token with PTY still live) all failed the smoke gate. Fully matching the working row requires architecture changes to PTY wiring in `crates/nono-cli/src/supervised_runtime.rs` and the ConPTY attribute setup in `spawn_windows_child`.
+</details>
 
-  **Plans:** TBD during `/gsd-plan-phase 15` (likely 1–2 plans: investigation + fix).
+### 📋 v2.2 (not yet scoped)
+
+No phases locked. Candidate focus areas surfaced during v2.1 — see `.planning/PROJECT.md § Next Milestone Goals`:
+
+- WR-01 reject-stage unification across all 5 AIPC HandleKinds (currently Event/Mutex/JobObject reject BEFORE prompt; Pipe/Socket reject AFTER).
+- AIPC G-04 wire-protocol compile-time tightening (`Approved(ResourceGrant)` inline; removes child SDK demultiplexer branch).
+- Cross-platform RESL Unix backends (cgroup v2 `cpu.max` / `memory.max` / `pids.max`; macOS equivalents).
+- WR-02 EDR HUMAN-UAT item (deferred to v3.0; needs EDR-instrumented runner).
+- Merge `windows-squash` branch to `main`.
+
+Run `/gsd-new-milestone` to scope the next milestone.
 
 ## Progress Table
 
@@ -64,6 +84,13 @@ Carry-forward → Phase 15: detached-console-grandchild `0xC0000142 STATUS_DLL_I
 | 10. ETW-Based Learn Command | v2.0 | 3/3 | Complete | 2026-04-10 |
 | 11. Runtime Capability Expansion | v2.0 | 2/2 | Complete | 2026-04-11 |
 | 12. Milestone Bookkeeping Cleanup | v2.0 | 3/3 | Complete | 2026-04-11 |
-| 13. Human Verification UAT | v2.0 | 1/1 | Resolved (2nd-pass 2026-04-18 — 3 pass, 7 waived incl. 4 v2.0-known-issue) | 2026-04-18 |
-| 14. Fix Pass | v2.0 | 2/3 | Complete with carry-forward (14-02 done; 14-03 done; 14-01 escalated to Phase 15) | 2026-04-18 |
-| 15. Detached Console + ConPTY Architecture Investigation | v2.1 (candidate) | 0/0 | Not Planned (run `/gsd-plan-phase 15` to start) | - |
+| 13. v2.0 Human Verification UAT | v2.0 | 1/1 | Resolved | 2026-04-18 |
+| 14. v2.0 Fix Pass | v2.0 | 2/3 | Complete-with-carry-forward | 2026-04-18 |
+| 15. Detached Console + ConPTY Investigation | v2.0 | 3/3 | Complete | 2026-04-18 |
+| 16. Resource Limits (RESL) | v2.1 | 2/2 | Complete | 2026-04-18 |
+| 17. Attach-Streaming (ATCH) | v2.1 | 2/2 | Complete | 2026-04-19 |
+| 18. Extended IPC (AIPC) | v2.1 | 4/4 | Complete | 2026-04-19 |
+| 18.1. Extended IPC Gap Closure | v2.1 | 4/4 | Complete | 2026-04-21 |
+| 19. Cleanup (CLEAN) | v2.1 | 4/4 | Complete | 2026-04-19 |
+| 20. Upstream Parity Sync (UPST) | v2.1 | 4/4 | Complete | 2026-04-19 |
+| 21. Windows Single-File Grants (WSFG) | v2.1 | 5/5 | Complete-with-issues (supervisor-pipe regression resolved in-flight; HUMAN-UAT folded into Phase 18.1) | 2026-04-20 |

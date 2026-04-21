@@ -15,10 +15,123 @@
 //! This module handles signing operations only. Key storage and retrieval
 //! from the system keystore is a CLI concern. The library accepts key
 //! material in PKCS#8 DER format.
+//!
+//! # Keyless Signing: OIDC Issuer Pinning
+//!
+//! Keyless signing flows (GitHub ID tokens, GitLab ID tokens) rely on an
+//! `oidc_issuer` URL in the signing predicate. The `validate_oidc_issuer`
+//! function provides a fail-closed, URL-component-level comparison against
+//! a configured issuer pin — guarding against the `string-prefix-match`
+//! anti-pattern (CLAUDE.md § Common Footguns #1). The fork's GitHub +
+//! GitLab trust paths (`crates/nono-cli/src/trust_cmd.rs`) may call this
+//! helper to verify issuer authenticity prior to publishing a signature.
 
 use crate::error::{NonoError, Result};
 use crate::trust::dsse;
 use std::path::Path;
+
+// ---------------------------------------------------------------------------
+// OIDC issuer validation (D-11 upstream parity port — GitLab ID tokens)
+// ---------------------------------------------------------------------------
+
+/// Validate a token's `iss` claim against a configured issuer pin with
+/// URL-component equality. Returns `Ok(())` only when the scheme, host,
+/// and port match exactly.
+///
+/// # Security rationale
+///
+/// Using `string-prefix-match` (string prefix matching) would allow
+/// `https://gitlab.com.evil.example/` to pass validation against a pin of
+/// `https://gitlab.com/` (CLAUDE.md § Common Footguns #1). Parsing both
+/// sides through `url::Url::parse` and comparing structured components
+/// closes this path-traversal analog for URLs.
+///
+/// Per CLAUDE.md § Fail Secure: on any parsing failure or mismatch this
+/// returns `NonoError::ConfigParse` with a description; callers MUST treat
+/// any non-`Ok` return as a rejection and refuse to emit a signature.
+///
+/// Paths, query strings, and fragments are intentionally ignored — an
+/// OIDC issuer identity is scheme+authority, not a specific endpoint
+/// URI. Upstream GitLab tokens carry `https://gitlab.com` as `iss`, not
+/// `https://gitlab.com/.well-known/openid-configuration`.
+///
+/// # Examples
+///
+/// ```no_run
+/// use nono::trust::signing::validate_oidc_issuer;
+///
+/// // Exact match — accepted.
+/// assert!(validate_oidc_issuer("https://gitlab.com", "https://gitlab.com").is_ok());
+///
+/// // Prefix-match attack — rejected.
+/// assert!(
+///     validate_oidc_issuer("https://gitlab.com.evil.example", "https://gitlab.com").is_err()
+/// );
+///
+/// // Port mismatch — rejected.
+/// assert!(validate_oidc_issuer(
+///     "https://gitlab.example.com:8443",
+///     "https://gitlab.example.com"
+/// )
+/// .is_err());
+/// ```
+///
+/// # Errors
+///
+/// Returns `NonoError::ConfigParse` when:
+/// - Either URL fails to parse
+/// - Scheme differs
+/// - Host differs (case-insensitive comparison, per RFC 3986)
+/// - Explicit port differs
+pub fn validate_oidc_issuer(iss: &str, pin: &str) -> Result<()> {
+    // CLAUDE.md § Common Footguns #1: NEVER use `string-prefix-match` for
+    // URL comparison. The url::Url::parse component-level check below is
+    // the authoritative fail-closed comparison.
+    let iss_url = url::Url::parse(iss).map_err(|e| {
+        NonoError::ConfigParse(format!("OIDC issuer URL '{iss}' is not a valid URL: {e}"))
+    })?;
+    let pin_url = url::Url::parse(pin).map_err(|e| {
+        NonoError::ConfigParse(format!("OIDC issuer pin '{pin}' is not a valid URL: {e}"))
+    })?;
+
+    if iss_url.scheme() != pin_url.scheme() {
+        return Err(NonoError::ConfigParse(format!(
+            "OIDC issuer scheme mismatch: token iss='{iss}' pin='{pin}' \
+             (scheme '{iss_scheme}' != '{pin_scheme}')",
+            iss_scheme = iss_url.scheme(),
+            pin_scheme = pin_url.scheme(),
+        )));
+    }
+    if iss_url.host_str() != pin_url.host_str() {
+        return Err(NonoError::ConfigParse(format!(
+            "OIDC issuer host mismatch: token iss='{iss}' pin='{pin}' \
+             (host {iss_host:?} != {pin_host:?}). \
+             Rejected prefix-match attack (CLAUDE.md § Common Footguns #1).",
+            iss_host = iss_url.host_str(),
+            pin_host = pin_url.host_str(),
+        )));
+    }
+    if iss_url.port() != pin_url.port() {
+        return Err(NonoError::ConfigParse(format!(
+            "OIDC issuer port mismatch: token iss='{iss}' pin='{pin}' \
+             (port {iss_port:?} != {pin_port:?})",
+            iss_port = iss_url.port(),
+            pin_port = pin_url.port(),
+        )));
+    }
+    Ok(())
+}
+
+/// Canonical GitLab.com OIDC issuer URL — the default pin for GitLab-SaaS
+/// keyless signing flows (upstream v0.35 ab5a064). Self-managed GitLab
+/// instances use their own host (e.g. `https://gitlab.example.com`),
+/// which callers should pin explicitly rather than defaulting.
+pub const GITLAB_COM_OIDC_ISSUER: &str = "https://gitlab.com";
+
+/// Canonical GitHub Actions OIDC issuer URL — the default pin for GitHub
+/// Actions keyless signing (Fulcio accepts this issuer). Matches upstream
+/// Sigstore `Fulcio`'s default OIDC issuer list.
+pub const GITHUB_ACTIONS_OIDC_ISSUER: &str = "https://token.actions.githubusercontent.com";
 
 // Re-export sigstore-crypto signing types
 pub use sigstore_verify::crypto::signing::{KeyPair, SigningScheme};
@@ -850,5 +963,129 @@ mod tests {
     fn base64_decode(input: &str) -> Vec<u8> {
         use sigstore_verify::types::PayloadBytes;
         PayloadBytes::from_base64(input).unwrap().into_bytes()
+    }
+
+    // -----------------------------------------------------------------------
+    // OIDC issuer validation (D-11 upstream parity port — GitLab ID tokens)
+    //
+    // Mirrors upstream's GitHub coverage. The prefix-match regression guard
+    // (test_gitlab_id_token_rejects_prefix_matched_issuer) explicitly checks
+    // that `https://gitlab.evil.com/` is REJECTED when the pin is
+    // `https://gitlab.com/`, guarding against the `string-prefix-match`
+    // anti-pattern (CLAUDE.md § Common Footguns #1).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_gitlab_id_token_happy_path() {
+        // Mirrors upstream's GitHub happy-path: a GitLab.com-issued token
+        // matches the canonical GitLab pin. This is the positive case the
+        // issuer-pin check must not reject.
+        let token_iss = "https://gitlab.com";
+        assert!(validate_oidc_issuer(token_iss, GITLAB_COM_OIDC_ISSUER).is_ok());
+    }
+
+    #[test]
+    fn test_gitlab_id_token_self_managed_happy_path() {
+        // Self-managed GitLab instances use their own hostname. The pin must
+        // match exactly — there is no wildcard or suffix logic.
+        let pin = "https://gitlab.example.com";
+        let iss = "https://gitlab.example.com";
+        assert!(validate_oidc_issuer(iss, pin).is_ok());
+    }
+
+    #[test]
+    fn test_gitlab_id_token_rejects_wrong_issuer() {
+        // A token whose issuer does NOT match the pin returns an error.
+        // `matches!` assertion (structural) — not a string match on the
+        // error text (which can drift with message edits).
+        let iss = "https://gitlab.example.com";
+        let pin = GITLAB_COM_OIDC_ISSUER; // https://gitlab.com
+        let err = validate_oidc_issuer(iss, pin).expect_err("must reject wrong issuer");
+        assert!(
+            matches!(err, NonoError::ConfigParse(_)),
+            "unexpected error variant: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_gitlab_id_token_rejects_prefix_matched_issuer() {
+        // EXPLICIT regression guard against the `string-prefix-match`
+        // anti-pattern (CLAUDE.md § Common Footguns #1). If a future
+        // refactor loses URL-component equality and regresses to string
+        // prefix matching, this test must fail.
+        //
+        // Hostile issuer: `https://gitlab.com.evil.example` starts with
+        // `https://gitlab.com` under string comparison but is a different
+        // host under URL-component equality.
+        let pin = GITLAB_COM_OIDC_ISSUER; // https://gitlab.com
+        let hostile = "https://gitlab.com.evil.example";
+        let err = validate_oidc_issuer(hostile, pin)
+            .expect_err("prefix-matched hostile issuer must be rejected");
+        assert!(
+            matches!(err, NonoError::ConfigParse(_)),
+            "unexpected error variant: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_gitlab_id_token_rejects_malformed_token() {
+        // Malformed issuer URL returns an error. Each of these inputs
+        // fails url::Url::parse (no scheme, garbage, empty) so validator
+        // rejects with ConfigParse.
+        let pin = GITLAB_COM_OIDC_ISSUER;
+        for bad in ["", "not a url", "://missing-scheme"] {
+            let result = validate_oidc_issuer(bad, pin);
+            assert!(
+                matches!(result, Err(NonoError::ConfigParse(_))),
+                "malformed token issuer {bad:?} must return ConfigParse error; got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_gitlab_id_token_rejects_scheme_mismatch() {
+        // Upgrade-downgrade attack: http token with https pin. Schemes
+        // must match exactly.
+        let pin = "https://gitlab.com";
+        let http_iss = "http://gitlab.com";
+        assert!(matches!(
+            validate_oidc_issuer(http_iss, pin),
+            Err(NonoError::ConfigParse(_))
+        ));
+    }
+
+    #[test]
+    fn test_gitlab_id_token_rejects_port_mismatch() {
+        // Port mismatch attack: self-managed instance on custom port vs
+        // pin on default port.
+        let pin = "https://gitlab.example.com";
+        let port_iss = "https://gitlab.example.com:8443";
+        assert!(matches!(
+            validate_oidc_issuer(port_iss, pin),
+            Err(NonoError::ConfigParse(_))
+        ));
+    }
+
+    #[test]
+    fn test_github_id_token_happy_path() {
+        // Parity with existing GitHub ID token trust path. If this fails
+        // without an intentional change to GITHUB_ACTIONS_OIDC_ISSUER the
+        // mirrored GitLab test coverage has drifted from the GitHub path.
+        assert!(validate_oidc_issuer(
+            "https://token.actions.githubusercontent.com",
+            GITHUB_ACTIONS_OIDC_ISSUER
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn test_github_id_token_rejects_prefix_attack() {
+        // Same regression guard applied to the GitHub pin — ensures the
+        // pin helper is provider-agnostic rather than GitLab-special-cased.
+        let hostile = "https://token.actions.githubusercontent.com.evil.example";
+        assert!(matches!(
+            validate_oidc_issuer(hostile, GITHUB_ACTIONS_OIDC_ISSUER),
+            Err(NonoError::ConfigParse(_))
+        ));
     }
 }

@@ -549,6 +549,25 @@ pub struct CapabilitySet {
     /// When set, the generated Seatbelt profile emits `(debug deny)` so
     /// sandboxd records denial events in the unified log.
     seatbelt_debug_deny: bool,
+    /// Grant the sandboxed process access to GPU devices.
+    ///
+    /// Cross-platform upstream parity port (upstream v0.31–0.34, D-12 + D-13):
+    ///
+    /// - **Linux (Landlock):** adds an allowlist for NVIDIA compute device
+    ///   nodes (`/dev/nvidia*`, `/dev/nvidiactl`, `/dev/nvidia-uvm`,
+    ///   `/dev/nvidia-uvm-tools`, `/dev/nvidia-caps`), DRM render nodes
+    ///   (`/dev/dri/renderD*`), AMD KFD (`/dev/kfd`), and NVIDIA procfs
+    ///   (`/proc/driver/nvidia`, `/proc/driver/nvidia-uvm`) required for
+    ///   CUDA initialisation under driver 570+. Gated by
+    ///   `cfg(target_os = "linux")` at the sandbox backend.
+    /// - **macOS (Seatbelt):** emits IOKit rules for Metal/AGX GPU user
+    ///   clients (`IOGPU`, `AGXDeviceUserClient`, `AGXSharedUserClient`,
+    ///   `IOSurfaceRootUserClient`) and `iokit-get-properties`.
+    /// - **Windows (WFP + Job Object):** accepted but not enforced. The
+    ///   CLI layer (`crates/nono-cli/src/cli.rs`) emits a `tracing::warn!`
+    ///   at flag-parse time. The sandbox backend is a no-op on Windows —
+    ///   `sandbox/windows.rs` never reads this field (D-21 invariant).
+    gpu: bool,
 }
 
 impl CapabilitySet {
@@ -725,6 +744,24 @@ impl CapabilitySet {
         self
     }
 
+    /// Grant GPU access to the sandboxed process (builder pattern).
+    ///
+    /// Upstream parity port D-12 (v0.31–0.33) + D-13 (v0.34):
+    ///
+    /// - **Linux (Landlock):** allowlists NVIDIA device nodes, NVIDIA
+    ///   procfs entries, DRM render nodes, and AMD KFD.
+    /// - **macOS (Seatbelt):** emits IOKit Metal/AGX GPU user-client rules.
+    /// - **Windows:** accepted but not enforced (D-21 invariant — the CLI
+    ///   layer emits a `tracing::warn!`; the sandbox backend is a no-op).
+    ///
+    /// Default is `false`. Granted only when the caller (typically the
+    /// `--allow-gpu` CLI flag) explicitly opts in.
+    #[must_use]
+    pub fn allow_gpu(mut self) -> Self {
+        self.gpu = true;
+        self
+    }
+
     /// Add a command to the allow list (builder pattern)
     ///
     /// Allowed commands override any blocklist. This is primarily for CLI use.
@@ -818,6 +855,13 @@ impl CapabilitySet {
     /// Enable or disable macOS Seatbelt denial logging.
     pub fn set_seatbelt_debug_deny(&mut self, enabled: bool) {
         self.seatbelt_debug_deny = enabled;
+    }
+
+    /// Enable or disable GPU access (mutable).
+    ///
+    /// See [`CapabilitySet::allow_gpu`] for the per-platform semantics.
+    pub fn set_gpu(&mut self, enabled: bool) {
+        self.gpu = enabled;
     }
 
     /// Add to allowed commands list
@@ -945,6 +989,17 @@ impl CapabilitySet {
     #[must_use]
     pub fn seatbelt_debug_deny(&self) -> bool {
         self.seatbelt_debug_deny
+    }
+
+    /// Check whether GPU access is granted.
+    ///
+    /// Inspected by the Linux Landlock backend (emits NVIDIA + DRM + AMD
+    /// device-node rules) and the macOS Seatbelt backend (emits IOKit
+    /// Metal/AGX rules). Windows backend ignores this field by design —
+    /// the `--allow-gpu` warning is emitted at the CLI layer (D-21).
+    #[must_use]
+    pub fn gpu(&self) -> bool {
+        self.gpu
     }
 
     /// Get allowed commands
@@ -2038,5 +2093,61 @@ mod tests {
         assert_eq!(removed, 1);
         assert_eq!(caps.fs_capabilities().len(), 1);
         assert!(!caps.fs_capabilities()[0].is_file);
+    }
+
+    // GPU capability (D-12 upstream parity port).
+    //
+    // These tests verify the CapabilitySet builder surface only. Per-platform
+    // sandbox-backend behavior is exercised in the backend modules'
+    // (`sandbox::linux`, `sandbox::macos`) unit tests.
+
+    #[test]
+    fn test_gpu_default_is_false() {
+        let caps = CapabilitySet::new();
+        assert!(
+            !caps.gpu(),
+            "GPU must be opt-in; default CapabilitySet must not grant GPU access"
+        );
+    }
+
+    #[test]
+    fn test_allow_gpu_builder_sets_flag() {
+        let caps = CapabilitySet::new().allow_gpu();
+        assert!(caps.gpu());
+    }
+
+    #[test]
+    fn test_set_gpu_toggles_flag() {
+        let mut caps = CapabilitySet::new();
+        assert!(!caps.gpu());
+        caps.set_gpu(true);
+        assert!(caps.gpu());
+        caps.set_gpu(false);
+        assert!(!caps.gpu());
+    }
+
+    #[test]
+    fn test_allow_gpu_does_not_affect_other_capabilities() {
+        // T-20-04-01 mitigation: turning on GPU must not silently broaden
+        // any other sandbox dimension (network, signals, commands, etc.).
+        let baseline = CapabilitySet::new();
+        let with_gpu = CapabilitySet::new().allow_gpu();
+
+        assert_eq!(baseline.network_mode(), with_gpu.network_mode());
+        assert_eq!(baseline.signal_mode(), with_gpu.signal_mode());
+        assert_eq!(baseline.process_info_mode(), with_gpu.process_info_mode());
+        assert_eq!(baseline.ipc_mode(), with_gpu.ipc_mode());
+        assert_eq!(baseline.is_network_blocked(), with_gpu.is_network_blocked());
+        assert_eq!(
+            baseline.fs_capabilities().len(),
+            with_gpu.fs_capabilities().len()
+        );
+        assert_eq!(baseline.allowed_commands(), with_gpu.allowed_commands());
+        assert_eq!(baseline.blocked_commands(), with_gpu.blocked_commands());
+        assert_eq!(baseline.extensions_enabled(), with_gpu.extensions_enabled());
+        assert_eq!(
+            baseline.seatbelt_debug_deny(),
+            with_gpu.seatbelt_debug_deny()
+        );
     }
 }

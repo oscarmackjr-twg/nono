@@ -1,6 +1,6 @@
 [package]
 name = "nono"
-version = "0.30.1"
+version = "0.37.1"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -25,6 +25,9 @@ ignore.workspace = true
 globset.workspace = true
 regress = "0.11"
 
+# URL component parsing for fail-closed OIDC issuer pinning (D-11 / T-20-04-03)
+url.workspace = true
+
 # Unix socket IPC for supervisor
 libc = "0.2"
 
@@ -32,7 +35,7 @@ libc = "0.2"
 keyring = "3"
 
 # Sigstore bundle verification
-sigstore-verify = { version = "0.6", default-features = false }
+sigstore-verify = { version = "0.6.5", default-features = false, features = ["tuf"] }
 x509-cert = { version = "0.2", default-features = false }
 der = { version = "0.7", default-features = false }
 
@@ -46,7 +49,7 @@ nix = { version = "0.31.2", features = ["fs", "user"] }
 keyring = { version = "3", features = ["apple-native"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_SystemServices", "Win32_System_Threading", "Wdk_System_SystemServices", "Win32_System_SystemInformation"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Networking_WinSock", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_SystemServices", "Win32_System_Threading", "Wdk_System_SystemServices", "Win32_System_SystemInformation"] }
 
 [build-dependencies]
 typify = "0.6"
@@ -57,3 +60,4 @@ prettyplease = "0.2"
 [dev-dependencies]
 tempfile.workspace = true
 jsonschema = "0.45"
+tokio = { version = "1", features = ["rt", "macros"] }

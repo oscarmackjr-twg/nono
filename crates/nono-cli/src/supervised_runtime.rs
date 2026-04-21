@@ -1,5 +1,6 @@
 use crate::launch_runtime::{
-    ProxyLaunchOptions, RollbackLaunchOptions, SessionLaunchOptions, TrustLaunchOptions,
+    ProxyLaunchOptions, ResourceLimits, RollbackLaunchOptions, SessionLaunchOptions,
+    TrustLaunchOptions,
 };
 #[cfg(not(target_os = "windows"))]
 use crate::protected_paths;
@@ -30,6 +31,21 @@ pub(crate) struct SupervisedRuntimeContext<'a> {
     pub(crate) proxy: &'a ProxyLaunchOptions,
     pub(crate) proxy_handle: Option<&'a nono_proxy::server::ProxyHandle>,
     pub(crate) silent: bool,
+    /// Resource limits (CPU / memory / timeout / process-count) populated from
+    /// `ExecutionFlags.resource_limits`. On Windows, Task 2 of Plan 16-01 will
+    /// consume these via `apply_resource_limits`; Plan 16-02 Task 1 uses the
+    /// `timeout` field for the supervisor-side wall-clock timer. On Unix this
+    /// is read only by `warn_unix_resource_limits` at run start.
+    pub(crate) resource_limits: &'a ResourceLimits,
+    /// Plan 18.1-03 G-06: the loaded profile (if any) that resolves the
+    /// per-handle-type AIPC allowlist widening. `None` means no profile →
+    /// the Windows supervisor uses the hard-coded D-05 defaults only. This
+    /// enables `nono run --profile <widened>` to actually consume the
+    /// widened `capabilities.aipc` allowlist end-to-end at request-dispatch
+    /// time. Unused on non-Windows per D-21 (kept non-cfg-gated so the
+    /// cross-platform caller `execution_runtime.rs` does not need a
+    /// conditional struct-literal).
+    pub(crate) loaded_profile: Option<&'a crate::profile::Profile>,
 }
 
 fn build_supervisor_session_id(audit_state: Option<&AuditState>) -> String {
@@ -68,11 +84,30 @@ fn create_trust_interceptor(
     }
 }
 
+/// Determine whether the supervised session should allocate a ConPTY/PTY pair.
+///
+/// Non-Windows: allocate when detached-start is requested (so the supervisor owns
+/// a PTY the child writes into for `nono attach`) or when the caller asked for an
+/// interactive PTY (`nono shell`).
+///
+/// Windows: allocate only for interactive sessions (`nono shell`). Detached supervisors
+/// on Windows must not allocate a `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` because combining
+/// it with `DETACHED_PROCESS` causes console-application grandchildren to exit with
+/// `STATUS_DLL_INIT_FAILED (0xC0000142)`. See `.planning/debug/resolved/windows-supervised-exec-cascade.md`.
+fn should_allocate_pty(session: &SessionLaunchOptions) -> bool {
+    if cfg!(target_os = "windows") {
+        session.interactive_pty
+    } else {
+        session.detached_start || session.interactive_pty
+    }
+}
+
 fn create_session_runtime_state(
     command: &[String],
     caps: &CapabilitySet,
     session: &SessionLaunchOptions,
     audit_state: Option<&AuditState>,
+    resource_limits: &crate::launch_runtime::ResourceLimits,
 ) -> Result<SessionRuntimeState> {
     let started = chrono::Local::now().to_rfc3339();
     let short_session_id = std::env::var(DETACHED_SESSION_ID_ENV)
@@ -112,9 +147,10 @@ fn create_session_runtime_state(
             None
         },
         rollback_session: audit_state.map(|state| state.session_id.clone()),
+        limits: session::ResourceLimitsRecord::from_resource_limits(resource_limits),
     };
     let session_guard = Some(session::SessionGuard::new(session_record)?);
-    let pty_pair = if session.detached_start || session.interactive_pty {
+    let pty_pair = if should_allocate_pty(session) {
         Some(pty_proxy::open_pty()?)
     } else {
         None
@@ -140,7 +176,32 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
         proxy,
         proxy_handle,
         silent,
+        resource_limits,
+        loaded_profile,
     } = ctx;
+
+    // Plan 18.1-03 G-06 wiring: UNION the hard-coded D-05 defaults with the
+    // loaded profile's `capabilities.aipc` widening. No profile → pure
+    // default (byte-identical to pre-fix behavior). `?` propagates
+    // `NonoError::ProfileParse` if an unknown widening token reaches
+    // runtime re-validation (should be prevented by
+    // `validate_profile_aipc_tokens` at parse time — belt-and-braces
+    // idempotent revalidation). The result is cheap to clone and is
+    // consumed by the Windows `SupervisorConfig` literal below.
+    let aipc_allowlist = match loaded_profile {
+        Some(profile) => profile.resolve_aipc_allowlist()?,
+        None => crate::profile::AipcResolvedAllowlist::default(),
+    };
+    // Silence unused warning on non-Windows where the field is not consumed
+    // yet (D-21 Windows-only). The resolution call above still runs for its
+    // `?` validation side-effect — cheap and consistent across platforms.
+    #[cfg(not(target_os = "windows"))]
+    let _ = &aipc_allowlist;
+
+    // Emit per-flag "not enforced on this platform" warnings on Unix before any
+    // spawn work. On Windows this is a no-op — Task 2 of Plan 16-01 applies the
+    // kernel limits via `apply_resource_limits` inside `spawn_windows_child`.
+    exec_strategy::warn_unix_resource_limits(resource_limits, silent);
 
     output::print_applying_sandbox(silent);
 
@@ -211,11 +272,30 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
         interactive_shell: session.interactive_pty && !session.detached_start,
         session_token: config.session_token.as_deref(),
         cap_pipe_rendezvous_path: config.cap_pipe_rendezvous_path.as_deref(),
+        // Debug session `supervisor-pipe-access-denied`: thread the same
+        // per-session restricting SID that `launch.rs` feeds into
+        // `CreateRestrictedToken(..., WRITE_RESTRICTED, ..., &session_sid, ...)`
+        // through to the capability pipe server's DACL so the child's
+        // second-pass access check succeeds.
+        session_sid: config.session_sid.clone(),
+        // Phase 18.1 Plan 18.1-03 G-06: live profile-resolved allowlist.
+        // UNION of hard-coded D-05 defaults with the loaded profile's
+        // `capabilities.aipc` widening (via `Profile::resolve_aipc_allowlist`).
+        // `None` profile → pure defaults (byte-identical pre-fix behavior).
+        // The dispatcher's per-kind helpers consult this at mask / role /
+        // direction validation time. End-to-end wiring closes G-06 and
+        // resolves Plan 18-03 Deferred Issue #1.
+        aipc_allowlist: aipc_allowlist.clone(),
     };
 
     let trust_interceptor = create_trust_interceptor(trust);
-    let session_runtime =
-        create_session_runtime_state(command, caps, session, audit_state.as_ref())?;
+    let session_runtime = create_session_runtime_state(
+        command,
+        caps,
+        session,
+        audit_state.as_ref(),
+        resource_limits,
+    )?;
     let SessionRuntimeState {
         started,
         short_session_id,
@@ -269,6 +349,7 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
                 &started,
                 silent,
                 rollback.prompt_disabled,
+                resource_limits,
             )?
         }
     };
@@ -277,4 +358,44 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
     }
 
     Ok(exit_code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_session(detached: bool, interactive: bool) -> SessionLaunchOptions {
+        SessionLaunchOptions {
+            detached_start: detached,
+            interactive_pty: interactive,
+            ..SessionLaunchOptions::default()
+        }
+    }
+
+    #[test]
+    fn interactive_sessions_always_allocate_pty() {
+        assert!(should_allocate_pty(&make_session(false, true)));
+        assert!(should_allocate_pty(&make_session(true, true)));
+    }
+
+    #[test]
+    fn non_detached_non_interactive_never_allocates_pty() {
+        assert!(!should_allocate_pty(&make_session(false, false)));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_detached_supervisor_does_not_allocate_pty() {
+        // Detached + non-interactive on Windows must skip PTY allocation to avoid
+        // PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE + DETACHED_PROCESS → 0xC0000142.
+        assert!(!should_allocate_pty(&make_session(true, false)));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn unix_detached_supervisor_allocates_pty() {
+        // Unix supervisors still open a PTY in detached mode so attach-side clients
+        // can read child output through the supervisor's PTY pair.
+        assert!(should_allocate_pty(&make_session(true, false)));
+    }
 }

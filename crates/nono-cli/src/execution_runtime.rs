@@ -94,6 +94,12 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
         cmd_args,
         mut caps,
         loaded_secrets,
+        // Plan 18.1-03 G-06: kept as owned local binding so downstream
+        // `SupervisedRuntimeContext.loaded_profile: Option<&Profile>`
+        // reference lives for the entire execute_sandboxed scope (which is
+        // also the process lifetime — execute_supervised_runtime does not
+        // return until the child exits, and the caller std::process::exit's).
+        loaded_profile,
         flags,
     } = plan;
     let rollback = &flags.rollback;
@@ -318,12 +324,18 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
         cap_pipe_rendezvous_path: Some(windows_cap_pipe_path.clone()),
     };
 
+    // Emit per-flag warnings for Unix builds when the Direct strategy is about
+    // to run. Supervised strategy emits its own warnings inside
+    // `execute_supervised_runtime`. Both call sites are no-ops on Windows.
+    exec_strategy::warn_unix_resource_limits(&flags.resource_limits, flags.silent);
+
     match strategy {
         exec_strategy::ExecStrategy::Direct => {
             #[cfg(target_os = "windows")]
             {
                 let exit_code = exec_strategy::execute_direct(
                     &config,
+                    &flags.resource_limits,
                     Some(flags.session.session_id.as_str()),
                 )?;
                 cleanup_capability_state_file(&cap_file_path);
@@ -349,6 +361,12 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
                 proxy,
                 proxy_handle: proxy_handle.as_ref(),
                 silent: flags.silent,
+                resource_limits: &flags.resource_limits,
+                // Plan 18.1-03 G-06: pass a reference to the owned
+                // `loaded_profile` binding so `execute_supervised_runtime`
+                // can call `Profile::resolve_aipc_allowlist()` at Windows
+                // `SupervisorConfig` construction time.
+                loaded_profile: loaded_profile.as_ref(),
             })?;
 
             cleanup_capability_state_file(&cap_file_path);

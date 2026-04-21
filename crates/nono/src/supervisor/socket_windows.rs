@@ -6,7 +6,9 @@
 //! plus `DuplicateHandle` into the child process.
 
 use crate::error::{NonoError, Result};
-use crate::supervisor::types::{ResourceGrant, SupervisorMessage, SupervisorResponse};
+use crate::supervisor::types::{
+    PipeDirection, ResourceGrant, SocketRole, SupervisorMessage, SupervisorResponse,
+};
 use getrandom::fill as random_fill;
 use sha2::{Digest, Sha256};
 use std::fs::File;
@@ -18,17 +20,27 @@ use windows_sys::Win32::Foundation::{
     DuplicateHandle, LocalFree, DUPLICATE_SAME_ACCESS, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY,
     ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
 };
-use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
-use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+use windows_sys::Win32::Networking::WinSock::{
+    WSADuplicateSocketW, INVALID_SOCKET, SOCKET, WSAPROTOCOL_INFOW,
+};
+use windows_sys::Win32::Security::Authorization::{
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+};
+use windows_sys::Win32::Security::{
+    GetTokenInformation, TokenGroups, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
+    SID_AND_ATTRIBUTES, TOKEN_GROUPS, TOKEN_QUERY,
+};
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
 };
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, CreatePipe, DisconnectNamedPipe,
     GetNamedPipeServerProcessId, WaitNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
-    PIPE_TYPE_BYTE, PIPE_WAIT,
+    PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
-use windows_sys::Win32::System::Threading::GetCurrentProcess;
+use windows_sys::Win32::System::SystemServices::SE_GROUP_LOGON_ID;
+use windows_sys::Win32::System::Threading::OpenProcessToken;
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId, GetProcessId};
 
 /// SDDL revision used by `ConvertStringSecurityDescriptorToSecurityDescriptorW`.
 const SDDL_REVISION_1: u32 = 1;
@@ -36,7 +48,53 @@ const SDDL_REVISION_1: u32 = 1;
 /// SDDL string for the capability pipe. Grants full access to SYSTEM, Built-in
 /// Administrators, and the owner; adds a mandatory integrity SACL allowing
 /// Low Integrity processes to write (`NW`) to the pipe.
+///
+/// This constant is used verbatim when the caller does NOT supply a per-session
+/// restricting SID (in-process tests, Phase 11 / Phase 18 AIPC pipe callers).
+/// When a per-session SID *is* supplied via
+/// [`SupervisorSocket::bind_low_integrity_with_session_sid`], two additional
+/// ACEs are appended before the SACL — together they allow a Phase 13
+/// `CreateRestrictedToken(WRITE_RESTRICTED, ..., &session_sid, ...)` child to
+/// pass BOTH DACL passes when opening the pipe with
+/// `GENERIC_READ | GENERIC_WRITE`. See [`build_capability_pipe_sddl`] for the
+/// full analysis.
 const CAPABILITY_PIPE_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)S:(ML;;NW;;;LW)";
+
+/// Access mask granted to the per-session restricting SID when one is supplied.
+///
+/// `FILE_GENERIC_READ | FILE_GENERIC_WRITE | SYNCHRONIZE` = `0x0012019F`:
+///   * `FILE_GENERIC_READ`  = `0x00120089` (`STANDARD_RIGHTS_READ`  | `FILE_READ_DATA`  | `FILE_READ_ATTRIBUTES`  | `FILE_READ_EA`  | `SYNCHRONIZE`)
+///   * `FILE_GENERIC_WRITE` = `0x00120116` (`STANDARD_RIGHTS_WRITE` | `FILE_WRITE_DATA` | `FILE_WRITE_ATTRIBUTES` | `FILE_WRITE_EA` | `FILE_APPEND_DATA` | `SYNCHRONIZE`)
+///   * union (including `SYNCHRONIZE` = `0x00100000`) = `0x0012019F`
+///
+/// **Critical: object-specific rights, NOT generic rights.**
+///
+/// SDDL mnemonic forms `GR` / `GW` / `GRGW` are stored verbatim in the DACL's
+/// ACE mask (as `GENERIC_READ` = `0x80000000` and `GENERIC_WRITE` =
+/// `0x40000000`). They are NOT expanded into object-specific rights at
+/// SD-conversion time — Windows only applies the object's generic mapping at
+/// access-check time. The mismatch between the child's access request
+/// (`CreateFileW(GENERIC_READ | GENERIC_WRITE)` → mapped to
+/// `FILE_GENERIC_READ | FILE_GENERIC_WRITE` = `0x12019F`) and the DACL's
+/// stored generic mask (`0xC0000000`) causes the access check to fail when
+/// the second DACL pass (against restricting SIDs) runs, because
+/// `0xC0000000 & 0x12019F == 0`.
+///
+/// The regression test
+/// `capability_pipe_admits_restricted_token_child_with_session_sid` walks the
+/// parsed DACL and asserts this ACE carries exactly `0x12019F` — that
+/// assertion would fail on any `G*` mnemonic. Auditors should read
+/// `.planning/debug/supervisor-pipe-access-denied.md` for the full analysis.
+const CAPABILITY_PIPE_RESTRICTING_SID_MASK: &str = "0x0012019F";
+
+/// Maximum accepted length for a session SID string when embedding in SDDL.
+///
+/// The synthetic SIDs produced by `generate_session_sid` in
+/// `nono-cli/src/exec_strategy_windows/restricted_token.rs` are
+/// `S-1-5-117-<u32>-<u32>-<u32>-<u32>` — well under 64 characters. 128 is a
+/// generous ceiling that still rejects pathological input (SDDL injection
+/// defense-in-depth alongside the character-class filter).
+const SESSION_SID_MAX_LEN: usize = 128;
 
 /// Length prefix size: 4 bytes (u32 big-endian)
 const LENGTH_PREFIX_SIZE: usize = 4;
@@ -100,7 +158,7 @@ impl SupervisorSocket {
 
     /// Bind a named pipe for the provided rendezvous path and wait for a client.
     pub fn bind(path: &Path) -> Result<Self> {
-        Self::bind_impl(path, false)
+        Self::bind_impl(path, false, None)
     }
 
     /// Bind a named pipe that accepts connections from Low Integrity processes.
@@ -111,15 +169,61 @@ impl SupervisorSocket {
     /// Built-in Administrators, and the owner) are preserved. On SDDL
     /// conversion failure this function fails secure — it does NOT fall back
     /// to a null security descriptor.
+    ///
+    /// Back-compat thin wrapper over
+    /// [`SupervisorSocket::bind_low_integrity_with_session_sid`] that forwards
+    /// `None` for the per-session restricting SID. The resulting SDDL is
+    /// byte-identical to the pre-fix [`CAPABILITY_PIPE_SDDL`] constant, so
+    /// in-process tests and Phase 18 AIPC pipe callers are unaffected.
     pub fn bind_low_integrity(path: &Path) -> Result<Self> {
-        Self::bind_impl(path, true)
+        Self::bind_low_integrity_with_session_sid(path, None)
     }
 
-    fn bind_impl(path: &Path, low_integrity: bool) -> Result<Self> {
+    /// Bind a Low-Integrity-accessible named pipe and, when a per-session
+    /// restricting SID is provided, attach an additional DACL ACE granting
+    /// `FILE_GENERIC_READ | FILE_GENERIC_WRITE | SYNCHRONIZE` to that SID.
+    ///
+    /// Phase 13 launches sandboxed children with
+    /// `CreateRestrictedToken(..., WRITE_RESTRICTED, ..., 1, &session_sid, ...)`
+    /// where `session_sid` is the synthetic per-session
+    /// `S-1-5-117-<guid>`. For any WRITE access (including `GENERIC_WRITE`
+    /// on `CreateFileW`) Windows performs the DACL check twice — once against
+    /// the child's normal SIDs, once against the restricting SID set. The
+    /// capability pipe's baseline DACL grants access only to SYSTEM,
+    /// BUILTIN\Administrators, and OWNER_RIGHTS; the restricting SID is
+    /// absent from every ACL on the system, so the second pass fails and
+    /// Windows returns `ERROR_ACCESS_DENIED` on the child's `CreateFileW`.
+    /// Passing `Some(&session_sid)` here appends
+    /// `(A;;0x120089;;;<session_sid>)` to the DACL so that second-pass check
+    /// succeeds.
+    ///
+    /// # Security (SDDL injection defense)
+    ///
+    /// The SID string is embedded into a dynamically constructed SDDL, which
+    /// makes it a direct injection surface. Before embedding, the SID is
+    /// validated via [`validate_session_sid_for_sddl`]: must begin with
+    /// `S-1-`, contain only ASCII digits and hyphens after the prefix, and
+    /// be no longer than [`SESSION_SID_MAX_LEN`]. Malformed input triggers a
+    /// fail-closed `NonoError::SandboxInit` error — this function does NOT
+    /// silently fall back to the no-SID SDDL path.
+    pub fn bind_low_integrity_with_session_sid(
+        path: &Path,
+        session_sid: Option<&str>,
+    ) -> Result<Self> {
+        Self::bind_impl(path, true, session_sid)
+    }
+
+    fn bind_impl(path: &Path, low_integrity: bool, session_sid: Option<&str>) -> Result<Self> {
         let (pipe_name, cleanup_rendezvous_path) = prepare_bind_pipe_name(path)?;
         let server_handle = if low_integrity {
-            create_low_integrity_named_pipe(&pipe_name)?
+            create_low_integrity_named_pipe(&pipe_name, session_sid)?
         } else {
+            // Non-low-integrity path has no restricting-SID DACL ACE — the
+            // caller does not expect Low-IL or restricted-token children.
+            debug_assert!(
+                session_sid.is_none(),
+                "session_sid is only meaningful on the low_integrity path"
+            );
             create_named_pipe(&pipe_name, false)?
         };
         if let Err(err) = write_pipe_rendezvous(path, &pipe_name) {
@@ -262,6 +366,46 @@ impl BrokerTargetProcess {
     fn raw(self) -> HANDLE {
         self.handle
     }
+
+    /// Return the OS-level PID for this target process.
+    ///
+    /// For [`BrokerTargetProcess::current()`] the underlying handle is the
+    /// pseudo-handle returned by `GetCurrentProcess`; `GetProcessId` resolves
+    /// it to the real PID. For wrapped process handles, `GetProcessId` returns
+    /// the target's PID. Returns 0 only when the underlying call fails (an
+    /// invalid handle), which the [`broker_target_pid`] free function falls
+    /// back to the current PID for safety.
+    ///
+    /// Phase 18 AIPC-01 Plan 18-02: required by the Socket broker so
+    /// `WSADuplicateSocketW(socket, target_pid, &mut info)` can bind the
+    /// resulting `WSAPROTOCOL_INFOW` blob to the correct process.
+    #[must_use]
+    pub fn pid(self) -> u32 {
+        // SAFETY: `self.handle` is either the GetCurrentProcess pseudo-handle
+        // (always valid) or a process HANDLE wrapped via from_raw_handle whose
+        // caller asserted liveness for the broker call. GetProcessId reads the
+        // PID from the kernel object the handle refers to and returns 0 on
+        // failure (no UB on bad handle — it just returns 0).
+        unsafe { GetProcessId(self.handle) }
+    }
+}
+
+/// Resolve the target PID for a brokered Socket request.
+///
+/// Wraps [`BrokerTargetProcess::pid`] with a fail-safe fallback to the current
+/// process's PID when `GetProcessId` returns 0 (e.g. when target is the
+/// pseudo-handle in test code). The Socket broker uses this in lieu of a
+/// caller-supplied PID for `WSADuplicateSocketW`.
+#[must_use]
+pub fn broker_target_pid(target: &BrokerTargetProcess) -> u32 {
+    let pid = target.pid();
+    if pid == 0 {
+        // SAFETY: GetCurrentProcessId is a leaf-safe Win32 call with no
+        // arguments; always returns the calling process's PID.
+        unsafe { GetCurrentProcessId() }
+    } else {
+        pid
+    }
 }
 
 /// Duplicate an opened file handle into the target process and describe it in
@@ -299,6 +443,342 @@ pub fn broker_file_handle_to_process(
         duplicated as usize as u64,
         access,
     ))
+}
+
+/// Duplicate a Windows event kernel-object handle into the target process
+/// with the caller-validated access `mask`.
+///
+/// Per CONTEXT.md D-10 (Phase 18 AIPC-01): the supervisor closes its source
+/// `handle` AFTER `send_response` returns; this function does NOT close the
+/// source handle. The child owns the duplicated handle and is responsible
+/// for closing it.
+///
+/// The mask is pre-validated by the caller against the per-session AIPC
+/// allowlist via `policy::mask_is_allowed`; this function trusts the mask
+/// and performs the FFI call.
+///
+/// The function is `safe` because the caller has already validated `handle`
+/// is a live event kernel-object handle owned by this process (the supervisor
+/// opened it via `CreateEventW`); `DuplicateHandle` itself is the only FFI
+/// the function performs and the unsafe contract for that call is documented
+/// inside.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub fn broker_event_to_process(
+    handle: HANDLE,
+    target_process: BrokerTargetProcess,
+    mask: u32,
+) -> Result<ResourceGrant> {
+    let mut duplicated: HANDLE = std::ptr::null_mut();
+    // SAFETY: `handle` is a live event kernel-object handle owned by the
+    // supervisor. `target_process.raw()` was wrapped from a live process
+    // handle. `duplicated` points to writable storage. `mask` was validated
+    // by the caller against the per-session allowlist via
+    // `policy::mask_is_allowed` before this call. `dwOptions = 0` (NOT
+    // DUPLICATE_SAME_ACCESS) because we MAP DOWN — the supervisor source
+    // may have full EVENT_ALL_ACCESS but the child only gets the validated
+    // subset (T-18-01-11 mitigation).
+    let ok = unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            handle,
+            target_process.raw(),
+            &mut duplicated,
+            mask,
+            0,
+            0,
+        )
+    };
+    if ok == 0 || duplicated.is_null() {
+        return Err(NonoError::SandboxInit(format!(
+            "DuplicateHandle (event, mask=0x{mask:08x}) failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(ResourceGrant::duplicated_windows_event_handle(
+        duplicated as usize as u64,
+        mask,
+    ))
+}
+
+/// Duplicate a Windows mutex kernel-object handle into the target process
+/// with the caller-validated access `mask`.
+///
+/// Per CONTEXT.md D-10 (Phase 18 AIPC-01): the supervisor closes its source
+/// `handle` AFTER `send_response` returns; this function does NOT close the
+/// source handle. The child owns the duplicated handle and is responsible
+/// for closing it.
+///
+/// The mask is pre-validated by the caller against the per-session AIPC
+/// allowlist via `policy::mask_is_allowed`; this function trusts the mask
+/// and performs the FFI call.
+///
+/// The function is `safe` because the caller has already validated `handle`
+/// is a live mutex kernel-object handle owned by this process (the supervisor
+/// opened it via `CreateMutexW`); `DuplicateHandle` itself is the only FFI
+/// the function performs and the unsafe contract for that call is documented
+/// inside.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub fn broker_mutex_to_process(
+    handle: HANDLE,
+    target_process: BrokerTargetProcess,
+    mask: u32,
+) -> Result<ResourceGrant> {
+    let mut duplicated: HANDLE = std::ptr::null_mut();
+    // SAFETY: `handle` is a live mutex kernel-object handle owned by the
+    // supervisor. `target_process.raw()` was wrapped from a live process
+    // handle. `duplicated` points to writable storage. `mask` was validated
+    // by the caller against the per-session allowlist via
+    // `policy::mask_is_allowed` before this call. `dwOptions = 0` (NOT
+    // DUPLICATE_SAME_ACCESS) because we MAP DOWN — the supervisor source
+    // may have full MUTEX_ALL_ACCESS but the child only gets the validated
+    // subset (T-18-01-11 mitigation).
+    let ok = unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            handle,
+            target_process.raw(),
+            &mut duplicated,
+            mask,
+            0,
+            0,
+        )
+    };
+    if ok == 0 || duplicated.is_null() {
+        return Err(NonoError::SandboxInit(format!(
+            "DuplicateHandle (mutex, mask=0x{mask:08x}) failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(ResourceGrant::duplicated_windows_mutex_handle(
+        duplicated as usize as u64,
+        mask,
+    ))
+}
+
+/// Duplicate a Windows Job Object handle into the target process with the
+/// caller-validated access `mask`.
+///
+/// Per CONTEXT.md D-05 footnote (Phase 18 AIPC-01): the supervisor MUST refuse
+/// to broker its own `containment_job` HANDLE regardless of profile widening or
+/// the access mask. That structural runtime guard lives in the dispatcher
+/// (`handle_job_object_request`) which uses `CompareObjectHandles`; this broker
+/// function trusts that guard has already fired BEFORE the call. The mask
+/// itself is pre-validated by the caller against the per-session AIPC
+/// allowlist via `policy::mask_is_allowed`.
+///
+/// Per CONTEXT.md D-10: caller closes the supervisor source AFTER
+/// `send_response` returns; this function does NOT close the source. The
+/// child owns the duplicated handle.
+///
+/// `dwOptions = 0` (NOT `DUPLICATE_SAME_ACCESS`) — must MAP DOWN. The supervisor
+/// opens the source Job Object with `JOB_OBJECT_ALL_ACCESS`; the child only
+/// receives the validated subset (T-18-03-01 mitigation).
+///
+/// The function is `safe` because the caller has already validated `handle`
+/// is a live Job Object HANDLE owned by this process and that it is NOT the
+/// supervisor's own containment Job (see `handle_job_object_request`);
+/// `DuplicateHandle` itself is the only FFI the function performs and the
+/// unsafe contract for that call is documented inside.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub fn broker_job_object_to_process(
+    handle: HANDLE,
+    target_process: BrokerTargetProcess,
+    mask: u32,
+) -> Result<ResourceGrant> {
+    let mut duplicated: HANDLE = std::ptr::null_mut();
+    // SAFETY: `handle` is a live Job Object HANDLE owned by the supervisor
+    // (opened via OpenJobObjectW in the dispatcher with JOB_OBJECT_ALL_ACCESS).
+    // The dispatcher additionally fired the containment-Job runtime guard
+    // (CompareObjectHandles against runtime.containment_job) BEFORE this call,
+    // so this HANDLE is guaranteed NOT to be the supervisor's own containment
+    // Job (T-18-03-01 mitigation). `target_process.raw()` was wrapped from a
+    // live process handle. `duplicated` points to writable storage. `mask`
+    // was pre-validated by the caller against the per-session allowlist via
+    // `policy::mask_is_allowed`. `dwOptions = 0` (NOT DUPLICATE_SAME_ACCESS)
+    // because we MAP DOWN — the supervisor source has JOB_OBJECT_ALL_ACCESS
+    // but the child only gets the validated subset (T-18-03-01 mitigation).
+    let ok = unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            handle,
+            target_process.raw(),
+            &mut duplicated,
+            mask,
+            0,
+            0, // dwOptions = 0 — MAP DOWN
+        )
+    };
+    if ok == 0 || duplicated.is_null() {
+        return Err(NonoError::SandboxInit(format!(
+            "DuplicateHandle (Job Object, mask=0x{mask:08x}) failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(ResourceGrant::duplicated_windows_job_object_handle(
+        duplicated as usize as u64,
+        mask,
+    ))
+}
+
+/// Duplicate a Windows named-pipe handle into the target process with access
+/// mapped DOWN from the supervisor source's `PIPE_ACCESS_DUPLEX` to the
+/// requested `direction`. The mask is `GENERIC_READ`, `GENERIC_WRITE`, or
+/// `GENERIC_READ | GENERIC_WRITE` per `direction`.
+///
+/// `dwOptions = 0` (NOT `DUPLICATE_SAME_ACCESS`) — must MAP DOWN. The supervisor
+/// source has full PIPE_ACCESS_DUPLEX and `DUPLICATE_SAME_ACCESS` would
+/// over-grant.
+///
+/// Per CONTEXT.md D-10 (Phase 18 AIPC-01): caller closes the supervisor source
+/// AFTER `send_response` returns; this function does NOT close the source.
+///
+/// The function is `safe` because the caller has already validated `handle` is
+/// a live named-pipe HANDLE owned by the supervisor (via [`bind_aipc_pipe`]);
+/// `DuplicateHandle` itself is the only FFI the function performs and the
+/// unsafe contract for that call is documented inside.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub fn broker_pipe_to_process(
+    handle: HANDLE,
+    target_process: BrokerTargetProcess,
+    direction: PipeDirection,
+) -> Result<ResourceGrant> {
+    let mask = match direction {
+        PipeDirection::Read => GENERIC_READ,
+        PipeDirection::Write => GENERIC_WRITE,
+        PipeDirection::ReadWrite => GENERIC_READ | GENERIC_WRITE,
+    };
+    let mut duplicated: HANDLE = std::ptr::null_mut();
+    // SAFETY: `handle` is a live pipe-end HANDLE owned by the supervisor
+    // (created via CreateNamedPipeW in `bind_aipc_pipe`).
+    // `target_process.raw()` was wrapped from a live process handle.
+    // `duplicated` points to writable storage. `mask` is derived from the
+    // validated direction enum. `dwOptions = 0` is critical: the supervisor
+    // source has full PIPE_ACCESS_DUPLEX and `DUPLICATE_SAME_ACCESS` would
+    // over-grant — we MAP DOWN to the requested direction.
+    let ok = unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            handle,
+            target_process.raw(),
+            &mut duplicated,
+            mask,
+            0,
+            0, // dwOptions = 0 — MAP DOWN
+        )
+    };
+    if ok == 0 || duplicated.is_null() {
+        return Err(NonoError::SandboxInit(format!(
+            "DuplicateHandle (pipe, mask=0x{mask:08x}) failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(ResourceGrant::duplicated_windows_pipe_handle(
+        duplicated as usize as u64,
+        direction,
+    ))
+}
+
+/// Serialize a supervisor-owned `SOCKET` into a `WSAPROTOCOL_INFOW` blob the
+/// target child process can consume via
+/// `WSASocketW(FROM_PROTOCOL_INFO, ...)`.
+///
+/// The blob is single-use and bound to `target_pid` at duplication time per
+/// the Microsoft API contract (RESEARCH Landmines § Socket).
+///
+/// Per CONTEXT.md D-10 + RESEARCH Landmines § Socket: caller closes the
+/// supervisor's source `SOCKET` via `closesocket(s)` AFTER `send_response`
+/// returns. If the supervisor exits before the child consumes the blob, the
+/// underlying socket is leaked (the kernel keeps the socket alive until ALL
+/// descriptors close, and the duplicated descriptor only materializes when
+/// the child calls `WSASocketW(FROM_PROTOCOL_INFO, ...)`).
+pub fn broker_socket_to_process(
+    socket: SOCKET,
+    _target_process: BrokerTargetProcess,
+    target_pid: u32,
+    role: SocketRole,
+) -> Result<ResourceGrant> {
+    if socket == INVALID_SOCKET {
+        return Err(NonoError::SandboxInit(
+            "WSADuplicateSocketW failed: source socket is INVALID_SOCKET".to_string(),
+        ));
+    }
+    // SAFETY: zeroing a POD struct is well-defined; `WSAPROTOCOL_INFOW` is a
+    // ~372-byte plain-old-data struct per the Microsoft API contract.
+    let mut proto_info: WSAPROTOCOL_INFOW = unsafe { std::mem::zeroed() };
+    // SAFETY: `socket` is a live SOCKET created by the supervisor with
+    // WSASocketW (validated as not INVALID_SOCKET above). `target_pid` is the
+    // validated child PID. `proto_info` points to writable 372-byte storage.
+    // WSADuplicateSocketW serializes the socket capability into proto_info;
+    // the result is single-use by the target PID.
+    let rc = unsafe { WSADuplicateSocketW(socket, target_pid, &mut proto_info) };
+    if rc != 0 {
+        return Err(NonoError::SandboxInit(format!(
+            "WSADuplicateSocketW failed (target_pid={target_pid}): {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    // Serialize the WSAPROTOCOL_INFOW struct to a Vec<u8> for wire transport.
+    // SAFETY: `proto_info` is a live POD struct; we read its bytes as an
+    // immutable byte slice of the struct's exact size (~372 bytes on x64).
+    let bytes: Vec<u8> = unsafe {
+        std::slice::from_raw_parts(
+            std::ptr::addr_of!(proto_info) as *const u8,
+            std::mem::size_of::<WSAPROTOCOL_INFOW>(),
+        )
+        .to_vec()
+    };
+    Ok(ResourceGrant::socket_protocol_info_blob(bytes, role))
+}
+
+/// Create a named pipe for AIPC broker handoff with Low Integrity SDDL
+/// (mirrors Phase 11 `CAPABILITY_PIPE_SDDL`). Returns the supervisor-side
+/// pipe `HANDLE` the dispatcher then duplicates into the child via
+/// [`broker_pipe_to_process`].
+///
+/// The pipe is created as `PIPE_ACCESS_DUPLEX` server-side; the broker maps
+/// the access DOWN to the requested direction at `DuplicateHandle` time, so
+/// the supervisor source can serve any direction the child requests. The
+/// `_direction` parameter is currently informational (kept in the signature
+/// for forward-compat audit enrichment).
+///
+/// `canonical_name` MUST be the server-canonicalized
+/// `\\.\pipe\nono-aipc-<user_session_id>-<sanitized_name>` shape per
+/// CONTEXT.md `<specifics>` line 168 — the caller is responsible for that
+/// canonicalization before reaching this helper.
+pub fn bind_aipc_pipe(canonical_name: &str, _direction: PipeDirection) -> Result<HANDLE> {
+    // AIPC pipes do not face WRITE_RESTRICTED + restricting-SID children; the
+    // target process is the child's own spawned AIPC peer which inherits the
+    // normal user token. The byte-identical pre-fix SDDL is correct here.
+    let (sa, _sd_guard) = build_low_integrity_security_attributes(None)?;
+    let wide_name = to_wide(canonical_name);
+
+    // SAFETY: `wide_name` is a valid null-terminated UTF-16 string with a
+    // lifetime that outlives the FFI call. `sa` carries a security descriptor
+    // owned by `_sd_guard` for the duration of this call. PIPE_ACCESS_DUPLEX
+    // with PIPE_UNLIMITED_INSTANCES is the standard server-side AIPC pipe
+    // shape so multiple AIPC capability requests can target distinct
+    // canonical names without competing for the single-instance slot the
+    // supervisor control pipe uses. Returned HANDLE is owned by the caller
+    // and must be closed via CloseHandle (caller's responsibility per D-10).
+    let handle: HANDLE = unsafe {
+        CreateNamedPipeW(
+            wide_name.as_ptr(),
+            PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+            PIPE_UNLIMITED_INSTANCES,
+            4096,
+            4096,
+            0,
+            &sa,
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE || handle.is_null() {
+        return Err(NonoError::SandboxInit(format!(
+            "CreateNamedPipeW(\"{canonical_name}\") failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(handle)
 }
 
 impl Drop for SupervisorSocket {
@@ -503,12 +983,238 @@ impl Drop for SecurityDescriptorGuard {
     }
 }
 
+/// Validate a per-session restricting SID string before embedding it in SDDL.
+///
+/// The SID is concatenated directly into an SDDL template, so any unexpected
+/// character (quote, parenthesis, semicolon, whitespace, NUL byte) could let a
+/// malicious or corrupted input subvert the resulting DACL. This function
+/// enforces a conservative allow-list matching the shape produced by
+/// `nono-cli`'s `generate_session_sid`:
+///
+/// - Non-empty, no longer than [`SESSION_SID_MAX_LEN`] characters.
+/// - Begins with ASCII `S-1-` (so `ConvertStringSidToSidW` will accept it and
+///   nothing else can prefix an alternate SDDL token).
+/// - Every byte after the `S-` prefix is an ASCII digit or `-`.
+///
+/// Returns an error on any violation — the caller MUST treat it as fatal and
+/// MUST NOT silently fall back to the no-SID SDDL path. Fail-closed is
+/// mandatory per CLAUDE.md § "Fail Secure".
+fn validate_session_sid_for_sddl(sid: &str) -> Result<()> {
+    if sid.is_empty() {
+        return Err(NonoError::SandboxInit(
+            "malformed session SID: empty string".to_string(),
+        ));
+    }
+    if sid.len() > SESSION_SID_MAX_LEN {
+        return Err(NonoError::SandboxInit(format!(
+            "malformed session SID: length {} exceeds maximum {}",
+            sid.len(),
+            SESSION_SID_MAX_LEN
+        )));
+    }
+    if !sid.starts_with("S-1-") {
+        return Err(NonoError::SandboxInit(format!(
+            "malformed session SID: must start with \"S-1-\" (got {sid:?})"
+        )));
+    }
+    // Character-class check on the tail (post `S-`): digits and hyphens only.
+    // `.bytes()` avoids any Unicode surprises — every accepted byte is ASCII.
+    let tail = &sid[2..];
+    for b in tail.bytes() {
+        if !(b.is_ascii_digit() || b == b'-') {
+            return Err(NonoError::SandboxInit(format!(
+                "malformed session SID: contains non-digit non-hyphen character (got {sid:?})"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Retrieve the current process's logon SID as a string (shape
+/// `S-1-5-5-X-Y`). The logon SID is unique per interactive logon session
+/// and is present on every token spawned within that session with the
+/// `SE_GROUP_LOGON_ID` attribute.
+///
+/// Used by [`build_capability_pipe_sddl`] to add a narrowly-scoped ACE to
+/// the capability pipe's DACL — narrower than `WD` (Everyone) or `AU`
+/// (Authenticated Users), narrower than the owning user SID (covers only
+/// the CURRENT logon session, not all processes of that user). See
+/// `.planning/debug/supervisor-pipe-access-denied.md` for the empirical
+/// access-check analysis.
+///
+/// # Errors
+///
+/// Fails (fail-closed) if the current process's token cannot be opened, if
+/// `TokenGroups` cannot be queried, if no group has the
+/// `SE_GROUP_LOGON_ID` attribute (would be a Windows invariant violation),
+/// or if the logon SID cannot be converted to its string form. On failure
+/// the caller MUST propagate the error — the capability pipe MUST NOT be
+/// bound without this ACE, as the WRITE_RESTRICTED child would silently
+/// fail to connect.
+fn current_logon_sid() -> Result<String> {
+    // Open the current process's token.
+    let mut token: HANDLE = std::ptr::null_mut();
+    let ok = unsafe {
+        // SAFETY: `GetCurrentProcess` returns a pseudo-handle. `token` is a
+        // writable out-pointer. On success we own the resulting token handle
+        // and release it before returning.
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)
+    };
+    if ok == 0 {
+        return Err(NonoError::SandboxInit(format!(
+            "OpenProcessToken for current logon SID failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    // SAFETY: `token` is a valid token handle owned by this function.
+    let token_owned = unsafe { OwnedHandle::from_raw_handle(token) };
+
+    // Query required buffer size for TokenGroups.
+    let mut needed: u32 = 0;
+    let _ = unsafe {
+        // SAFETY: first call with null buffer queries the required size.
+        GetTokenInformation(
+            token_owned.as_raw_handle() as HANDLE,
+            TokenGroups,
+            std::ptr::null_mut(),
+            0,
+            &mut needed,
+        )
+    };
+    if needed == 0 {
+        return Err(NonoError::SandboxInit(
+            "GetTokenInformation(TokenGroups) returned zero needed bytes".to_string(),
+        ));
+    }
+
+    let mut buf = vec![0u8; needed as usize];
+    let ok = unsafe {
+        // SAFETY: buf is sized from the probe above; token_owned is live.
+        GetTokenInformation(
+            token_owned.as_raw_handle() as HANDLE,
+            TokenGroups,
+            buf.as_mut_ptr() as *mut _,
+            needed,
+            &mut needed,
+        )
+    };
+    if ok == 0 {
+        return Err(NonoError::SandboxInit(format!(
+            "GetTokenInformation(TokenGroups) failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    // Walk the groups list; find the entry with SE_GROUP_LOGON_ID.
+    // SAFETY: TOKEN_GROUPS header is followed by GroupCount
+    // SID_AND_ATTRIBUTES entries. The buffer was sized by GetTokenInformation.
+    let groups = unsafe { &*(buf.as_ptr() as *const TOKEN_GROUPS) };
+    let count = groups.GroupCount as usize;
+    let base = std::ptr::addr_of!(groups.Groups) as *const SID_AND_ATTRIBUTES;
+    for i in 0..count {
+        // SAFETY: i is bounded by GroupCount; array sized correctly.
+        let entry = unsafe { &*base.add(i) };
+        if (entry.Attributes & SE_GROUP_LOGON_ID as u32) == 0 {
+            continue;
+        }
+        // Convert the SID to string form.
+        let mut sid_str_ptr: *mut u16 = std::ptr::null_mut();
+        let ok = unsafe {
+            // SAFETY: entry.Sid is a valid SID pointer from the token buffer.
+            // Output string must be freed via LocalFree.
+            ConvertSidToStringSidW(entry.Sid, &mut sid_str_ptr)
+        };
+        if ok == 0 || sid_str_ptr.is_null() {
+            return Err(NonoError::SandboxInit(format!(
+                "ConvertSidToStringSidW for logon SID failed: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        // Read the null-terminated UTF-16 string.
+        let mut len = 0usize;
+        // SAFETY: sid_str_ptr points to a null-terminated UTF-16 string
+        // allocated by ConvertSidToStringSidW.
+        while unsafe { *sid_str_ptr.add(len) } != 0 {
+            len += 1;
+        }
+        // SAFETY: len bytes below the null terminator are valid UTF-16.
+        let slice = unsafe { std::slice::from_raw_parts(sid_str_ptr, len) };
+        let sid_str = String::from_utf16_lossy(slice);
+        // SAFETY: sid_str_ptr was returned by ConvertSidToStringSidW above.
+        unsafe { LocalFree(sid_str_ptr as _) };
+
+        // Defense in depth: the logon SID is also concatenated into an SDDL
+        // template, so reject anything that's not a plain string-form SID.
+        // Every character in a string-form SID from Windows is ASCII digit
+        // / hyphen / the 'S' prefix, so the validator used for the session
+        // SID applies verbatim.
+        validate_session_sid_for_sddl(&sid_str)?;
+        return Ok(sid_str);
+    }
+
+    Err(NonoError::SandboxInit(
+        "current process token has no SE_GROUP_LOGON_ID group".to_string(),
+    ))
+}
+
+/// Construct the SDDL string for the capability pipe, optionally appending
+/// the two ACEs required for a Phase 13 `WRITE_RESTRICTED` child to pass
+/// access check when opening the pipe with `GENERIC_READ | GENERIC_WRITE`.
+///
+/// With `session_sid = None`, returns exactly `CAPABILITY_PIPE_SDDL` — this
+/// preserves byte-identical behavior for in-process tests and AIPC pipe
+/// callers that never face a WRITE_RESTRICTED child.
+///
+/// With `session_sid = Some(sid)`, appends TWO ACEs before the SACL:
+///
+/// 1. `(A;;0x0012019F;;;{sid})` — grants `FILE_GENERIC_READ |
+///    FILE_GENERIC_WRITE | SYNCHRONIZE` to the per-session restricting SID.
+///    This is required so the **second-pass** DACL check (walked against
+///    the token's RestrictedSids list) finds an allow-ACE for the session
+///    SID.
+/// 2. `(A;;0x0012019F;;;{logon_sid})` — grants the same mask to the current
+///    logon session SID (`S-1-5-5-X-Y`, retrieved at runtime via
+///    [`current_logon_sid`]). This is required because, empirically
+///    (Windows 11 26200), the second-pass access check with
+///    `WRITE_RESTRICTED` ALSO requires an ACE for a SID present in the
+///    token's enabled groups with `SE_GROUP_MANDATORY` — the restricting-SID
+///    ACE alone is not sufficient. The Microsoft-documented contract for
+///    `CreateRestrictedToken` does not describe this co-requirement; it was
+///    discovered by systematic SDDL iteration documented in
+///    `.planning/debug/supervisor-pipe-access-denied.md` (cycle 3).
+///
+/// The logon SID is narrower than the common alternatives (`WD` Everyone,
+/// `AU` Authenticated Users, `BU` Built-in Users) — it is unique per
+/// interactive logon session and is absent from the token of any process
+/// running in a different logon session (different user, different RDP,
+/// service account). In combination with the nonce-based pipe name and the
+/// application-layer session-token check, it preserves the pipe's
+/// capability-channel security properties while admitting the intended
+/// WRITE_RESTRICTED child.
+///
+/// Failure to retrieve the logon SID is fatal (fail-closed per CLAUDE.md).
+fn build_capability_pipe_sddl(session_sid: Option<&str>) -> Result<String> {
+    match session_sid {
+        None => Ok(CAPABILITY_PIPE_SDDL.to_string()),
+        Some(sid) => {
+            validate_session_sid_for_sddl(sid)?;
+            let logon_sid = current_logon_sid()?;
+            // Insert the two ACEs BEFORE the SACL. SDDL requires the DACL
+            // (`D:`) section to precede the SACL (`S:`) section.
+            Ok(format!(
+                "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)\
+                 (A;;{mask};;;{sid})(A;;{mask};;;{logon_sid})S:(ML;;NW;;;LW)",
+                mask = CAPABILITY_PIPE_RESTRICTING_SID_MASK,
+            ))
+        }
+    }
+}
+
 fn build_low_integrity_security_attributes(
+    session_sid: Option<&str>,
 ) -> Result<(SECURITY_ATTRIBUTES, SecurityDescriptorGuard)> {
-    let sddl_u16: Vec<u16> = CAPABILITY_PIPE_SDDL
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
+    let sddl_str = build_capability_pipe_sddl(session_sid)?;
+    let sddl_u16: Vec<u16> = sddl_str.encode_utf16().chain(std::iter::once(0)).collect();
     let mut security_descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
     let ok = unsafe {
         // SAFETY: `sddl_u16` is a valid null-terminated UTF-16 string and
@@ -536,8 +1242,8 @@ fn build_low_integrity_security_attributes(
     Ok((sa, guard))
 }
 
-fn create_low_integrity_named_pipe(pipe_name: &str) -> Result<HANDLE> {
-    let (sa, _sd_guard) = build_low_integrity_security_attributes()?;
+fn create_low_integrity_named_pipe(pipe_name: &str, session_sid: Option<&str>) -> Result<HANDLE> {
+    let (sa, _sd_guard) = build_low_integrity_security_attributes(session_sid)?;
     let wide_name = to_wide(pipe_name);
 
     // SAFETY: `wide_name` is a valid null-terminated UTF-16 string. `sa` carries
@@ -729,6 +1435,7 @@ fn to_wide(value: &str) -> Vec<u16> {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::capability::AccessMode;
@@ -750,6 +1457,9 @@ mod tests {
             child_pid: 12345,
             session_id: "sess-001".to_string(),
             session_token: "test-token".to_string(),
+            kind: crate::supervisor::types::HandleKind::File,
+            target: None,
+            access_mask: 0,
         };
 
         child
@@ -931,6 +1641,9 @@ mod tests {
             child_pid: 12345,
             session_id: "sess-lowint".to_string(),
             session_token: "tok".to_string(),
+            kind: crate::supervisor::types::HandleKind::File,
+            target: None,
+            access_mask: 0,
         };
         client
             .send_message(&SupervisorMessage::Request(request))
@@ -944,6 +1657,449 @@ mod tests {
 
         done_tx.send(()).expect("signal server");
         server_thread.join().expect("server thread");
+    }
+
+    // ---------------------------------------------------------------------
+    // Regression test: capability pipe must admit a WRITE_RESTRICTED +
+    // per-session-restricting-SID child (Phase 13 token shape). Verifies the
+    // fix for the `supervisor-pipe-access-denied` debug session — without the
+    // dynamic `(A;;0x120089;;;<session_sid>)` DACL ACE, the second-pass access
+    // check against the restricting SID set fails with ERROR_ACCESS_DENIED.
+    // ---------------------------------------------------------------------
+
+    /// Pseudo-unique session SID for the regression test. Emulates the shape
+    /// produced by `nono-cli::exec_strategy_windows::restricted_token::generate_session_sid`
+    /// (`S-1-5-117-<u32>-<u32>-<u32>-<u32>`) without pulling `uuid` into the
+    /// library `dev-dependencies`.
+    #[cfg(target_os = "windows")]
+    fn fabricate_session_sid(seed: u32) -> String {
+        let pid = std::process::id();
+        // SAFETY-adjacent: values are bounded u32s; the SID stays within
+        // SESSION_SID_MAX_LEN and contains only ASCII digits + hyphens.
+        // 4 subauthorities after the `S-1-5-117-` prefix — matches the shape
+        // produced by `nono-cli::generate_session_sid` exactly.
+        format!(
+            "S-1-5-117-{pid}-{seed}-{}-{}",
+            seed.wrapping_mul(2654435761),
+            seed.wrapping_add(0x9E3779B1),
+        )
+    }
+
+    /// Build a WRITE_RESTRICTED token carrying `session_sid` as its single
+    /// restricting SID. Returns a raw HANDLE the caller closes via
+    /// `CloseHandle`. Mirrors
+    /// `nono-cli::exec_strategy_windows::restricted_token::create_restricted_token_with_sid`
+    /// but lives in-crate so this regression test doesn't depend on nono-cli.
+    #[cfg(target_os = "windows")]
+    fn build_write_restricted_token(session_sid: &str) -> HANDLE {
+        use windows_sys::Win32::Foundation::GetLastError;
+        use windows_sys::Win32::Security::Authorization::ConvertStringSidToSidW;
+        use windows_sys::Win32::Security::{
+            CreateRestrictedToken, SID_AND_ATTRIBUTES, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE,
+            TOKEN_IMPERSONATE, TOKEN_QUERY, WRITE_RESTRICTED,
+        };
+        use windows_sys::Win32::System::Threading::OpenProcessToken;
+
+        let mut h_current: HANDLE = std::ptr::null_mut();
+        // SAFETY: OpenProcessToken writes a valid handle or returns 0.
+        let ok = unsafe {
+            OpenProcessToken(
+                GetCurrentProcess(),
+                TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY | TOKEN_IMPERSONATE,
+                &mut h_current,
+            )
+        };
+        assert_ne!(ok, 0, "OpenProcessToken failed: {}", unsafe {
+            GetLastError()
+        });
+
+        let sid_u16: Vec<u16> = session_sid
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut sid_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+        // SAFETY: sid_u16 is valid null-terminated UTF-16; sid_ptr is a valid
+        // writable out-pointer. On success sid_ptr must be freed via LocalFree.
+        let ok = unsafe { ConvertStringSidToSidW(sid_u16.as_ptr(), &mut sid_ptr) };
+        assert_ne!(
+            ok,
+            0,
+            "ConvertStringSidToSidW failed for {session_sid:?}: {}",
+            unsafe { GetLastError() }
+        );
+
+        let sid_restrict = SID_AND_ATTRIBUTES {
+            Sid: sid_ptr,
+            Attributes: 0,
+        };
+        let mut h_restricted: HANDLE = std::ptr::null_mut();
+        // SAFETY: h_current is a live token handle; sid_restrict references
+        // sid_ptr (live until LocalFree below); h_restricted is a writable
+        // out-pointer. WRITE_RESTRICTED confines the second-pass DACL check to
+        // WRITE accesses only (Phase 13 contract).
+        let ok = unsafe {
+            CreateRestrictedToken(
+                h_current,
+                WRITE_RESTRICTED,
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                1,
+                &sid_restrict,
+                &mut h_restricted,
+            )
+        };
+
+        // SAFETY: sid_ptr was returned by ConvertStringSidToSidW above and is
+        // not retained after this point (CreateRestrictedToken has copied it
+        // into the new token).
+        unsafe { LocalFree(sid_ptr as _) };
+        // SAFETY: h_current is a live token handle we opened above.
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(h_current) };
+
+        assert_ne!(ok, 0, "CreateRestrictedToken failed: {}", unsafe {
+            GetLastError()
+        });
+        assert!(!h_restricted.is_null(), "restricted token handle is NULL");
+        h_restricted
+    }
+
+    /// Parse the SDDL produced by [`build_capability_pipe_sddl`] into a
+    /// security descriptor and walk the DACL, returning the list of
+    /// `(sid_string, access_mask)` tuples. This lets the regression test
+    /// verify the *structural shape* of the DACL — specifically that the
+    /// per-session restricting-SID ACE is present with the expected
+    /// `FILE_GENERIC_READ | FILE_GENERIC_WRITE | SYNCHRONIZE` (`0x12019F`)
+    /// mask — without having to simulate a WRITE_RESTRICTED child process
+    /// end-to-end (which requires `CreateProcessAsUserW` and is too heavy for
+    /// a unit test). The production repro in
+    /// `.planning/debug/supervisor-pipe-access-denied.md` is the teeth-level
+    /// verification; this test guards against regressions in the SDDL builder.
+    #[cfg(target_os = "windows")]
+    fn extract_dacl_aces_from_sddl(sddl: &str) -> Vec<(String, u32)> {
+        use windows_sys::Win32::Foundation::GetLastError;
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+        };
+        use windows_sys::Win32::Security::{
+            AclSizeInformation, GetAclInformation, GetSecurityDescriptorDacl, ACCESS_ALLOWED_ACE,
+            ACL, ACL_SIZE_INFORMATION,
+        };
+
+        // Convert SDDL → security descriptor.
+        let sddl_u16: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        // SAFETY: sddl_u16 is valid null-terminated UTF-16; sd is writable.
+        let ok = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl_u16.as_ptr(),
+                SDDL_REVISION_1,
+                &mut sd,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(
+            ok,
+            0,
+            "ConvertStringSecurityDescriptorToSecurityDescriptorW failed: {}",
+            unsafe { GetLastError() }
+        );
+        let _sd_guard = SecurityDescriptorGuard(sd);
+
+        // Pull out the DACL.
+        let mut present: i32 = 0;
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        let mut defaulted: i32 = 0;
+        // SAFETY: all out-pointers are valid writable stack storage. `sd` is
+        // live for the lifetime of _sd_guard.
+        let ok = unsafe { GetSecurityDescriptorDacl(sd, &mut present, &mut dacl, &mut defaulted) };
+        assert_ne!(ok, 0, "GetSecurityDescriptorDacl failed");
+        assert_ne!(present, 0, "expected DACL to be present");
+        assert!(!dacl.is_null(), "expected non-NULL DACL pointer");
+
+        // Walk the ACE list.
+        let mut info: ACL_SIZE_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: info is writable; dacl is a live ACL pointer.
+        let ok = unsafe {
+            GetAclInformation(
+                dacl,
+                &mut info as *mut _ as *mut _,
+                std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+                AclSizeInformation,
+            )
+        };
+        assert_ne!(ok, 0, "GetAclInformation failed");
+
+        let mut out = Vec::new();
+        for i in 0..info.AceCount {
+            let mut ace_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+            // SAFETY: dacl is live; ace_ptr is writable.
+            let ok = unsafe { windows_sys::Win32::Security::GetAce(dacl, i, &mut ace_ptr) };
+            assert_ne!(ok, 0, "GetAce({i}) failed");
+            // ACCESS_ALLOWED_ACE is the prefix of the ACE struct for type 0.
+            // SAFETY: GetAce returned a valid pointer into the ACL buffer.
+            let ace = unsafe { &*(ace_ptr as *const ACCESS_ALLOWED_ACE) };
+            // The SID immediately follows the ACCESS_ALLOWED_ACE's header +
+            // AceSize fields. In windows-sys 0.59 ACCESS_ALLOWED_ACE is laid
+            // out as `{ Header, Mask, SidStart: u32 }` where `SidStart` is the
+            // first DWORD of the variable-length SID.
+            let sid_ptr = std::ptr::addr_of!(ace.SidStart) as *mut std::ffi::c_void;
+            let mut sid_str_ptr: *mut u16 = std::ptr::null_mut();
+            // SAFETY: sid_ptr points into the ACE's SID field; sid_str_ptr is
+            // a writable out-pointer. Output must be freed via LocalFree.
+            let ok = unsafe { ConvertSidToStringSidW(sid_ptr, &mut sid_str_ptr) };
+            assert_ne!(ok, 0, "ConvertSidToStringSidW failed");
+            // Read the null-terminated UTF-16 string.
+            let mut len = 0usize;
+            while unsafe { *sid_str_ptr.add(len) } != 0 {
+                len += 1;
+            }
+            let slice = unsafe { std::slice::from_raw_parts(sid_str_ptr, len) };
+            let sid_str = String::from_utf16_lossy(slice);
+            unsafe { LocalFree(sid_str_ptr as _) };
+            out.push((sid_str, ace.Mask));
+        }
+        out
+    }
+
+    /// **End-to-end regression test for `supervisor-pipe-access-denied`**
+    /// (Phase 21 UAT G-01, cycle 3).
+    ///
+    /// Creates a capability pipe via [`SupervisorSocket::bind_impl`] with a
+    /// fabricated session SID, constructs a `WRITE_RESTRICTED` token
+    /// carrying that SID as its only restricting SID (matching production
+    /// exactly), and attempts `CreateFileW(pipe, GENERIC_READ |
+    /// GENERIC_WRITE)` from a thread impersonating that token. The test
+    /// passes only if the open succeeds — the SAME `CreateFileW` call that
+    /// fails in production when the pipe's DACL lacks a logon-SID ACE.
+    ///
+    /// Rationale: the previous version of this test only walked the parsed
+    /// DACL and confirmed the session-SID ACE was stored with mask
+    /// `0x12019F`. That structural check is necessary but not sufficient —
+    /// see cycle-3 empirical work documented in
+    /// `.planning/debug/supervisor-pipe-access-denied.md` which proved the
+    /// Windows restricted-SID second-pass access check also requires an ACE
+    /// for a SID in the token's enabled groups (the logon SID, in our
+    /// fix). A structure-only test cannot catch a regression that drops
+    /// the logon-SID ACE. This end-to-end variant does.
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn capability_pipe_admits_restricted_token_child_with_session_sid() {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::Security::{ImpersonateLoggedOnUser, RevertToSelf};
+
+        let session_sid = fabricate_session_sid(0xBADC0FFE);
+
+        // Pre-flight: build the SDDL and assert it contains both the
+        // session-SID ACE AND an ACE for a logon-SID (`S-1-5-5-*`). If
+        // either is missing, the downstream CreateFileW will fail and we'd
+        // rather the assert surface the structural regression first.
+        let sddl = build_capability_pipe_sddl(Some(&session_sid))
+            .expect("build_capability_pipe_sddl for valid session SID must succeed");
+        assert!(
+            sddl.contains(&session_sid),
+            "SDDL should embed the session SID verbatim: {sddl}"
+        );
+        let aces = extract_dacl_aces_from_sddl(&sddl);
+        let session_ace = aces
+            .iter()
+            .find(|(sid, _)| sid.eq_ignore_ascii_case(&session_sid))
+            .unwrap_or_else(|| panic!("session-SID ACE missing from DACL. SDDL={sddl}"));
+        assert_eq!(
+            session_ace.1, 0x0012_019F,
+            "session-SID ACE mask is 0x{:08X}, expected 0x0012019F. SDDL={sddl}",
+            session_ace.1
+        );
+        let has_logon_ace = aces
+            .iter()
+            .any(|(sid, mask)| sid.starts_with("S-1-5-5-") && *mask == 0x0012_019F);
+        assert!(
+            has_logon_ace,
+            "capability pipe SDDL must contain an ACE for a logon SID \
+             (`S-1-5-5-*`) with mask 0x0012019F; without it the WRITE_RESTRICTED \
+             child's second-pass access check fails. aces={aces:?}, SDDL={sddl}"
+        );
+
+        // Bind the capability pipe with the session-SID SDDL. Each test
+        // invocation gets a unique rendezvous path so parallel tests don't
+        // collide.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rendezvous = dir.path().join("pipe-roundtrip.rendezvous");
+        let server_thread_sid = session_sid.clone();
+        let rendezvous_for_server = rendezvous.clone();
+
+        // Drive the server on a background thread so the main thread can
+        // impersonate + open the client end. `SupervisorSocket::bind_impl`
+        // blocks until a client connects — we need both ends alive
+        // concurrently.
+        let server_handle = std::thread::spawn(move || {
+            SupervisorSocket::bind_impl(&rendezvous_for_server, true, Some(&server_thread_sid))
+        });
+
+        // Wait briefly for the rendezvous file to be written — the server
+        // creates it synchronously before ConnectNamedPipe blocks.
+        for _ in 0..50 {
+            if rendezvous.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            rendezvous.exists(),
+            "server thread did not publish rendezvous file at {}",
+            rendezvous.display()
+        );
+
+        // Build the restricted token and impersonate it on THIS thread.
+        let h_restricted = build_write_restricted_token(&session_sid);
+        let impersonate_ok = unsafe {
+            // SAFETY: h_restricted is a live token handle from
+            // build_write_restricted_token just above.
+            ImpersonateLoggedOnUser(h_restricted)
+        };
+        assert_ne!(
+            impersonate_ok,
+            0,
+            "ImpersonateLoggedOnUser failed: {}",
+            std::io::Error::last_os_error()
+        );
+
+        // Attempt the exact CreateFileW call that fails in production. This
+        // access check now runs against the restricted-token's SIDs,
+        // exercising BOTH DACL passes.
+        let connect_result = SupervisorSocket::connect(&rendezvous);
+
+        // ALWAYS revert impersonation before asserting, or the test harness
+        // will leak an impersonation context into subsequent tests.
+        let revert_ok = unsafe { RevertToSelf() };
+        // SAFETY: h_restricted is owned by this scope.
+        unsafe { CloseHandle(h_restricted) };
+        assert_ne!(
+            revert_ok,
+            0,
+            "RevertToSelf failed after impersonation: {}",
+            std::io::Error::last_os_error()
+        );
+
+        let client = connect_result.expect(
+            "CreateFileW from WRITE_RESTRICTED + session-SID token must succeed \
+             on the capability pipe. If this assertion fails the logon-SID ACE \
+             was likely dropped from build_capability_pipe_sddl — see \
+             .planning/debug/supervisor-pipe-access-denied.md.",
+        );
+
+        // Drain the server-side bind so the thread completes.
+        let server = server_handle
+            .join()
+            .expect("server thread panicked")
+            .expect("server bind failed");
+        drop(client);
+        drop(server);
+
+        // Pre-fix guard: when session_sid is None, the DACL MUST NOT contain
+        // any `S-1-5-117-*` (session-SID) ACE. This preserves byte-identical
+        // SDDL for in-process / AIPC callers.
+        let baseline_sddl = build_capability_pipe_sddl(None).expect("no-SID path must succeed");
+        assert_eq!(baseline_sddl, CAPABILITY_PIPE_SDDL);
+        let baseline_aces = extract_dacl_aces_from_sddl(&baseline_sddl);
+        assert!(
+            !baseline_aces
+                .iter()
+                .any(|(sid, _)| sid.starts_with("S-1-5-117-")),
+            "baseline (no-SID) DACL must not contain any S-1-5-117-* ACE; aces={baseline_aces:?}"
+        );
+    }
+
+    /// `validate_session_sid_for_sddl` must reject any input that could
+    /// smuggle an extra SDDL token through string concatenation. This is the
+    /// defense-in-depth unit test for the SDDL-injection guard.
+    #[test]
+    fn validate_session_sid_for_sddl_rejects_injection() {
+        // Accepted shapes:
+        assert!(validate_session_sid_for_sddl("S-1-5-117-1-2-3-4").is_ok());
+        assert!(validate_session_sid_for_sddl("S-1-5-117-4294967295-0-0-0").is_ok());
+
+        // Rejected shapes:
+        assert!(validate_session_sid_for_sddl("").is_err());
+        assert!(validate_session_sid_for_sddl("S-1-5-117").is_ok()); // digits + hyphens only — fine
+        assert!(
+            validate_session_sid_for_sddl("X-1-5-117-1").is_err(),
+            "must start with S-1-"
+        );
+        assert!(
+            validate_session_sid_for_sddl("S-1-5-117-1)(A;;GA;;;WD").is_err(),
+            "injection via ACE"
+        );
+        assert!(
+            validate_session_sid_for_sddl("S-1-5-117-1;A").is_err(),
+            "semicolon"
+        );
+        assert!(
+            validate_session_sid_for_sddl("S-1-5-117-1 ").is_err(),
+            "trailing space"
+        );
+        assert!(
+            validate_session_sid_for_sddl("S-1-5-117-\0").is_err(),
+            "embedded NUL"
+        );
+        assert!(
+            validate_session_sid_for_sddl("s-1-5-117-1").is_err(),
+            "lowercase prefix"
+        );
+        let too_long = format!("S-1-5-117-{}", "1".repeat(SESSION_SID_MAX_LEN));
+        assert!(
+            validate_session_sid_for_sddl(&too_long).is_err(),
+            "length cap"
+        );
+    }
+
+    /// `build_capability_pipe_sddl(None)` must return the byte-identical
+    /// pre-fix constant so in-process tests and AIPC pipe callers are not
+    /// perturbed by the restricted-SID plumbing.
+    #[test]
+    fn build_capability_pipe_sddl_none_matches_constant() {
+        let sddl = build_capability_pipe_sddl(None).expect("none path must succeed");
+        assert_eq!(sddl, CAPABILITY_PIPE_SDDL);
+    }
+
+    /// `build_capability_pipe_sddl(Some(sid))` must embed two ACEs before
+    /// the SACL: (1) the session-SID ACE with mask `0x12019F`, and (2) a
+    /// logon-SID ACE with the same mask (logon SID is queried at runtime
+    /// from the current process token). Preserves the `D:P` protected
+    /// prefix + Low-IL SACL verbatim.
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn build_capability_pipe_sddl_some_embeds_session_and_logon_aces_before_sacl() {
+        let sid = "S-1-5-117-1-2-3-4";
+        let sddl = build_capability_pipe_sddl(Some(sid)).expect("valid sid must build");
+        // The logon SID is a Windows invariant for any interactive session —
+        // we can't predict its exact value, so anchor on the prefix and
+        // assert the structural shape of the SDDL around it.
+        let session_ace = format!("(A;;0x0012019F;;;{sid})");
+        assert!(
+            sddl.starts_with("D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)"),
+            "SDDL must start with the D:P protected ACL prefix: {sddl}"
+        );
+        assert!(
+            sddl.contains(&session_ace),
+            "SDDL must contain the session-SID ACE verbatim: {sddl}"
+        );
+        let logon_pos = sddl.find("(A;;0x0012019F;;;S-1-5-5-").unwrap_or_else(|| {
+            panic!("SDDL must contain a logon-SID ACE (A;;0x0012019F;;;S-1-5-5-*): {sddl}")
+        });
+        let session_pos = sddl.find(&session_ace).expect("session ACE found above");
+        assert!(
+            session_pos < logon_pos,
+            "session-SID ACE must appear before the logon-SID ACE: {sddl}"
+        );
+        let sacl_pos = sddl
+            .find("S:(ML;;NW;;;LW)")
+            .unwrap_or_else(|| panic!("SDDL must retain the Low-IL SACL suffix: {sddl}"));
+        assert!(
+            logon_pos < sacl_pos,
+            "logon-SID ACE must appear before the SACL: {sddl}"
+        );
     }
 
     #[test]
@@ -967,6 +2123,361 @@ mod tests {
             // SAFETY: The duplicated handle value came from `DuplicateHandle`
             // above and has not been wrapped or closed yet.
             windows_sys::Win32::Foundation::CloseHandle(raw_handle as usize as HANDLE);
+        }
+    }
+
+    // Phase 18 AIPC-01 Task 3: per-fn unit tests for the new event/mutex
+    // brokers. All gated `#[cfg(target_os = "windows")]` (the entire file is
+    // already Windows-only via `#[path]` routing in `mod.rs` but we apply the
+    // gate explicitly so the intent is unambiguous).
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_broker_event_to_process_duplicates_handle() {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::CreateEventW;
+        // SAFETY: anonymous event creation with NULL attributes/name. Manual
+        // reset = FALSE, initial state = FALSE.
+        let event: HANDLE = unsafe { CreateEventW(std::ptr::null_mut(), 0, 0, std::ptr::null()) };
+        assert!(
+            !event.is_null(),
+            "CreateEventW failed: {}",
+            std::io::Error::last_os_error()
+        );
+
+        let grant = broker_event_to_process(
+            event,
+            BrokerTargetProcess::current(),
+            crate::supervisor::policy::EVENT_DEFAULT_MASK,
+        )
+        .expect("duplicate event into current process");
+        assert_eq!(
+            grant.transfer,
+            ResourceTransferKind::DuplicatedWindowsHandle
+        );
+        assert_eq!(
+            grant.resource_kind,
+            crate::supervisor::types::GrantedResourceKind::Event
+        );
+        let raw = grant.raw_handle.expect("raw handle present");
+        assert_ne!(raw, 0);
+
+        // SAFETY: `raw` came from DuplicateHandle just above; `event` came
+        // from CreateEventW above. Both are live HANDLEs we own.
+        unsafe {
+            CloseHandle(raw as usize as HANDLE);
+            CloseHandle(event);
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_broker_event_to_process_propagates_duplicate_handle_failure() {
+        let result = broker_event_to_process(
+            std::ptr::null_mut(),
+            BrokerTargetProcess::current(),
+            crate::supervisor::policy::EVENT_DEFAULT_MASK,
+        );
+        let err = result.expect_err("NULL source handle must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("DuplicateHandle (event"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_broker_mutex_to_process_duplicates_handle() {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::CreateMutexW;
+        // SAFETY: anonymous mutex creation with NULL attributes/name. Initial
+        // owner = FALSE.
+        let mutex: HANDLE = unsafe { CreateMutexW(std::ptr::null_mut(), 0, std::ptr::null()) };
+        assert!(
+            !mutex.is_null(),
+            "CreateMutexW failed: {}",
+            std::io::Error::last_os_error()
+        );
+
+        let grant = broker_mutex_to_process(
+            mutex,
+            BrokerTargetProcess::current(),
+            crate::supervisor::policy::MUTEX_DEFAULT_MASK,
+        )
+        .expect("duplicate mutex into current process");
+        assert_eq!(
+            grant.transfer,
+            ResourceTransferKind::DuplicatedWindowsHandle
+        );
+        assert_eq!(
+            grant.resource_kind,
+            crate::supervisor::types::GrantedResourceKind::Mutex
+        );
+        let raw = grant.raw_handle.expect("raw handle present");
+        assert_ne!(raw, 0);
+
+        // SAFETY: `raw` came from DuplicateHandle just above; `mutex` came
+        // from CreateMutexW above. Both are live HANDLEs we own.
+        unsafe {
+            CloseHandle(raw as usize as HANDLE);
+            CloseHandle(mutex);
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_broker_mutex_to_process_propagates_duplicate_handle_failure() {
+        let result = broker_mutex_to_process(
+            std::ptr::null_mut(),
+            BrokerTargetProcess::current(),
+            crate::supervisor::policy::MUTEX_DEFAULT_MASK,
+        );
+        let err = result.expect_err("NULL source handle must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("DuplicateHandle (mutex"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    // Phase 18 AIPC-01 Plan 18-03 Task 1 — Job Object broker unit tests.
+    // All gated `#[cfg(target_os = "windows")]`.
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_broker_job_object_to_process_duplicates_with_query_mask() {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::JobObjects::CreateJobObjectW;
+        // SAFETY: anonymous Job Object creation with NULL attributes/name.
+        let job: HANDLE = unsafe { CreateJobObjectW(std::ptr::null_mut(), std::ptr::null()) };
+        assert!(
+            !job.is_null(),
+            "CreateJobObjectW failed: {}",
+            std::io::Error::last_os_error()
+        );
+
+        let grant = broker_job_object_to_process(
+            job,
+            BrokerTargetProcess::current(),
+            crate::supervisor::policy::JOB_OBJECT_DEFAULT_MASK,
+        )
+        .expect("duplicate Job Object into current process");
+        assert_eq!(
+            grant.transfer,
+            ResourceTransferKind::DuplicatedWindowsHandle
+        );
+        assert_eq!(
+            grant.resource_kind,
+            crate::supervisor::types::GrantedResourceKind::JobObject
+        );
+        let raw = grant.raw_handle.expect("raw handle present");
+        assert_ne!(raw, 0);
+
+        // SAFETY: `raw` came from DuplicateHandle just above; `job` came from
+        // CreateJobObjectW above. Both are live HANDLEs we own.
+        unsafe {
+            CloseHandle(raw as usize as HANDLE);
+            CloseHandle(job);
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_broker_job_object_to_process_propagates_duplicate_handle_failure() {
+        let result = broker_job_object_to_process(
+            std::ptr::null_mut(),
+            BrokerTargetProcess::current(),
+            crate::supervisor::policy::JOB_OBJECT_DEFAULT_MASK,
+        );
+        let err = result.expect_err("NULL source handle must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("DuplicateHandle (Job Object,"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    // Phase 18 AIPC-01 Plan 18-02 Task 2 — pipe + socket broker unit tests.
+    // All gated `#[cfg(target_os = "windows")]` (the file is already
+    // Windows-only via #[path] routing in mod.rs but the explicit gate makes
+    // the intent unambiguous and survives any future routing change).
+
+    fn unique_aipc_pipe_name(suffix: &str) -> String {
+        // Use the per-process PID + a SHA-derived suffix to avoid collisions
+        // between concurrent test invocations within the same process. The
+        // canonical AIPC namespace prefix is `\\.\pipe\nono-aipc-<id>-<name>`.
+        format!(r"\\.\pipe\nono-aipc-test{}-{suffix}", std::process::id())
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_broker_pipe_to_process_duplicates_with_read_access() {
+        use windows_sys::Win32::Foundation::CloseHandle;
+
+        let name = unique_aipc_pipe_name("pipe-read");
+        let handle = bind_aipc_pipe(&name, PipeDirection::Read).expect("bind aipc pipe");
+        assert_ne!(handle, INVALID_HANDLE_VALUE);
+
+        let grant =
+            broker_pipe_to_process(handle, BrokerTargetProcess::current(), PipeDirection::Read)
+                .expect("broker pipe with read direction");
+        assert_eq!(
+            grant.transfer,
+            ResourceTransferKind::DuplicatedWindowsHandle
+        );
+        assert_eq!(
+            grant.resource_kind,
+            crate::supervisor::types::GrantedResourceKind::Pipe
+        );
+        assert_eq!(grant.access, AccessMode::Read);
+        let raw = grant.raw_handle.expect("raw handle present");
+        assert_ne!(raw, 0);
+
+        // SAFETY: `raw` came from DuplicateHandle just above; `handle` came
+        // from CreateNamedPipeW above. Both are live HANDLEs we own.
+        unsafe {
+            CloseHandle(raw as usize as HANDLE);
+            CloseHandle(handle);
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_broker_pipe_to_process_duplicates_with_readwrite_access() {
+        use windows_sys::Win32::Foundation::CloseHandle;
+
+        let name = unique_aipc_pipe_name("pipe-rw");
+        let handle = bind_aipc_pipe(&name, PipeDirection::ReadWrite).expect("bind aipc pipe");
+        assert_ne!(handle, INVALID_HANDLE_VALUE);
+
+        let grant = broker_pipe_to_process(
+            handle,
+            BrokerTargetProcess::current(),
+            PipeDirection::ReadWrite,
+        )
+        .expect("broker pipe with read+write direction");
+        assert_eq!(grant.access, AccessMode::ReadWrite);
+        let raw = grant.raw_handle.expect("raw handle present");
+        assert_ne!(raw, 0);
+
+        unsafe {
+            CloseHandle(raw as usize as HANDLE);
+            CloseHandle(handle);
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_broker_pipe_to_process_propagates_duplicate_handle_failure() {
+        let result = broker_pipe_to_process(
+            std::ptr::null_mut(),
+            BrokerTargetProcess::current(),
+            PipeDirection::Read,
+        );
+        let err = result.expect_err("NULL source handle must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("DuplicateHandle (pipe,"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_broker_socket_to_process_serializes_proto_info_blob() {
+        use windows_sys::Win32::Networking::WinSock::{
+            closesocket, WSASocketW, WSAStartup, AF_INET, IPPROTO_TCP, SOCK_STREAM, WSADATA,
+            WSA_FLAG_OVERLAPPED,
+        };
+
+        // SAFETY: WSAStartup with version 2.2 (0x0202) is the standard
+        // Winsock initialization; wsadata points to writable storage. The
+        // call is reference-counted and idempotent.
+        let mut wsadata: WSADATA = unsafe { std::mem::zeroed() };
+        let _ = unsafe { WSAStartup(0x0202, &mut wsadata) };
+
+        // SAFETY: WSASocketW with NULL protocol_info creates a fresh socket.
+        // AF_INET / SOCK_STREAM / IPPROTO_TCP are well-defined constants.
+        let sock = unsafe {
+            WSASocketW(
+                AF_INET as i32,
+                SOCK_STREAM,
+                IPPROTO_TCP,
+                std::ptr::null(),
+                0,
+                WSA_FLAG_OVERLAPPED,
+            )
+        };
+        assert_ne!(
+            sock,
+            INVALID_SOCKET,
+            "WSASocketW failed: {}",
+            std::io::Error::last_os_error()
+        );
+
+        let target_pid = unsafe { GetCurrentProcessId() };
+        let grant = broker_socket_to_process(
+            sock,
+            BrokerTargetProcess::current(),
+            target_pid,
+            SocketRole::Connect,
+        )
+        .expect("broker socket should serialize proto_info blob");
+        assert_eq!(grant.transfer, ResourceTransferKind::SocketProtocolInfoBlob);
+        assert_eq!(
+            grant.resource_kind,
+            crate::supervisor::types::GrantedResourceKind::Socket
+        );
+        assert!(grant.raw_handle.is_none());
+        let blob = grant.protocol_info_blob.as_ref().expect("blob present");
+        assert_eq!(
+            blob.len(),
+            std::mem::size_of::<WSAPROTOCOL_INFOW>(),
+            "blob length must match WSAPROTOCOL_INFOW size"
+        );
+
+        // SAFETY: `sock` is the live SOCKET we created via WSASocketW above
+        // and have not freed elsewhere.
+        unsafe {
+            closesocket(sock);
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_broker_socket_to_process_propagates_wsa_failure() {
+        let result = broker_socket_to_process(
+            INVALID_SOCKET,
+            BrokerTargetProcess::current(),
+            unsafe { GetCurrentProcessId() },
+            SocketRole::Connect,
+        );
+        let err = result.expect_err("INVALID_SOCKET source must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("WSADuplicateSocketW failed"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_bind_aipc_pipe_creates_pipe_with_low_integrity_sddl() {
+        use windows_sys::Win32::Foundation::CloseHandle;
+
+        // The SDDL applied is the byte-identical Phase 11 CAPABILITY_PIPE_SDDL
+        // constant via build_low_integrity_security_attributes(); the SDDL
+        // contents themselves are exercised by test_bind_low_integrity_roundtrip
+        // (Phase 11). Here we verify bind_aipc_pipe produces a usable handle.
+        let name = unique_aipc_pipe_name("aipctest-sddl");
+        let handle = bind_aipc_pipe(&name, PipeDirection::ReadWrite).expect("bind aipc pipe");
+        assert_ne!(handle, INVALID_HANDLE_VALUE);
+        assert!(!handle.is_null(), "handle should be non-NULL");
+
+        // SAFETY: `handle` is a live HANDLE returned by bind_aipc_pipe above.
+        unsafe {
+            CloseHandle(handle);
         }
     }
 }

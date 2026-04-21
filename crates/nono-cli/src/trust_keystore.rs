@@ -491,8 +491,25 @@ mod tests {
 
     #[test]
     fn display_roundtrip_file() {
-        let key_ref = TrustKeyRef::File(PathBuf::from("/tmp/key.pem"));
-        assert_eq!(key_ref.to_string(), "file:///tmp/key.pem");
+        // `/tmp/key.pem` is absolute on Unix but NOT on Windows (no drive
+        // letter), which trips the `debug_assert!(path.is_absolute())` in
+        // the `Display` impl for `TrustKeyRef::File`. The production
+        // invariant is correct; the test literal is what was Unix-only.
+        // Use a Windows-absolute literal on Windows and assert the exact
+        // shape that the current `Display` impl produces on this host
+        // (`file://<PathBuf::display()>`), without changing the production
+        // impl under this plan.
+        #[cfg(not(target_os = "windows"))]
+        {
+            let key_ref = TrustKeyRef::File(PathBuf::from("/tmp/key.pem"));
+            assert_eq!(key_ref.to_string(), "file:///tmp/key.pem");
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            let key_ref = TrustKeyRef::File(PathBuf::from(r"C:\tmp\key.pem"));
+            assert_eq!(key_ref.to_string(), r"file://C:\tmp\key.pem");
+        }
     }
 
     // -- Directory file backend ---------------------------------------------

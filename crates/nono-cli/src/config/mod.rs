@@ -290,10 +290,8 @@ mod tests {
     #[test]
     fn test_validated_home_falls_back_to_userprofile() {
         let _guard = test_env_lock().lock().expect("env lock");
-        let _env = EnvVarGuard::set_all(&[
-            ("HOME", "placeholder"),
-            ("USERPROFILE", r"C:\Users\tester"),
-        ]);
+        let _env =
+            EnvVarGuard::set_all(&[("HOME", "placeholder"), ("USERPROFILE", r"C:\Users\tester")]);
         _env.remove("HOME");
 
         let home = validated_home().expect("USERPROFILE should be accepted on Windows");
@@ -304,10 +302,8 @@ mod tests {
     #[test]
     fn test_validated_home_ignores_non_absolute_home_when_userprofile_exists() {
         let _guard = test_env_lock().lock().expect("env lock");
-        let _env = EnvVarGuard::set_all(&[
-            ("HOME", "/home/user"),
-            ("USERPROFILE", r"C:\Users\tester"),
-        ]);
+        let _env =
+            EnvVarGuard::set_all(&[("HOME", "/home/user"), ("USERPROFILE", r"C:\Users\tester")]);
 
         let home = validated_home().expect("USERPROFILE should be accepted on Windows");
         assert_eq!(home, r"C:\Users\tester");

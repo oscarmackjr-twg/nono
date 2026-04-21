@@ -556,18 +556,97 @@ async fn sign_file_keyless(
 }
 
 /// Build the keyless signer predicate from ambient OIDC environment variables.
+///
+/// Dispatches on CI provider. Upstream parity port (upstream v0.35 commit
+/// ab5a064 `feat(trust): Support GitLab ID tokens for signing`):
+///
+/// - **GitLab CI:** when `GITLAB_CI=true` is set, build the GitLab-shaped
+///   predicate via [`gitlab_keyless_predicate`]. Uses `CI_SERVER_HOST`,
+///   `CI_SERVER_PORT`, `CI_PROJECT_PATH`, `CI_COMMIT_REF_NAME` /
+///   `CI_COMMIT_TAG`, `CI_SERVER_URL`.
+/// - **Fallback (GitHub Actions and others):** build the GitHub-shaped
+///   predicate using `ACTIONS_ID_TOKEN_ISSUER`, `GITHUB_REPOSITORY`,
+///   `GITHUB_WORKFLOW_REF`, `GITHUB_REF`.
+///
+/// Fork parity note: upstream uses string-literal issuer URLs inline. The
+/// fork centralises those as `nono::trust::signing::GITLAB_COM_OIDC_ISSUER`
+/// and `::GITHUB_ACTIONS_OIDC_ISSUER` so the issuer-pin validator
+/// (`validate_oidc_issuer`) can be applied by callers.
 fn build_keyless_predicate() -> serde_json::Value {
+    if let Some(gitlab_predicate) = gitlab_keyless_predicate() {
+        return gitlab_predicate;
+    }
+
     serde_json::json!({
         "version": 1,
         "signer": {
             "kind": "keyless",
             "oidc_issuer": std::env::var("ACTIONS_ID_TOKEN_ISSUER")
-                .unwrap_or_else(|_| "https://token.actions.githubusercontent.com".to_string()),
+                .unwrap_or_else(|_| nono::trust::signing::GITHUB_ACTIONS_OIDC_ISSUER.to_string()),
             "repository": std::env::var("GITHUB_REPOSITORY").unwrap_or_default(),
             "workflow": std::env::var("GITHUB_WORKFLOW_REF").unwrap_or_default(),
             "ref": std::env::var("GITHUB_REF").unwrap_or_default()
         }
     })
+}
+
+/// Build a GitLab-shaped keyless signer predicate when running under
+/// GitLab CI. Returns `None` when `GITLAB_CI` is absent or not `"true"`.
+///
+/// Upstream parity port of `gitlab_keyless_predicate` (upstream v0.35
+/// ab5a064). Maps GitLab CI environment variables to the Sigstore
+/// predicate shape:
+///
+/// | GitLab env var      | Predicate field                           |
+/// | ------------------- | ----------------------------------------- |
+/// | `CI_SERVER_URL`     | `signer.oidc_issuer`                      |
+/// | `CI_SERVER_HOST`    | `signer.workflow` host-authority prefix   |
+/// | `CI_SERVER_PORT`    | `signer.workflow` port suffix (if != 443) |
+/// | `CI_PROJECT_PATH`   | `signer.repository`, workflow path prefix |
+/// | `CI_COMMIT_TAG`     | `signer.ref` as `refs/tags/<tag>` (if set)|
+/// | `CI_COMMIT_REF_NAME`| `signer.ref` as `refs/heads/<name>` (else)|
+///
+/// Workflow string format:
+/// `{host_authority}/{project_path}//.gitlab-ci.yml@{git_ref}` — matches
+/// upstream's Publisher.workflow wildcard pattern exactly (see
+/// `Publisher::matches` regression tests in `crates/nono/src/trust/types.rs`).
+fn gitlab_keyless_predicate() -> Option<serde_json::Value> {
+    if std::env::var("GITLAB_CI").as_deref() != Ok("true") {
+        return None;
+    }
+
+    let host = std::env::var("CI_SERVER_HOST").unwrap_or_else(|_| "gitlab.com".to_string());
+    let port = std::env::var("CI_SERVER_PORT").unwrap_or_else(|_| "443".to_string());
+    let project_path = std::env::var("CI_PROJECT_PATH").unwrap_or_default();
+
+    // RFC 3986 authority: host alone if on default HTTPS port, else host:port.
+    let host_authority = if port == "443" {
+        host.clone()
+    } else {
+        format!("{host}:{port}")
+    };
+
+    let git_ref = match std::env::var("CI_COMMIT_TAG") {
+        Ok(tag) if !tag.is_empty() => format!("refs/tags/{tag}"),
+        _ => format!(
+            "refs/heads/{}",
+            std::env::var("CI_COMMIT_REF_NAME").unwrap_or_default()
+        ),
+    };
+
+    let workflow = format!("{host_authority}/{project_path}//.gitlab-ci.yml@{git_ref}");
+
+    Some(serde_json::json!({
+        "version": 1,
+        "signer": {
+            "kind": "keyless",
+            "oidc_issuer": std::env::var("CI_SERVER_URL")
+                .unwrap_or_else(|_| nono::trust::signing::GITLAB_COM_OIDC_ISSUER.to_string()),
+            "repository": project_path,
+            "workflow": workflow,
+            "ref": git_ref
+        }
+    }))
 }
 
 /// Discover an OIDC identity token from the ambient environment.
@@ -825,7 +904,12 @@ fn verify_multi_subject_file(
                 .first()
                 .map(|(_, d)| d.as_str())
                 .ok_or("no subjects in bundle")?;
-            let trusted_root = trust::load_production_trusted_root()
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| format!("failed to create async runtime: {e}"))?;
+            let trusted_root = rt
+                .block_on(trust::load_production_trusted_root())
                 .map_err(|e| format!("failed to load Sigstore trusted root: {e}"))?;
             let sigstore_policy = trust::VerificationPolicy::default();
             trust::verify_bundle_with_digest(
@@ -940,7 +1024,12 @@ fn verify_single_file(
                 .map_err(|e| format!("signature verification failed: {e}"))?;
         }
         trust::SignerIdentity::Keyless { .. } => {
-            let trusted_root = trust::load_production_trusted_root()
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| format!("failed to create async runtime: {e}"))?;
+            let trusted_root = rt
+                .block_on(trust::load_production_trusted_root())
                 .map_err(|e| format!("failed to load Sigstore trusted root: {e}"))?;
             let sigstore_policy = trust::VerificationPolicy::default();
             trust::verify_bundle_with_digest(
@@ -1393,6 +1482,17 @@ fn canonicalize_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
 fn format_identity(identity: &trust::SignerIdentity) -> String {
     match identity {
         trust::SignerIdentity::Keyed { key_id } => format!("{key_id} (keyed)"),
+        // GitLab keyless: the workflow string already carries the full
+        // host/project/.gitlab-ci.yml@ref path, so displaying
+        // `{repository} ({workflow})` duplicates the repository segment.
+        // Upstream (ab5a064) renders GitLab identities as just the
+        // workflow string — matching `//.gitlab-ci.yml@` is the
+        // provider-specific marker.
+        trust::SignerIdentity::Keyless { workflow, .. }
+            if workflow.contains("//.gitlab-ci.yml@") =>
+        {
+            workflow.clone()
+        }
         trust::SignerIdentity::Keyless {
             repository,
             workflow,
@@ -1492,6 +1592,180 @@ mod tests {
         assert_eq!(
             format_identity(&id),
             "org/repo (.github/workflows/sign.yml)"
+        );
+    }
+
+    // D-11 upstream parity port — GitLab keyless identity formatting
+    // Mirrors upstream ab5a064 `format_identity_keyless_gitlab`.
+
+    #[test]
+    fn format_identity_keyless_gitlab() {
+        let id = trust::SignerIdentity::Keyless {
+            issuer: "https://gitlab.com".to_string(),
+            repository: "my-group/my-project".to_string(),
+            workflow: "gitlab.com/my-group/my-project//.gitlab-ci.yml@refs/heads/main".to_string(),
+            git_ref: "refs/heads/main".to_string(),
+        };
+        assert_eq!(
+            format_identity(&id),
+            "gitlab.com/my-group/my-project//.gitlab-ci.yml@refs/heads/main"
+        );
+    }
+
+    #[test]
+    fn format_identity_keyless_gitlab_custom_port() {
+        let id = trust::SignerIdentity::Keyless {
+            issuer: "https://gitlab.example.com:8443".to_string(),
+            repository: "team/app".to_string(),
+            workflow: "gitlab.example.com:8443/team/app//.gitlab-ci.yml@refs/heads/develop"
+                .to_string(),
+            git_ref: "refs/heads/develop".to_string(),
+        };
+        assert_eq!(
+            format_identity(&id),
+            "gitlab.example.com:8443/team/app//.gitlab-ci.yml@refs/heads/develop"
+        );
+    }
+
+    // D-11 upstream parity port — GitLab predicate builder
+    // Mirrors upstream ab5a064 `build_keyless_predicate_*` tests. These
+    // tests use the project's `EnvVarGuard` wrapper (see
+    // `crates/nono-cli/src/test_env.rs`) for thread-safe env-var mutation
+    // with drop-time restore — the `std::env::set_var` / `remove_var`
+    // stdlib calls are disallowed by the workspace's clippy config.
+
+    // Canonical set of GitLab CI env vars that gitlab_keyless_predicate
+    // consults. Every test below registers all of them with the guard
+    // (even keys it doesn't explicitly set) so `.remove(key)` works
+    // safely, and drop-time restore returns them to their pre-test
+    // values regardless of which subset the test mutates.
+    fn register_all_gitlab_keys(
+        guard_values: &[(&'static str, &str)],
+    ) -> crate::test_env::EnvVarGuard {
+        // Seed every canonical key with its intended test value (or a
+        // throwaway placeholder that will be immediately removed).
+        crate::test_env::EnvVarGuard::set_all(guard_values)
+    }
+
+    #[test]
+    fn build_keyless_predicate_defaults_to_github_when_gitlab_ci_unset() {
+        let _lock = crate::test_env::lock_env();
+        // Seed GITLAB_CI then remove it to force the non-GitLab branch.
+        let env = register_all_gitlab_keys(&[("GITLAB_CI", "placeholder")]);
+        env.remove("GITLAB_CI");
+        let predicate = build_keyless_predicate();
+        drop(env);
+
+        let signer = &predicate["signer"];
+        assert_eq!(signer["kind"], "keyless");
+        assert!(signer.get("oidc_issuer").is_some());
+        assert!(signer.get("repository").is_some());
+        assert!(signer.get("workflow").is_some());
+        assert!(signer.get("ref").is_some());
+    }
+
+    #[test]
+    fn build_keyless_predicate_uses_gitlab_shape_when_gitlab_ci_true() {
+        let _lock = crate::test_env::lock_env();
+        // Seed all keys we consult; unset CI_COMMIT_TAG / CI_SERVER_URL to
+        // exercise the default-path logic for tag-absence + default issuer.
+        let env = register_all_gitlab_keys(&[
+            ("GITLAB_CI", "true"),
+            ("CI_SERVER_HOST", "gitlab.com"),
+            ("CI_SERVER_PORT", "443"),
+            ("CI_PROJECT_PATH", "my-group/my-project"),
+            ("CI_COMMIT_REF_NAME", "main"),
+            ("CI_COMMIT_TAG", "placeholder"),
+            ("CI_SERVER_URL", "placeholder"),
+        ]);
+        env.remove("CI_COMMIT_TAG");
+        env.remove("CI_SERVER_URL");
+        let predicate = build_keyless_predicate();
+        drop(env);
+
+        let signer = &predicate["signer"];
+        assert_eq!(signer["kind"], "keyless");
+        assert_eq!(signer["oidc_issuer"], "https://gitlab.com");
+        assert_eq!(signer["repository"], "my-group/my-project");
+        assert_eq!(
+            signer["workflow"],
+            "gitlab.com/my-group/my-project//.gitlab-ci.yml@refs/heads/main"
+        );
+        assert_eq!(signer["ref"], "refs/heads/main");
+    }
+
+    #[test]
+    fn build_keyless_predicate_gitlab_honors_custom_port() {
+        let _lock = crate::test_env::lock_env();
+        let env = register_all_gitlab_keys(&[
+            ("GITLAB_CI", "true"),
+            ("CI_SERVER_HOST", "gitlab.example.com"),
+            ("CI_SERVER_PORT", "8443"),
+            ("CI_PROJECT_PATH", "team/app"),
+            ("CI_COMMIT_REF_NAME", "develop"),
+            ("CI_COMMIT_TAG", "placeholder"),
+            ("CI_SERVER_URL", "https://gitlab.example.com:8443"),
+        ]);
+        env.remove("CI_COMMIT_TAG");
+        let predicate = build_keyless_predicate();
+        drop(env);
+
+        let signer = &predicate["signer"];
+        assert_eq!(
+            signer["workflow"],
+            "gitlab.example.com:8443/team/app//.gitlab-ci.yml@refs/heads/develop"
+        );
+        assert_eq!(signer["oidc_issuer"], "https://gitlab.example.com:8443");
+    }
+
+    #[test]
+    fn build_keyless_predicate_gitlab_tag_overrides_branch() {
+        let _lock = crate::test_env::lock_env();
+        let env = register_all_gitlab_keys(&[
+            ("GITLAB_CI", "true"),
+            ("CI_SERVER_HOST", "gitlab.com"),
+            ("CI_SERVER_PORT", "443"),
+            ("CI_PROJECT_PATH", "release/app"),
+            ("CI_COMMIT_REF_NAME", "main"),
+            ("CI_COMMIT_TAG", "v2.0.0"),
+            ("CI_SERVER_URL", "placeholder"),
+        ]);
+        env.remove("CI_SERVER_URL");
+        let predicate = build_keyless_predicate();
+        drop(env);
+
+        let signer = &predicate["signer"];
+        assert_eq!(signer["ref"], "refs/tags/v2.0.0");
+        assert_eq!(
+            signer["workflow"],
+            "gitlab.com/release/app//.gitlab-ci.yml@refs/tags/v2.0.0"
+        );
+    }
+
+    #[test]
+    fn gitlab_keyless_predicate_returns_none_when_gitlab_ci_unset() {
+        let _lock = crate::test_env::lock_env();
+        let env = register_all_gitlab_keys(&[("GITLAB_CI", "placeholder")]);
+        env.remove("GITLAB_CI");
+        let result = gitlab_keyless_predicate();
+        drop(env);
+        assert!(
+            result.is_none(),
+            "gitlab_keyless_predicate must be None when GITLAB_CI is unset"
+        );
+    }
+
+    #[test]
+    fn gitlab_keyless_predicate_returns_none_when_gitlab_ci_not_true() {
+        // Explicit non-"true" value (e.g. "false", "1", "yes") must not
+        // match — upstream uses strict equality against "true".
+        let _lock = crate::test_env::lock_env();
+        let env = register_all_gitlab_keys(&[("GITLAB_CI", "false")]);
+        let result = gitlab_keyless_predicate();
+        drop(env);
+        assert!(
+            result.is_none(),
+            "gitlab_keyless_predicate must require GITLAB_CI='true' exactly"
         );
     }
 

@@ -609,6 +609,49 @@ For network API keys, prefer `--credential` instead for credential isolation —
 
 See [Credential Injection](/cli/features/credential-injection) for full documentation on storing and using credentials.
 
+#### `--env-allow`
+
+Allow-list pattern for environment variables that pass through to the sandboxed child. Repeatable. Available on `nono run`, `nono shell`, and `nono wrap`.
+
+```bash
+# Pass through only specific AWS vars
+nono run --env-allow AWS_REGION --env-allow 'AWS_PROFILE' --allow . -- terraform plan
+
+# Trailing-prefix glob: all AWS_* vars
+nono run --env-allow 'AWS_*' --allow . -- aws s3 ls
+
+# Bare wildcard: pass everything (useful for quick-debug)
+nono run --env-allow '*' --allow . -- /bin/env
+```
+
+Accepted pattern shapes:
+
+- **Exact name:** `AWS_REGION`, `HOME`, `PATH` — passes through only that variable.
+- **Trailing-prefix glob:** `AWS_*`, `KUBE_*` — passes through any variable starting with the prefix.
+- **Bare wildcard:** `*` — passes through all variables.
+
+Rejected at parse time (fail-closed, before the sandbox launches):
+
+- Middle-glob patterns (`AWS_*_REGION`)
+- Leading-glob patterns (`*_REGION`)
+- Empty patterns
+
+#### `--env-deny`
+
+Deny-list pattern for environment variables that are stripped from the child's env. Repeatable. Same pattern grammar as `--env-allow`. Deny wins when a variable matches both allow and deny rules.
+
+```bash
+# Strip AWS creds but keep the rest of the env
+nono run --env-deny 'AWS_SECRET_*' --allow . -- my-agent
+
+# Keep only the PATH-ish vars, drop everything else
+nono run --env-allow PATH --env-allow HOME --env-deny '*' --allow . -- my-agent
+```
+
+<Note>
+  `--env-allow` and `--env-deny` apply the CLI data path validator; full propagation to the sandboxed child's env boundary ships in a follow-up profile-surface change. Until then, the flags primarily validate that the patterns you'd store in a profile parse cleanly.
+</Note>
+
 ### Profile Options
 
 #### `--profile`, `-p`
@@ -650,6 +693,28 @@ nono run --profile claude-code --allow-launch-services -- claude
 
 <Note>
   `--allow-launch-services` is only supported on macOS. It requires the selected profile to opt into `allow_launch_services` and configure `open_urls`; otherwise nono fails closed with an error.
+</Note>
+
+#### `--allow-gpu`
+
+Grant GPU access to the sandboxed command. Available on `nono run`, `nono shell`, and `nono wrap`.
+
+```bash
+# Run an ML workload that needs CUDA
+nono run --allow-gpu --allow . -- python train.py
+
+# macOS Metal workload
+nono run --allow-gpu --profile claude-code -- /Applications/MyApp.app/Contents/MacOS/myapp
+```
+
+Per-platform behavior:
+
+- **Linux:** Adds a Landlock allowlist for `/dev/nvidia*` device nodes, DRM render nodes, AMD KFD, WSL2 DXG, and the NVIDIA procfs entries (`/proc/driver/nvidia`, `/dev/nvidia-uvm-tools`) required for the CUDA runtime and nvidia-uvm kernel module to initialize.
+- **macOS:** Adds Seatbelt grants for IOKit Metal / AGX GPU user-clients so Metal and CoreML workloads can open the framework.
+- **Windows:** Emits a `tracing::warn!` stating `--allow-gpu` is not enforced on this platform and leaves the Job Object / WFP sandbox state byte-identical to a run without the flag. The flag parses and the command runs, so scripts that target multiple platforms stay portable.
+
+<Note>
+  `--allow-gpu` grants access to the minimum device nodes required for the GPU runtime — it does not grant broad `/dev` access. The grant is additive with any profile-specified paths; if your workload needs access to specific model weights or dataset paths, you still need to pass those via `--allow`, `--read`, or a profile.
 </Note>
 
 ### Execution Mode Flags

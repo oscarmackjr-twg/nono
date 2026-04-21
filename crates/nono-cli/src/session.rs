@@ -29,6 +29,61 @@ use std::os::unix::fs::OpenOptionsExt;
 #[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 
+/// Serialized view of the resource limits that were active when a session
+/// was launched. Lives on [`SessionRecord::limits`]. Each field is
+/// independently optional; unset fields are omitted from the JSON via
+/// `#[serde(skip_serializing_if = "Option::is_none")]` so a session that only
+/// sets `--cpu-percent` serializes as `{"cpu_percent": 25}`, not as the same
+/// object with three explicit `null` siblings.
+///
+/// Stable JSON field names (do NOT rename without coordinating an on-disk
+/// session-file format bump):
+/// - `cpu_percent` (`u16`, 1..=100)
+/// - `memory_bytes` (`u64`)
+/// - `timeout_seconds` (`u64`, duration expressed in whole seconds)
+/// - `max_processes` (`u32`)
+///
+/// See `nono inspect <id>` for the human-readable rendering of these values.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResourceLimitsRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_percent: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_processes: Option<u32>,
+}
+
+impl ResourceLimitsRecord {
+    /// Build a record from the in-memory [`crate::launch_runtime::ResourceLimits`]
+    /// struct. Returns `None` when every field on the input is `None`, so a
+    /// session that did not set any limits does NOT write an empty
+    /// `"limits": {}` object to disk.
+    pub(crate) fn from_resource_limits(
+        limits: &crate::launch_runtime::ResourceLimits,
+    ) -> Option<Self> {
+        if limits.is_empty() {
+            return None;
+        }
+        Some(Self {
+            cpu_percent: limits.cpu_percent,
+            memory_bytes: limits.memory_bytes,
+            timeout_seconds: limits.timeout.map(|d| d.as_secs()),
+            max_processes: limits.max_processes,
+        })
+    }
+
+    /// Returns true when no resource limit is recorded.
+    pub fn is_empty(&self) -> bool {
+        self.cpu_percent.is_none()
+            && self.memory_bytes.is_none()
+            && self.timeout_seconds.is_none()
+            && self.max_processes.is_none()
+    }
+}
+
 /// Session state persisted to `~/.nono/sessions/{session_id}.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionRecord {
@@ -48,6 +103,14 @@ pub struct SessionRecord {
     pub network: String,
     pub job_object_name: Option<String>,
     pub rollback_session: Option<String>,
+    /// Resource caps active on this session (RESL-01..04). `None` when no
+    /// `--cpu-percent` / `--memory` / `--timeout` / `--max-processes` flag was
+    /// set. Added in Plan 16-02; sessions serialized BEFORE this plan
+    /// deserialize cleanly via `#[serde(default)]`. Skipped on serialization
+    /// when `None` so existing tooling that round-trips session files does not
+    /// see a noisy `"limits": null` key appear.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<ResourceLimitsRecord>,
 }
 
 /// Session lifecycle status.
@@ -442,6 +505,31 @@ pub fn generate_random_name() -> String {
     let adj = adjectives[rng.random_range(0..adjectives.len())];
     let noun = nouns[rng.random_range(0..nouns.len())];
     format!("{}-{}", adj, noun)
+}
+
+/// Returns true iff `record` is safe to prune under the retention rule.
+///
+/// A record is prunable only if ALL of the following hold:
+/// - Its status is `SessionStatus::Exited` (never prune Running or Paused).
+/// - Its `started_epoch` is **at least** `retention_secs` before `now_epoch`
+///   (inclusive boundary: a session exactly `retention_secs` old qualifies).
+///
+/// `retention_secs = 0` combined with `Status: Exited` is the `--all-exited`
+/// escape hatch: every exited session qualifies (including just-exited ones).
+///
+/// Fail-closed: if `now_epoch < record.started_epoch` (clock skew or corrupt
+/// record), `saturating_sub` returns 0; when `retention_secs > 0` this yields
+/// `false` (not prunable), so a future-dated record is never pruned.
+#[must_use]
+pub fn is_prunable(record: &SessionRecord, now_epoch: u64, retention_secs: u64) -> bool {
+    if record.status != SessionStatus::Exited {
+        return false;
+    }
+    // saturating_sub returns 0 if started_epoch > now_epoch (clock skew):
+    //   - age == 0 with retention_secs > 0  → age < retention → not prunable (correct: fail closed)
+    //   - age == 0 with retention_secs == 0 → age >= retention → prunable (--all-exited case)
+    let age = now_epoch.saturating_sub(record.started_epoch);
+    age >= retention_secs
 }
 
 /// List all sessions, enriched with liveness checks.
@@ -968,6 +1056,7 @@ mod tests {
             network: "allowed".to_string(),
             job_object_name: None,
             rollback_session: None,
+            limits: None,
         };
 
         let json = serde_json::to_string(&record).expect("serialize");
@@ -1009,6 +1098,7 @@ mod tests {
             network: "blocked".to_string(),
             job_object_name: None,
             rollback_session: None,
+            limits: None,
         };
 
         write_session_file(&path, &record).expect("write");
@@ -1041,6 +1131,7 @@ mod tests {
             network: "allowed".to_string(),
             job_object_name: None,
             rollback_session: None,
+            limits: None,
         };
 
         write_session_file(&path, &record).expect("write");
@@ -1089,6 +1180,7 @@ mod tests {
             network: "allowed".to_string(),
             job_object_name: None,
             rollback_session: None,
+            limits: None,
         };
 
         let file_path = path.join("guard1.json");
@@ -1167,6 +1259,7 @@ mod tests {
             network: "allowed".to_string(),
             job_object_name: None,
             rollback_session: None,
+            limits: None,
         };
 
         write_session_file(&sessions_path.join("aabbcc.json"), &record).expect("write");
@@ -1174,5 +1267,334 @@ mod tests {
         // load_session uses sessions_dir() which points to ~/.nono/sessions,
         // so we can't test prefix matching here without mocking. The file I/O
         // roundtrip is tested above.
+    }
+
+    // ---- is_prunable predicate tests (Plan 19-04 CLEAN-04) ----
+
+    /// Fabricate a base `SessionRecord` for predicate tests. Callers override
+    /// `status` and `started_epoch` to pin the scenario. No filesystem / env
+    /// interaction — tests are pure-function exercises of the predicate.
+    fn fabricate_base_record() -> SessionRecord {
+        SessionRecord {
+            session_id: "test".to_string(),
+            name: None,
+            supervisor_pid: 1,
+            child_pid: 2,
+            started: "2026-01-01T00:00:00Z".to_string(),
+            started_epoch: 0,
+            status: SessionStatus::Exited,
+            attachment: SessionAttachment::Detached,
+            exit_code: Some(0),
+            command: vec!["echo".to_string()],
+            profile: None,
+            workdir: PathBuf::from("/tmp"),
+            network: "allowed".to_string(),
+            job_object_name: None,
+            rollback_session: None,
+            limits: None,
+        }
+    }
+
+    #[test]
+    fn is_prunable_exited_older_than_retention_is_true() {
+        let now = 1_800_000_000u64;
+        let record = SessionRecord {
+            status: SessionStatus::Exited,
+            started_epoch: now - (31 * 86_400), // 31 days old
+            ..fabricate_base_record()
+        };
+        assert!(is_prunable(&record, now, 30 * 86_400));
+    }
+
+    #[test]
+    fn is_prunable_at_exact_boundary() {
+        // Pins the inclusive-boundary semantic. A session whose age equals
+        // retention_secs EXACTLY is prunable. Regression guard for the doc/code
+        // alignment fix landed in plan 19-04 revision.
+        let now = 1_800_000_000u64;
+        let retention = 30 * 86_400;
+        let record = SessionRecord {
+            status: SessionStatus::Exited,
+            started_epoch: now - retention, // exactly retention_secs old
+            ..fabricate_base_record()
+        };
+        assert!(is_prunable(&record, now, retention));
+    }
+
+    #[test]
+    fn is_prunable_one_second_under_boundary_is_false() {
+        // Complementary to the boundary test: one second shy of the threshold
+        // must NOT be prunable. Together these two tests pin `>=` and exclude
+        // `>` forever.
+        let now = 1_800_000_000u64;
+        let retention = 30 * 86_400;
+        let record = SessionRecord {
+            status: SessionStatus::Exited,
+            started_epoch: now - (retention - 1), // 1 sec shy of boundary
+            ..fabricate_base_record()
+        };
+        assert!(!is_prunable(&record, now, retention));
+    }
+
+    #[test]
+    fn is_prunable_running_is_never_true_even_if_ancient() {
+        let now = 1_800_000_000u64;
+        let record = SessionRecord {
+            status: SessionStatus::Running,
+            started_epoch: now - (90 * 86_400), // 90 days
+            ..fabricate_base_record()
+        };
+        assert!(!is_prunable(&record, now, 30 * 86_400));
+    }
+
+    #[test]
+    fn is_prunable_paused_is_never_true() {
+        let now = 1_800_000_000u64;
+        let record = SessionRecord {
+            status: SessionStatus::Paused,
+            started_epoch: now - (90 * 86_400),
+            ..fabricate_base_record()
+        };
+        assert!(!is_prunable(&record, now, 30 * 86_400));
+    }
+
+    #[test]
+    fn is_prunable_exited_within_retention_is_false() {
+        let now = 1_800_000_000u64;
+        let record = SessionRecord {
+            status: SessionStatus::Exited,
+            started_epoch: now - (4 * 86_400), // 4 days — well under 30
+            ..fabricate_base_record()
+        };
+        assert!(!is_prunable(&record, now, 30 * 86_400));
+    }
+
+    #[test]
+    fn is_prunable_all_exited_escape_hatch_matches_any_exited() {
+        let now = 1_800_000_000u64;
+        let record = SessionRecord {
+            status: SessionStatus::Exited,
+            started_epoch: now - 5, // 5 seconds ago
+            ..fabricate_base_record()
+        };
+        assert!(is_prunable(&record, now, 0));
+    }
+
+    #[test]
+    fn is_prunable_future_started_epoch_fails_closed() {
+        let now = 1_800_000_000u64;
+        let record = SessionRecord {
+            status: SessionStatus::Exited,
+            started_epoch: now + 3600, // clock skew: "started in the future"
+            ..fabricate_base_record()
+        };
+        assert!(!is_prunable(&record, now, 30 * 86_400));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod resource_limits_record_tests {
+    use super::*;
+    use crate::launch_runtime::ResourceLimits;
+
+    #[test]
+    fn from_resource_limits_returns_none_when_empty() {
+        let limits = ResourceLimits::default();
+        assert!(ResourceLimitsRecord::from_resource_limits(&limits).is_none());
+    }
+
+    #[test]
+    fn from_resource_limits_maps_cpu_only() {
+        let limits = ResourceLimits {
+            cpu_percent: Some(25),
+            ..Default::default()
+        };
+        let record = ResourceLimitsRecord::from_resource_limits(&limits)
+            .expect("non-empty limits must yield Some");
+        assert_eq!(record.cpu_percent, Some(25));
+        assert_eq!(record.memory_bytes, None);
+        assert_eq!(record.timeout_seconds, None);
+        assert_eq!(record.max_processes, None);
+    }
+
+    #[test]
+    fn from_resource_limits_maps_memory_only() {
+        let limits = ResourceLimits {
+            memory_bytes: Some(512 * 1024 * 1024),
+            ..Default::default()
+        };
+        let record = ResourceLimitsRecord::from_resource_limits(&limits).expect("Some(memory)");
+        assert_eq!(record.memory_bytes, Some(512 * 1024 * 1024));
+        assert_eq!(record.cpu_percent, None);
+    }
+
+    #[test]
+    fn from_resource_limits_maps_timeout_to_seconds() {
+        let limits = ResourceLimits {
+            timeout: Some(std::time::Duration::from_secs(300)),
+            ..Default::default()
+        };
+        let record = ResourceLimitsRecord::from_resource_limits(&limits).expect("Some(timeout)");
+        assert_eq!(record.timeout_seconds, Some(300));
+    }
+
+    #[test]
+    fn from_resource_limits_maps_max_processes() {
+        let limits = ResourceLimits {
+            max_processes: Some(20),
+            ..Default::default()
+        };
+        let record = ResourceLimitsRecord::from_resource_limits(&limits).expect("Some(procs)");
+        assert_eq!(record.max_processes, Some(20));
+    }
+
+    #[test]
+    fn from_resource_limits_maps_all_four() {
+        let limits = ResourceLimits {
+            cpu_percent: Some(50),
+            memory_bytes: Some(1024 * 1024 * 1024),
+            timeout: Some(std::time::Duration::from_secs(1800)),
+            max_processes: Some(10),
+        };
+        let record = ResourceLimitsRecord::from_resource_limits(&limits).expect("Some(all)");
+        assert_eq!(record.cpu_percent, Some(50));
+        assert_eq!(record.memory_bytes, Some(1024 * 1024 * 1024));
+        assert_eq!(record.timeout_seconds, Some(1800));
+        assert_eq!(record.max_processes, Some(10));
+    }
+
+    /// Verifies `skip_serializing_if = "Option::is_none"` actually fires —
+    /// a record with only `cpu_percent` set must NOT serialize the other
+    /// three keys as `null`. This is the contract that keeps session-file
+    /// JSON minimal when only one limit is active.
+    #[test]
+    fn record_serialization_omits_unset_fields() {
+        let record = ResourceLimitsRecord {
+            cpu_percent: Some(25),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&record).expect("serialize");
+        assert!(json.contains("\"cpu_percent\":25"));
+        assert!(
+            !json.contains("memory_bytes"),
+            "unset memory_bytes must not appear: {json}"
+        );
+        assert!(
+            !json.contains("timeout_seconds"),
+            "unset timeout_seconds must not appear: {json}"
+        );
+        assert!(
+            !json.contains("max_processes"),
+            "unset max_processes must not appear: {json}"
+        );
+    }
+
+    #[test]
+    fn record_round_trip_preserves_set_fields() {
+        let record = ResourceLimitsRecord {
+            cpu_percent: Some(25),
+            memory_bytes: Some(512 * 1024 * 1024),
+            timeout_seconds: Some(300),
+            max_processes: Some(20),
+        };
+        let json = serde_json::to_string(&record).expect("serialize");
+        let restored: ResourceLimitsRecord = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored, record);
+    }
+
+    /// Backward-compat: a SessionRecord JSON blob written BEFORE Plan 16-02
+    /// (no `limits` field at all) MUST deserialize cleanly with
+    /// `record.limits.is_none()`. If `#[serde(default)]` is removed from the
+    /// `limits` field this test will fail with a missing-field error.
+    #[test]
+    fn session_record_deserializes_without_limits_field() {
+        let json = r#"{
+            "session_id": "old001",
+            "name": null,
+            "supervisor_pid": 1,
+            "child_pid": 2,
+            "started": "2026-04-17T10:00:00+00:00",
+            "started_epoch": 1,
+            "status": "running",
+            "attachment": "attached",
+            "exit_code": null,
+            "command": ["echo", "hi"],
+            "profile": null,
+            "workdir": "/tmp",
+            "network": "blocked",
+            "job_object_name": null,
+            "rollback_session": null
+        }"#;
+        let record: SessionRecord = serde_json::from_str(json).expect("legacy JSON parses");
+        assert!(
+            record.limits.is_none(),
+            "missing field must default to None"
+        );
+    }
+
+    /// Forward-compat: a JSON blob with an empty `"limits": {}` object
+    /// deserializes to `Some(ResourceLimitsRecord::default())`. This covers
+    /// a future code path that might write `Some(empty)` instead of `None`.
+    #[test]
+    fn session_record_deserializes_with_empty_limits_object() {
+        let json = r#"{
+            "session_id": "new001",
+            "name": null,
+            "supervisor_pid": 1,
+            "child_pid": 2,
+            "started": "2026-04-18T10:00:00+00:00",
+            "started_epoch": 1,
+            "status": "running",
+            "attachment": "attached",
+            "exit_code": null,
+            "command": ["echo", "hi"],
+            "profile": null,
+            "workdir": "/tmp",
+            "network": "blocked",
+            "job_object_name": null,
+            "rollback_session": null,
+            "limits": {}
+        }"#;
+        let record: SessionRecord = serde_json::from_str(json).expect("empty-limits parses");
+        let limits = record.limits.expect("empty object yields Some");
+        assert!(limits.is_empty());
+        assert_eq!(limits, ResourceLimitsRecord::default());
+    }
+
+    /// Backward-compat: a session JSON blob with a populated `"limits": {...}`
+    /// round-trips through `serde_json::to_string` + `from_str` preserving
+    /// every field.
+    #[test]
+    fn session_record_deserializes_with_populated_limits() {
+        let json = r#"{
+            "session_id": "live001",
+            "name": null,
+            "supervisor_pid": 1,
+            "child_pid": 2,
+            "started": "2026-04-18T10:00:00+00:00",
+            "started_epoch": 1,
+            "status": "running",
+            "attachment": "attached",
+            "exit_code": null,
+            "command": ["echo", "hi"],
+            "profile": null,
+            "workdir": "/tmp",
+            "network": "blocked",
+            "job_object_name": null,
+            "rollback_session": null,
+            "limits": {
+                "cpu_percent": 25,
+                "memory_bytes": 536870912,
+                "timeout_seconds": 300,
+                "max_processes": 10
+            }
+        }"#;
+        let record: SessionRecord = serde_json::from_str(json).expect("populated-limits parses");
+        let limits = record.limits.expect("Some");
+        assert_eq!(limits.cpu_percent, Some(25));
+        assert_eq!(limits.memory_bytes, Some(536_870_912));
+        assert_eq!(limits.timeout_seconds, Some(300));
+        assert_eq!(limits.max_processes, Some(10));
     }
 }

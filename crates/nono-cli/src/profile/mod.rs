@@ -53,6 +53,172 @@ pub struct FilesystemConfig {
     pub write_file: Vec<String>,
 }
 
+/// AIPC-01 (Phase 18) per-handle-type access widening.
+///
+/// Widening only — never narrows the hard-coded default-deny. See
+/// `nono::supervisor::policy` for the hard-coded defaults that this config
+/// extends. Unknown tokens are rejected at parse time via the per-type
+/// `from_token` parsers (see `socket_role_from_token`,
+/// `pipe_direction_from_token`, `job_object_mask_from_token`,
+/// `event_mask_from_token`, `mutex_mask_from_token` below).
+///
+/// SECURITY NOTE: enabling `terminate` for `job_object` grants the child the
+/// ability to terminate process trees IT owns (separate Job Objects the child
+/// created or was assigned to). The supervisor's OWN containment Job is
+/// REFUSED by a structural runtime guard (`CompareObjectHandles` in
+/// `handle_job_object_request`) regardless of this widening — but `terminate`
+/// on other Job Objects is accepted as part of the profile author's contract.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AipcConfig {
+    /// Socket role tokens to widen the default Connect-only allowlist.
+    /// Valid: "connect", "bind", "listen".
+    #[serde(default)]
+    pub socket: Vec<String>,
+    /// Pipe direction tokens to widen the default read-OR-write allowlist.
+    /// Valid: "read", "write", "read+write".
+    #[serde(default)]
+    pub pipe: Vec<String>,
+    /// Job Object access tokens to widen the default JOB_OBJECT_QUERY mask.
+    /// Valid: "query", "set_attributes", "terminate".
+    /// WARNING: see SECURITY NOTE on `AipcConfig`.
+    #[serde(default)]
+    pub job_object: Vec<String>,
+    /// Event access tokens to widen the default SYNCHRONIZE | EVENT_MODIFY_STATE
+    /// mask. Valid: "wait", "signal", "both".
+    #[serde(default)]
+    pub event: Vec<String>,
+    /// Mutex access tokens to widen the default SYNCHRONIZE | MUTEX_MODIFY_STATE
+    /// mask. Valid: "wait", "release", "both".
+    #[serde(default)]
+    pub mutex: Vec<String>,
+}
+
+/// Wrapper for the `capabilities` block on a `Profile`. Currently carries one
+/// optional sub-block (`aipc`); future capability families would land as
+/// sibling fields here.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilitiesConfig {
+    /// AIPC-01 (Phase 18) per-handle-type access widening. Absent block
+    /// (`None`) means the hard-coded defaults from `nono::supervisor::policy`
+    /// apply unchanged.
+    #[serde(default)]
+    pub aipc: Option<AipcConfig>,
+}
+
+/// Pre-resolved per-handle-type allowlist (hard-coded default ∪ profile
+/// widening). Cheap to clone; passed through to the capability pipe thread
+/// via `Arc` per RESEARCH Open Question #3 — pre-resolve to keep the hot
+/// dispatcher path branch-free.
+///
+/// Default values match the D-05 hard-coded defaults: Connect-only socket,
+/// read-OR-write pipe (NOT ReadWrite), `JOB_OBJECT_QUERY` only,
+/// `SYNCHRONIZE | EVENT_MODIFY_STATE` event, `SYNCHRONIZE |
+/// MUTEX_MODIFY_STATE` mutex.
+#[derive(Debug, Clone)]
+pub struct AipcResolvedAllowlist {
+    /// Socket roles allowed for HandleKind::Socket requests.
+    pub socket_roles: Vec<nono::supervisor::SocketRole>,
+    /// Pipe directions allowed for HandleKind::Pipe requests.
+    pub pipe_directions: Vec<nono::supervisor::PipeDirection>,
+    /// Resolved access mask for HandleKind::JobObject requests.
+    pub job_object_mask: u32,
+    /// Resolved access mask for HandleKind::Event requests.
+    pub event_mask: u32,
+    /// Resolved access mask for HandleKind::Mutex requests.
+    pub mutex_mask: u32,
+}
+
+impl Default for AipcResolvedAllowlist {
+    fn default() -> Self {
+        use nono::supervisor::policy;
+        Self {
+            socket_roles: vec![nono::supervisor::SocketRole::Connect],
+            pipe_directions: vec![
+                nono::supervisor::PipeDirection::Read,
+                nono::supervisor::PipeDirection::Write,
+            ],
+            job_object_mask: policy::JOB_OBJECT_DEFAULT_MASK,
+            event_mask: policy::EVENT_DEFAULT_MASK,
+            mutex_mask: policy::MUTEX_DEFAULT_MASK,
+        }
+    }
+}
+
+fn socket_role_from_token(profile_name: &str, tok: &str) -> Result<nono::supervisor::SocketRole> {
+    match tok {
+        "connect" => Ok(nono::supervisor::SocketRole::Connect),
+        "bind" => Ok(nono::supervisor::SocketRole::Bind),
+        "listen" => Ok(nono::supervisor::SocketRole::Listen),
+        _ => Err(NonoError::ProfileParse(format!(
+            "profile '{profile_name}' capabilities.aipc.socket: \
+             unknown role token '{tok}' (valid: connect, bind, listen)"
+        ))),
+    }
+}
+
+fn pipe_direction_from_token(
+    profile_name: &str,
+    tok: &str,
+) -> Result<nono::supervisor::PipeDirection> {
+    match tok {
+        "read" => Ok(nono::supervisor::PipeDirection::Read),
+        "write" => Ok(nono::supervisor::PipeDirection::Write),
+        "read+write" => Ok(nono::supervisor::PipeDirection::ReadWrite),
+        _ => Err(NonoError::ProfileParse(format!(
+            "profile '{profile_name}' capabilities.aipc.pipe: \
+             unknown direction token '{tok}' (valid: read, write, read+write)"
+        ))),
+    }
+}
+
+fn job_object_mask_from_token(profile_name: &str, tok: &str) -> Result<u32> {
+    use nono::supervisor::policy;
+    match tok {
+        "query" => Ok(policy::JOB_OBJECT_QUERY),
+        "set_attributes" => Ok(policy::JOB_OBJECT_SET_ATTRIBUTES),
+        "terminate" => Ok(policy::JOB_OBJECT_TERMINATE),
+        _ => Err(NonoError::ProfileParse(format!(
+            "profile '{profile_name}' capabilities.aipc.job_object: \
+             unknown access token '{tok}' (valid: query, set_attributes, terminate). \
+             WARNING: 'terminate' on the supervisor's own containment Job is REFUSED \
+             by a structural runtime guard — but enabling it for OTHER Job Objects \
+             grants the child the ability to terminate process trees it owns."
+        ))),
+    }
+}
+
+fn event_mask_from_token(profile_name: &str, tok: &str) -> Result<u32> {
+    use nono::supervisor::policy;
+    match tok {
+        "wait" => Ok(policy::SYNCHRONIZE),
+        "signal" => Ok(policy::EVENT_MODIFY_STATE),
+        "both" => Ok(policy::SYNCHRONIZE | policy::EVENT_MODIFY_STATE),
+        _ => Err(NonoError::ProfileParse(format!(
+            "profile '{profile_name}' capabilities.aipc.event: \
+             unknown access token '{tok}' (valid: wait, signal, both)"
+        ))),
+    }
+}
+
+fn mutex_mask_from_token(profile_name: &str, tok: &str) -> Result<u32> {
+    use nono::supervisor::policy;
+    match tok {
+        "wait" => Ok(policy::SYNCHRONIZE),
+        // MUTEX_MODIFY_STATE is documented "Reserved for future use" by
+        // Microsoft; ReleaseMutex works against SYNCHRONIZE alone today.
+        // We include the bit for forward-compat symmetry with EVENT_MODIFY_STATE
+        // (see nono::supervisor::policy::MUTEX_MODIFY_STATE doc).
+        "release" => Ok(policy::MUTEX_MODIFY_STATE),
+        "both" => Ok(policy::SYNCHRONIZE | policy::MUTEX_MODIFY_STATE),
+        _ => Err(NonoError::ProfileParse(format!(
+            "profile '{profile_name}' capabilities.aipc.mutex: \
+             unknown access token '{tok}' (valid: wait, release, both)"
+        ))),
+    }
+}
+
 /// Policy patch configuration in a profile.
 ///
 /// These fields provide explicit subtractive/additive composition on top of
@@ -511,6 +677,67 @@ fn validate_env_credential_keys(profile: &Profile) -> Result<()> {
         })?;
     }
     Ok(())
+}
+
+/// Parse-time validator for the AIPC-01 (Phase 18) `capabilities.aipc` block.
+///
+/// Calls `Profile::resolve_aipc_allowlist` and discards the result. The call
+/// itself runs the per-type `from_token` parsers, surfacing unknown-token
+/// errors with verbose `NonoError::ProfileParse` reasons. Wired into
+/// `parse_profile_file` so the rejection happens at profile load time, not
+/// at the first capability request.
+fn validate_profile_aipc_tokens(profile: &Profile) -> Result<()> {
+    let _ = profile.resolve_aipc_allowlist()?;
+    Ok(())
+}
+
+impl Profile {
+    /// Resolve the per-handle-type AIPC allowlist by UNIONing the hard-coded
+    /// supervisor defaults (D-05) with the profile widening tokens (D-06).
+    ///
+    /// **Widening only** (D-06): a profile narrower than the default does NOT
+    /// narrow the resolved allowlist; the default-deny still applies via the
+    /// hard-coded baseline. Tests `aipc_default_inherits_when_block_absent`
+    /// and `resolve_aipc_allowlist_widens_event_mask_with_signal_token` prove
+    /// the union semantic.
+    ///
+    /// Unknown tokens are rejected with `NonoError::ProfileParse`. Pre-validate
+    /// at profile load time via `validate_profile_aipc_tokens`.
+    pub fn resolve_aipc_allowlist(&self) -> Result<AipcResolvedAllowlist> {
+        let mut out = AipcResolvedAllowlist::default();
+        let aipc = match self.capabilities.aipc.as_ref() {
+            Some(a) => a,
+            None => return Ok(out),
+        };
+        let profile_name: &str = if self.meta.name.is_empty() {
+            "<unknown>"
+        } else {
+            self.meta.name.as_str()
+        };
+
+        for tok in &aipc.socket {
+            let role = socket_role_from_token(profile_name, tok)?;
+            if !out.socket_roles.contains(&role) {
+                out.socket_roles.push(role);
+            }
+        }
+        for tok in &aipc.pipe {
+            let dir = pipe_direction_from_token(profile_name, tok)?;
+            if !out.pipe_directions.contains(&dir) {
+                out.pipe_directions.push(dir);
+            }
+        }
+        for tok in &aipc.job_object {
+            out.job_object_mask |= job_object_mask_from_token(profile_name, tok)?;
+        }
+        for tok in &aipc.event {
+            out.event_mask |= event_mask_from_token(profile_name, tok)?;
+        }
+        for tok in &aipc.mutex {
+            out.mutex_mask |= mutex_mask_from_token(profile_name, tok)?;
+        }
+        Ok(out)
+    }
 }
 
 /// Three-state value used for inheritable profile fields.
@@ -989,6 +1216,10 @@ pub struct Profile {
     /// Treated like built-in heavy directories (for example `target`).
     #[serde(default)]
     pub skipdirs: Vec<String>,
+    /// AIPC-01 (Phase 18) capability widening. Absent block (`Default`)
+    /// means the hard-coded supervisor defaults apply unchanged.
+    #[serde(default)]
+    pub capabilities: CapabilitiesConfig,
 }
 
 #[derive(Deserialize)]
@@ -1025,6 +1256,8 @@ struct ProfileDeserialize {
     interactive: bool,
     #[serde(default)]
     skipdirs: Vec<String>,
+    #[serde(default)]
+    capabilities: CapabilitiesConfig,
 }
 
 impl From<ProfileDeserialize> for Profile {
@@ -1044,6 +1277,7 @@ impl From<ProfileDeserialize> for Profile {
             allow_launch_services: raw.allow_launch_services,
             interactive: raw.interactive,
             skipdirs: raw.skipdirs,
+            capabilities: raw.capabilities,
         }
     }
 }
@@ -1235,6 +1469,12 @@ fn parse_profile_file(path: &Path) -> Result<Profile> {
 
     // Validate env_credentials keys (URI entries need structural validation)
     validate_env_credential_keys(&profile)?;
+
+    // Validate AIPC-01 (Phase 18) capability widening tokens at parse time so
+    // unknown tokens fail loudly here rather than at the first capability
+    // request. Reuses Profile::resolve_aipc_allowlist's per-type from_token
+    // parsers.
+    validate_profile_aipc_tokens(&profile)?;
 
     Ok(profile)
 }
@@ -1475,6 +1715,26 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
         allow_launch_services: child.allow_launch_services.or(base.allow_launch_services),
         interactive: base.interactive || child.interactive,
         skipdirs: dedup_append(&base.skipdirs, &child.skipdirs),
+        // Phase 18 Plan 18-03 (D-06): widening only — UNION the per-key
+        // string-token arrays from base + child so a child profile can ADD
+        // tokens to its base's `capabilities.aipc` block without losing the
+        // base's allowlist. The default-deny baseline still applies via
+        // `Profile::resolve_aipc_allowlist` (hard-coded supervisor defaults
+        // are unioned at allowlist-resolution time).
+        capabilities: CapabilitiesConfig {
+            aipc: match (base.capabilities.aipc, child.capabilities.aipc) {
+                (None, None) => None,
+                (Some(b), None) => Some(b),
+                (None, Some(c)) => Some(c),
+                (Some(b), Some(c)) => Some(AipcConfig {
+                    socket: dedup_append(&b.socket, &c.socket),
+                    pipe: dedup_append(&b.pipe, &c.pipe),
+                    job_object: dedup_append(&b.job_object, &c.job_object),
+                    event: dedup_append(&b.event, &c.event),
+                    mutex: dedup_append(&b.mutex, &c.mutex),
+                }),
+            },
+        },
     }
 }
 
@@ -1877,7 +2137,8 @@ mod tests {
     fn test_resolve_user_config_dir_uses_valid_absolute_xdg() {
         let _guard = env_lock();
         let tmp = tempdir().expect("tmpdir");
-        let _env = EnvVarGuard::set_all(&[("XDG_CONFIG_HOME", tmp.path().to_str().expect("utf8 path"))]);
+        let _env =
+            EnvVarGuard::set_all(&[("XDG_CONFIG_HOME", tmp.path().to_str().expect("utf8 path"))]);
         let resolved = resolve_user_config_dir().expect("resolve user config dir");
         assert_eq!(
             resolved,
@@ -2779,6 +3040,7 @@ mod tests {
             allow_launch_services: Some(false),
             interactive: false,
             skipdirs: vec!["vendor".to_string()],
+            capabilities: CapabilitiesConfig::default(),
         }
     }
 
@@ -2847,6 +3109,7 @@ mod tests {
             allow_launch_services: Some(true),
             interactive: false,
             skipdirs: vec!["dist".to_string()],
+            capabilities: CapabilitiesConfig::default(),
         }
     }
 
@@ -4397,5 +4660,284 @@ mod tests {
             .expect("my_service credential should exist");
         assert_eq!(cred.credential_key, "file:///run/secrets/api-token");
         assert_eq!(cred.env_var, Some("MY_API_KEY".to_string()));
+    }
+
+    // ========================================================================
+    // Phase 18 AIPC-01 Plan 18-03 Task 2 — capabilities.aipc widening tests
+    // ========================================================================
+
+    #[test]
+    fn aipc_capabilities_block_parses_valid_tokens() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("aipc-valid.json");
+        let json = r#"{
+          "meta": { "name": "test-aipc-valid" },
+          "capabilities": {
+            "aipc": {
+              "socket": ["connect", "bind"],
+              "pipe": ["read", "write"],
+              "job_object": ["query"],
+              "event": ["wait", "signal"],
+              "mutex": ["wait", "release"]
+            }
+          }
+        }"#;
+        std::fs::write(&path, json).expect("write profile");
+        let profile = parse_profile_file(&path).expect("parse profile");
+        let aipc = profile
+            .capabilities
+            .aipc
+            .as_ref()
+            .expect("aipc block present");
+        assert_eq!(aipc.socket, vec!["connect".to_string(), "bind".to_string()]);
+        assert_eq!(aipc.pipe, vec!["read".to_string(), "write".to_string()]);
+        assert_eq!(aipc.job_object, vec!["query".to_string()]);
+        assert_eq!(aipc.event, vec!["wait".to_string(), "signal".to_string()]);
+        assert_eq!(aipc.mutex, vec!["wait".to_string(), "release".to_string()]);
+    }
+
+    #[test]
+    fn aipc_unknown_token_rejected_at_parse_time() {
+        // Parameterized over all 5 from_token parsers — each must reject an
+        // unknown token at parse time with NonoError::ProfileParse and a
+        // verbose message naming the offending token.
+        let cases: &[(&str, &str, &[&str])] = &[
+            (
+                "socket",
+                "bogus_role",
+                &["bogus_role", "socket", "connect, bind, listen"],
+            ),
+            (
+                "pipe",
+                "duplex",
+                &["duplex", "pipe", "read, write, read+write"],
+            ),
+            (
+                "job_object",
+                "kill",
+                &["kill", "job_object", "query, set_attributes, terminate"],
+            ),
+            (
+                "event",
+                "modify",
+                &["modify", "event", "wait, signal, both"],
+            ),
+            (
+                "mutex",
+                "acquire",
+                &["acquire", "mutex", "wait, release, both"],
+            ),
+        ];
+        for (key, bogus, must_contain) in cases {
+            let dir = tempdir().expect("tempdir");
+            let path = dir.path().join(format!("aipc-bogus-{key}.json"));
+            let json = format!(
+                r#"{{
+                  "meta": {{ "name": "test-aipc-bogus" }},
+                  "capabilities": {{
+                    "aipc": {{
+                      "{key}": ["{bogus}"]
+                    }}
+                  }}
+                }}"#
+            );
+            std::fs::write(&path, &json).expect("write profile");
+            let err = parse_profile_file(&path)
+                .expect_err(&format!("expected ProfileParse for {key}/{bogus}"));
+            let msg = err.to_string();
+            for needle in *must_contain {
+                assert!(
+                    msg.contains(needle),
+                    "kind {key}: expected error to contain '{needle}', got: {msg}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn aipc_default_inherits_when_block_absent() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("no-aipc.json");
+        let json = r#"{ "meta": { "name": "no-aipc-block" } }"#;
+        std::fs::write(&path, json).expect("write profile");
+        let profile = parse_profile_file(&path).expect("parse profile");
+        assert!(
+            profile.capabilities.aipc.is_none(),
+            "absent capabilities.aipc must yield None, got: {:?}",
+            profile.capabilities.aipc
+        );
+        // resolve_aipc_allowlist returns the hard-coded D-05 defaults
+        // verbatim when aipc is None.
+        let resolved = profile.resolve_aipc_allowlist().expect("resolve");
+        let default = AipcResolvedAllowlist::default();
+        assert_eq!(resolved.socket_roles, default.socket_roles);
+        assert_eq!(resolved.pipe_directions, default.pipe_directions);
+        assert_eq!(resolved.job_object_mask, default.job_object_mask);
+        assert_eq!(resolved.event_mask, default.event_mask);
+        assert_eq!(resolved.mutex_mask, default.mutex_mask);
+    }
+
+    #[test]
+    fn resolve_aipc_allowlist_widens_event_mask_with_signal_token() {
+        // D-06 widening-only semantic: profile UNIONs with hard-coded default,
+        // never narrows. event ["wait"] alone (narrower than default which
+        // includes signal) MUST still include the default's signal bit
+        // because the union semantic preserves the baseline.
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("event-wait-only.json");
+        let json = r#"{
+          "meta": { "name": "event-wait-only" },
+          "capabilities": { "aipc": { "event": ["wait"] } }
+        }"#;
+        std::fs::write(&path, json).expect("write profile");
+        let profile = parse_profile_file(&path).expect("parse profile");
+        let resolved = profile.resolve_aipc_allowlist().expect("resolve");
+        // Default = SYNCHRONIZE | EVENT_MODIFY_STATE; widening with "wait"
+        // (= SYNCHRONIZE) is a no-op (subset of default), so the resolved
+        // mask EQUALS the default. This is the union semantic.
+        assert_eq!(
+            resolved.event_mask,
+            nono::supervisor::policy::EVENT_DEFAULT_MASK
+        );
+    }
+
+    #[test]
+    fn resolve_aipc_allowlist_widens_socket_role_with_bind_token() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("socket-bind-widened.json");
+        let json = r#"{
+          "meta": { "name": "socket-bind-widened" },
+          "capabilities": { "aipc": { "socket": ["bind", "connect"] } }
+        }"#;
+        std::fs::write(&path, json).expect("write profile");
+        let profile = parse_profile_file(&path).expect("parse profile");
+        let resolved = profile.resolve_aipc_allowlist().expect("resolve");
+        // Default contains Connect; widening with bind+connect (connect is
+        // dedup-skipped) MUST yield [Connect, Bind].
+        assert!(resolved
+            .socket_roles
+            .contains(&nono::supervisor::SocketRole::Connect));
+        assert!(resolved
+            .socket_roles
+            .contains(&nono::supervisor::SocketRole::Bind));
+        assert!(!resolved
+            .socket_roles
+            .contains(&nono::supervisor::SocketRole::Listen));
+    }
+
+    #[test]
+    fn resolve_aipc_allowlist_widens_pipe_with_readwrite_token() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("pipe-readwrite-widened.json");
+        let json = r#"{
+          "meta": { "name": "pipe-readwrite-widened" },
+          "capabilities": {
+            "aipc": { "pipe": ["read", "write", "read+write"] }
+          }
+        }"#;
+        std::fs::write(&path, json).expect("write profile");
+        let profile = parse_profile_file(&path).expect("parse profile");
+        let resolved = profile.resolve_aipc_allowlist().expect("resolve");
+        // Default contains Read + Write; widening adds ReadWrite.
+        assert!(resolved
+            .pipe_directions
+            .contains(&nono::supervisor::PipeDirection::Read));
+        assert!(resolved
+            .pipe_directions
+            .contains(&nono::supervisor::PipeDirection::Write));
+        assert!(resolved
+            .pipe_directions
+            .contains(&nono::supervisor::PipeDirection::ReadWrite));
+
+        // Default-only profile MUST NOT include ReadWrite.
+        let default_only = Profile::default();
+        let default_resolved = default_only.resolve_aipc_allowlist().expect("resolve");
+        assert!(!default_resolved
+            .pipe_directions
+            .contains(&nono::supervisor::PipeDirection::ReadWrite));
+    }
+
+    #[test]
+    fn resolve_aipc_allowlist_widens_job_object_with_terminate_token() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("job-terminate-widened.json");
+        let json = r#"{
+          "meta": { "name": "job-terminate-widened" },
+          "capabilities": {
+            "aipc": { "job_object": ["query", "terminate"] }
+          }
+        }"#;
+        std::fs::write(&path, json).expect("write profile");
+        let profile = parse_profile_file(&path).expect("parse profile");
+        let resolved = profile.resolve_aipc_allowlist().expect("resolve");
+        let expected = nono::supervisor::policy::JOB_OBJECT_QUERY
+            | nono::supervisor::policy::JOB_OBJECT_TERMINATE;
+        assert_eq!(
+            resolved.job_object_mask, expected,
+            "widened mask must include both QUERY and TERMINATE bits"
+        );
+        // Note: the runtime guard in `handle_job_object_request`
+        // (CompareObjectHandles vs containment_job) STILL refuses to broker
+        // the supervisor's own containment Job even with this widening —
+        // proven end-to-end by
+        // handle_denies_job_object_brokering_of_containment_job_even_with_profile_widening.
+    }
+
+    #[test]
+    fn built_in_profiles_load_with_aipc_block_present() {
+        // policy.json is embedded at build time; the 5 named profiles
+        // (claude-code, codex, opencode, openclaw, swival) all carry
+        // capabilities.aipc per Plan 18-03 Task 2 step 6. Round-trip
+        // through serde + the parse-time validator.
+        use crate::profile::builtin;
+        let names = &["claude-code", "codex", "opencode", "openclaw", "swival"];
+        for name in names {
+            let profile = builtin::get_builtin(name)
+                .unwrap_or_else(|| panic!("built-in profile '{name}' must exist"));
+            let aipc = profile.capabilities.aipc.as_ref().unwrap_or_else(|| {
+                panic!("built-in profile '{name}' must carry capabilities.aipc")
+            });
+            // Every shipped profile must have at least a non-empty socket
+            // entry (default Connect) — even openclaw's minimal config.
+            assert!(
+                !aipc.socket.is_empty(),
+                "profile '{name}' has empty capabilities.aipc.socket"
+            );
+            // resolve_aipc_allowlist must not error on any built-in profile.
+            let _ = profile
+                .resolve_aipc_allowlist()
+                .unwrap_or_else(|e| panic!("profile '{name}' resolve failed: {e}"));
+        }
+    }
+
+    #[test]
+    fn policy_json_validates_against_schema() {
+        // Both policy.json and the schema are embedded at build time via
+        // include_str! in builtin.rs / config/embedded.rs. Run the schema
+        // validator across every named profile to catch drift between data
+        // and schema.
+        use jsonschema::Validator;
+        let policy_json: serde_json::Value =
+            serde_json::from_str(include_str!("../../data/policy.json"))
+                .expect("policy.json must be valid JSON");
+        let schema_json: serde_json::Value =
+            serde_json::from_str(include_str!("../../data/nono-profile.schema.json"))
+                .expect("nono-profile.schema.json must be valid JSON");
+        let validator = Validator::new(&schema_json).expect("schema must compile");
+
+        let profiles_obj = policy_json
+            .get("profiles")
+            .and_then(|p| p.as_object())
+            .expect("policy.json must contain a 'profiles' object");
+        for (name, profile_json) in profiles_obj {
+            // ProfileMeta requires a 'name' field; built-in profiles set
+            // meta.name explicitly. Validate the profile body itself.
+            let result = validator.validate(profile_json);
+            assert!(
+                result.is_ok(),
+                "profile '{name}' must validate against schema; errors: {:?}",
+                result.err().map(|e| format!("{e}"))
+            );
+        }
     }
 }
