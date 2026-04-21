@@ -150,6 +150,7 @@ Progress: [██████████] 100% (62/62 plans implementation-comp
 | 260421-rcv | Fix race in start_logging WriteFile to active_attachment pipe (gemini high) | 2026-04-21 | 4875676 | [260421-rcv-fix-active-attachment-handle-race](./quick/260421-rcv-fix-active-attachment-handle-race/) |
 | 260421-njj | Fix literal newline in Job Object name on v2.0-pr only (gemini high; docs-only on windows-squash) | 2026-04-21 | — (v2.0-pr 2d858bf) | [260421-njj-fix-v2-pr-job-object-newline](./quick/260421-njj-fix-v2-pr-job-object-newline/) |
 | 260421-dbd | Stage sibling DLLs/manifests alongside program binary in blocked-network staging (gemini medium) | 2026-04-21 | 7faa3f7 | [260421-dbd-fix-blocked-network-staging-siblings](./quick/260421-dbd-fix-blocked-network-staging-siblings/) |
+| 260421-bpq | Quote driver binPath in sc create args (gemini high — service start breakage on paths with spaces) | 2026-04-21 | 7e58520 | [260421-bpq-fix-sc-create-binpath-quoting](./quick/260421-bpq-fix-sc-create-binpath-quoting/) |
 
 ## Deferred Items
 
