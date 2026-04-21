@@ -108,7 +108,65 @@ pub(super) fn stage_program_for_blocked_network_launch(
             e
         ))
     })?;
+    // Also stage sibling files the program is likely to load at startup
+    // (side-by-side DLLs, runtime manifests, .NET configs). Without these,
+    // programs that ship with bundled dependencies would fail to start from
+    // the temp staging directory. Extension-gated so we don't blindly copy
+    // unrelated data when the program lives in e.g. `C:\Program Files\...`.
+    if let Some(parent) = program.parent() {
+        copy_program_siblings(parent, file_name, &staged_dir)?;
+    }
     Ok((staged_program, staged_dir))
+}
+
+/// Copy sibling files from `source_dir` into `staged_dir`, filtering to
+/// extensions commonly needed for Windows program startup. Skips the program
+/// binary itself (already copied) and anything that isn't a regular file.
+/// Fail-secure: any copy error aborts the whole stage.
+fn copy_program_siblings(
+    source_dir: &Path,
+    program_file_name: &std::ffi::OsStr,
+    staged_dir: &Path,
+) -> Result<()> {
+    const ALLOWED_EXTENSIONS: &[&str] = &["dll", "pdb", "manifest", "config", "xml"];
+    let entries = std::fs::read_dir(source_dir).map_err(|e| {
+        NonoError::SandboxInit(format!(
+            "Failed to enumerate program directory {} for sibling copy: {}",
+            source_dir.display(),
+            e
+        ))
+    })?;
+    for entry in entries.flatten() {
+        let entry_name = entry.file_name();
+        if entry_name == program_file_name {
+            continue;
+        }
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let allowed = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_ascii_lowercase())
+            .is_some_and(|ext| ALLOWED_EXTENSIONS.iter().any(|allowed| *allowed == ext));
+        if !allowed {
+            continue;
+        }
+        let dest = staged_dir.join(&entry_name);
+        std::fs::copy(&path, &dest).map_err(|e| {
+            NonoError::SandboxInit(format!(
+                "Failed to stage program sibling {} -> {}: {}",
+                path.display(),
+                dest.display(),
+                e
+            ))
+        })?;
+    }
+    Ok(())
 }
 
 pub(super) fn cleanup_network_enforcement_staging(staged_dir: &Path) {
