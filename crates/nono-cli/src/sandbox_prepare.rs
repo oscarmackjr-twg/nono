@@ -3,6 +3,7 @@ use crate::cli::SandboxArgs;
 #[cfg(target_os = "linux")]
 use crate::config;
 use crate::credential_runtime::load_env_credentials;
+use crate::network_policy;
 use crate::profile;
 use crate::profile::WorkdirAccess;
 use crate::profile_runtime::prepare_profile;
@@ -231,6 +232,13 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
             .as_ref()
             .map(|network| network.allow_domains.clone())
             .unwrap_or_default();
+        if !silent {
+            for warning in
+                network_policy::collect_allow_domain_port_warnings(&allow_domain, "manifest allow_domain")
+            {
+                output::print_warning(&warning);
+            }
+        }
         let credentials = manifest
             .credentials
             .iter()
@@ -287,6 +295,27 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
         allow_launch_services: profile_allow_launch_services,
         override_deny_paths,
     } = prepared_profile;
+
+    // OAUTH-03 (Plan 22-04): warn when allow_domain entries include `:port`
+    // suffixes — nono now ignores ports in allow-domain rules and only applies
+    // hostname filtering through the proxy. Cherry-picked from upstream
+    // 005579a9; deprecation-warning helper from upstream is intentionally
+    // omitted here — fork has no `command_blocking_deprecation` flow at this
+    // call site (deprecation warnings already emit at profile-load time).
+    if !silent {
+        for warning in network_policy::collect_allow_domain_port_warnings(
+            &profile_allow_domain,
+            "profile allow_domain",
+        ) {
+            output::print_warning(&warning);
+        }
+        for warning in network_policy::collect_allow_domain_port_warnings(
+            &args.allow_proxy,
+            "--allow-domain",
+        ) {
+            output::print_warning(&warning);
+        }
+    }
 
     #[cfg(target_os = "linux")]
     if args.profile.as_deref() == Some("claude-code") {
