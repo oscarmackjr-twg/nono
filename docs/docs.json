@@ -8,7 +8,9 @@
   },
   "favicon": "/assets/logo.png",
   "colors": {
-    "primary": "#6366F1"
+    "primary": "#e8724a",
+    "light": "#e8724a",
+    "dark": "#e8724a"
   },
   "appearance": {
     "default": "dark"
@@ -30,6 +32,7 @@
         "pages": [
           "cli/getting_started/installation",
           "cli/getting_started/quickstart",
+          "cli/usage/developer-workflows",
           "cli/usage/examples",
           "cli/usage/troubleshooting"
         ]
@@ -37,6 +40,7 @@
       {
         "group": "Features",
         "pages": [
+          "cli/features/session-lifecycle",
           "cli/features/profiles-groups",
           "cli/features/profile-authoring",
           "cli/features/atomic-rollbacks",
@@ -44,7 +48,6 @@
           "cli/features/supervisor",
           "cli/features/networking",
           "cli/features/credential-injection",
-          "cli/features/execution-modes",
           "cli/features/policy-introspection",
           "cli/features/learn",
           "cli/features/trust"
@@ -63,9 +66,12 @@
         "group": "Platform Internals",
         "pages": [
           "cli/internals/index",
+          "cli/features/execution-modes",
           "cli/internals/security-model",
           "cli/internals/landlock",
           "cli/internals/seatbelt",
+          "cli/internals/wsl2",
+          "cli/internals/wsl2-feature-matrix",
           "cli/internals/application",
           "cli/internals/signing",
           "cli/internals/containers"
@@ -77,7 +83,25 @@
       },
       {
         "group": "Development",
-        "pages": ["cli/development/index", "cli/development/testing"]
+        "pages": [
+          "cli/development/index",
+          "cli/development/testing",
+          "cli/development/windows-supervisor-ipc",
+          "cli/development/windows-feature-gap-matrix",
+          "cli/development/windows-security-model",
+          "cli/development/windows-filesystem-parity-contract",
+          "cli/development/windows-network-enforcement",
+          "cli/development/windows-full-port-roadmap",
+          "cli/development/windows-macos-parity-roadmap",
+          "cli/development/windows-installer-strategy",
+          "cli/development/windows-signing-guide",
+          "cli/development/windows-preview-pilot",
+          "cli/development/windows-preview-validation",
+          "cli/development/windows-release-candidate-checklist",
+          "cli/development/windows-win-1706-decision-package",
+          "cli/development/windows-win-1706-option-1-workstream",
+          "cli/development/windows-promotion-criteria"
+        ]
       }
     ]
   },

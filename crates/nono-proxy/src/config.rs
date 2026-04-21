@@ -72,7 +72,8 @@ fn default_bind_addr() -> IpAddr {
 /// Configuration for a reverse proxy credential route.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteConfig {
-    /// Path prefix for routing (e.g., "/openai")
+    /// Path prefix for routing (e.g., "openai").
+    /// Must NOT include leading or trailing slashes — it is a bare service name, not a URL path.
     pub prefix: String,
 
     /// Upstream URL to forward to (e.g., "https://api.openai.com")
@@ -133,6 +134,15 @@ pub struct RouteConfig {
     /// (backward compatible).
     #[serde(default)]
     pub endpoint_rules: Vec<EndpointRule>,
+
+    /// Optional path to a PEM-encoded CA certificate file for upstream TLS.
+    ///
+    /// When set, the proxy trusts this CA in addition to the system roots
+    /// when connecting to the upstream for this route. This is required for
+    /// upstreams that use self-signed or private CA certificates (e.g.,
+    /// Kubernetes API servers).
+    #[serde(default)]
+    pub tls_ca: Option<String>,
 }
 
 /// An HTTP method+path access rule for reverse proxy endpoint filtering.
@@ -223,15 +233,24 @@ fn endpoint_allowed(rules: &[EndpointRule], method: &str, path: &str) -> bool {
     })
 }
 
-/// Normalize a URL path for matching: strip query string, collapse double
-/// slashes, strip trailing slash (but preserve root "/").
+/// Normalize a URL path for matching: percent-decode, strip query string,
+/// collapse double slashes, strip trailing slash (but preserve root "/").
+///
+/// Percent-decoding prevents bypass via encoded characters (e.g.,
+/// `/api/%70rojects` evading a rule for `/api/projects/*`).
 fn normalize_path(path: &str) -> String {
     // Strip query string
     let path = path.split('?').next().unwrap_or(path);
 
+    // Percent-decode to prevent bypass via encoded segments.
+    // Use decode_binary + from_utf8_lossy so invalid UTF-8 sequences
+    // (e.g., %FF) become U+FFFD instead of falling back to the raw path.
+    let binary = urlencoding::decode_binary(path.as_bytes());
+    let decoded = String::from_utf8_lossy(&binary);
+
     // Collapse double slashes by splitting on '/' and filtering empties,
     // then rejoin. This also strips trailing slash.
-    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let segments: Vec<&str> = decoded.split('/').filter(|s| !s.is_empty()).collect();
     if segments.is_empty() {
         "/".to_string()
     } else {
@@ -523,11 +542,77 @@ mod tests {
     #[test]
     fn test_endpoint_rule_serde_default() {
         let json = r#"{
-            "prefix": "/test",
+            "prefix": "test",
             "upstream": "https://example.com"
         }"#;
         let route: RouteConfig = serde_json::from_str(json).unwrap();
         assert!(route.endpoint_rules.is_empty());
+        assert!(route.tls_ca.is_none());
+    }
+
+    #[test]
+    fn test_tls_ca_serde_roundtrip() {
+        let json = r#"{
+            "prefix": "k8s",
+            "upstream": "https://kubernetes.local:6443",
+            "tls_ca": "/run/secrets/k8s-ca.crt"
+        }"#;
+        let route: RouteConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(route.tls_ca.as_deref(), Some("/run/secrets/k8s-ca.crt"));
+
+        let serialized = serde_json::to_string(&route).unwrap();
+        let deserialized: RouteConfig = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(
+            deserialized.tls_ca.as_deref(),
+            Some("/run/secrets/k8s-ca.crt")
+        );
+    }
+
+    #[test]
+    fn test_endpoint_rule_percent_encoded_path_decoded() {
+        // Security: percent-encoded segments must not bypass rules.
+        // e.g., /api/v4/%70rojects should match a rule for /api/v4/projects/*
+        let rule = EndpointRule {
+            method: "GET".to_string(),
+            path: "/api/v4/projects/*/issues".to_string(),
+        };
+        assert!(check(&rule, "GET", "/api/v4/%70rojects/123/issues"));
+        assert!(check(&rule, "GET", "/api/v4/pro%6Aects/123/issues"));
+    }
+
+    #[test]
+    fn test_endpoint_rule_percent_encoded_full_segment() {
+        let rule = EndpointRule {
+            method: "POST".to_string(),
+            path: "/api/data".to_string(),
+        };
+        // %64%61%74%61 = "data"
+        assert!(check(&rule, "POST", "/api/%64%61%74%61"));
+    }
+
+    #[test]
+    fn test_compiled_endpoint_rules_percent_encoded() {
+        let rules = vec![EndpointRule {
+            method: "GET".to_string(),
+            path: "/repos/*/issues".to_string(),
+        }];
+        let compiled = CompiledEndpointRules::compile(&rules).unwrap();
+        // %69ssues = "issues"
+        assert!(compiled.is_allowed("GET", "/repos/myrepo/%69ssues"));
+        assert!(!compiled.is_allowed("GET", "/repos/myrepo/%70ulls"));
+    }
+
+    #[test]
+    fn test_endpoint_rule_percent_encoded_invalid_utf8() {
+        // Security: invalid UTF-8 percent sequences must not fall back to
+        // the raw path (which could bypass rules). Lossy decoding replaces
+        // invalid bytes with U+FFFD, so the path won't match real segments.
+        let rule = EndpointRule {
+            method: "GET".to_string(),
+            path: "/api/projects".to_string(),
+        };
+        // %FF is not valid UTF-8 — must not match "/api/projects"
+        assert!(!check(&rule, "GET", "/api/%FFprojects"));
     }
 
     #[test]

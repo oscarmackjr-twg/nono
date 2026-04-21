@@ -351,6 +351,7 @@ pub fn cleanup_stale_state_files() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_env::{lock_env, EnvVarGuard};
     use tempfile::tempdir;
 
     #[test]
@@ -385,5 +386,26 @@ mod tests {
         let loaded: SandboxState = serde_json::from_str(&content).expect("Failed to parse state");
 
         assert!(loaded.net_blocked);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_validate_cap_file_path_accepts_windows_runtime_temp_dir() {
+        let dir = tempdir().expect("Failed to create temp dir");
+        let cap_file = dir.path().join(".nono-123.json");
+        std::fs::write(&cap_file, "{}").expect("write cap file");
+
+        let _guard = lock_env();
+        let _env = EnvVarGuard::set_all(&[
+            ("TMP", dir.path().to_str().expect("utf8 path")),
+            ("TEMP", dir.path().to_str().expect("utf8 path")),
+        ]);
+
+        let validated = validate_cap_file_path(cap_file.to_str().expect("utf8 path"))
+            .expect("runtime temp cap file should validate");
+        assert_eq!(
+            validated,
+            cap_file.canonicalize().expect("canonical cap file path")
+        );
     }
 }

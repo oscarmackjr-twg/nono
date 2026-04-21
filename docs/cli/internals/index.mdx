@@ -5,6 +5,8 @@ description: How nono enforces sandboxing at the OS level - threat model, guaran
 
 nono implements a capability-based security model using kernel-level enforcement. This page explains the security guarantees, assumptions, and limitations.
 
+On Windows, the current product contract is intentionally narrower than Linux or macOS: direct restricted execution, blocked-network and selected supervised flows are supported where the backend can enforce them credibly, while live `shell` and `wrap` remain intentionally unavailable. See [Security Model](/cli/internals/security-model) and [Windows Security Model](/cli/development/windows-security-model) for the exact boundary.
+
 ## Core Principle
 
 **Deny by default, allow explicitly.**
@@ -119,4 +121,5 @@ nono applies the sandbox and immediately exec()s into the target command.
 
 - [macOS Seatbelt](/cli/internals/seatbelt) - How nono uses Seatbelt on macOS
 - [Linux Landlock](/cli/internals/landlock) - How nono uses Landlock on Linux
+- [WSL2 Support](/cli/internals/wsl2) - Running nono inside WSL2 — compatibility, limitations, and workarounds
 - [Why OS-Level Controls](/cli/internals/application) - Why kernel enforcement beats application-level controls

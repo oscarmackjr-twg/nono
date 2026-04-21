@@ -335,6 +335,9 @@ Profiles support these environment variables in path values:
 | `$HOME` | User's home directory |
 | `$XDG_CONFIG_HOME` | XDG config directory (default: `~/.config`) |
 | `$XDG_DATA_HOME` | XDG data directory (default: `~/.local/share`) |
+| `$XDG_STATE_HOME` | XDG state directory (default: `~/.local/state`) |
+| `$XDG_CACHE_HOME` | XDG cache directory (default: `~/.cache`) |
+| `$XDG_RUNTIME_DIR` | XDG runtime directory (no default; left unexpanded when unset) |
 | `$TMPDIR` | System temporary directory |
 | `$UID` | Current user ID |
 
@@ -463,6 +466,7 @@ nono ships with 32 built-in groups:
 **System path groups** (grant necessary system access):
 - `system_read_macos` - macOS system libraries, frameworks, dyld cache
 - `system_read_linux` - Linux system libraries, locale data
+- `system_read_windows` - Windows system executables and runtime DLLs
 - `system_write_macos` - macOS temp directories, cache paths
 - `system_write_linux` - Linux temp directories
 
@@ -475,7 +479,7 @@ nono ships with 32 built-in groups:
 - `rust_runtime` - rustup, cargo
 - `python_runtime` - pyenv, conda, pip, uv
 - `go_runtime` - ~/go, /usr/local/go
-- `nix_runtime` - Nix profile paths, /nix/var (Linux only)
+- `nix_runtime` - Nix profile paths, /nix/store, /nix/var (Linux only)
 - `user_tools` - Local bins, .desktop files, man pages, shell completions
 - `homebrew` - /opt/homebrew, /usr/local/Cellar, /usr/local/opt (macOS only)
 
@@ -509,7 +513,7 @@ Groups with a `platform` field only apply on that OS:
 
 Groups without a `platform` field (like `deny_credentials`) apply on all platforms.
 
-Platform-specific groups use `_macos` or `_linux` suffixes by convention.
+Platform-specific groups use `_macos`, `_linux`, or `_windows` suffixes by convention.
 
 
 ### Platform Differences
