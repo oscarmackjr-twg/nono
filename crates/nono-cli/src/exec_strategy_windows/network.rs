@@ -278,7 +278,13 @@ pub(super) fn build_wfp_driver_create_args(config: &WfpProbeConfig) -> Vec<Strin
         "create".to_string(),
         config.backend_driver.to_string(),
         "binPath=".to_string(),
-        config.backend_driver_binary_path.display().to_string(),
+        // Embed literal quotes around the image path so the SCM stores a
+        // quoted ImagePath entry. Without them, any whitespace in the path
+        // (e.g. `C:\Program Files\...`) would be interpreted as argument
+        // separators at service-start time and the service would fail to
+        // locate its image. See `format_wfp_service_command` above for the
+        // matching treatment on the service-binary side.
+        format!("\"{}\"", config.backend_driver_binary_path.display()),
         "type=".to_string(),
         "kernel".to_string(),
         "start=".to_string(),
