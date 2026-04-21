@@ -147,6 +147,7 @@ Progress: [██████████] 100% (62/62 plans implementation-comp
 | 260419-cad | Add Phase 20 entries for UPST-01..04 to CHANGELOG [Unreleased] | 2026-04-19 | 21401fd | [260419-cad-changelog-phase-20-upst](./quick/260419-cad-changelog-phase-20-upst/) |
 | 260419-dud | Document Phase 20 user-facing surfaces in docs/cli/ + crates/nono README version pin | 2026-04-19 | d2e18c3 | [260419-dud-docs-phase-20-flags-uri](./quick/260419-dud-docs-phase-20-flags-uri/) |
 | 260421-gry | Fix Windows Command::new relative-path hijacking (10 call sites; gemini security-high) | 2026-04-21 | 6499c3f | [260421-gry-fix-windows-system32-path-hijack](./quick/260421-gry-fix-windows-system32-path-hijack/) |
+| 260421-rcv | Fix race in start_logging WriteFile to active_attachment pipe (gemini high) | 2026-04-21 | 4875676 | [260421-rcv-fix-active-attachment-handle-race](./quick/260421-rcv-fix-active-attachment-handle-race/) |
 
 ## Deferred Items
 
