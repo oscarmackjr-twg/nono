@@ -3811,6 +3811,254 @@ mod capability_handler_tests {
             let _ = child.recv_response().expect("drain");
         }
     }
+
+    // =====================================================================
+    // Phase 18.1 Plan 18.1-03 G-06 — profile-widening end-to-end tests.
+    //
+    // These tests construct a minimal Profile JSON, resolve it via
+    // `Profile::resolve_aipc_allowlist` (the exact same path the live
+    // `execute_supervised_runtime` wiring added in Plan 18.1-03 Task 2
+    // uses), then feed the resulting `AipcResolvedAllowlist` into the
+    // dispatcher exactly as the capability pipe server thread does at
+    // runtime. They verify the widening REACHES the dispatcher — proving
+    // Plan 18-03 Deferred Issue #1 is closed end-to-end.
+    //
+    // Per WR-01 (documented current behavior), Pipe direction and Socket
+    // role checks live INSIDE their per-kind helpers (post-approval), so
+    // the backend IS consulted even under the default allowlist; the
+    // dispatcher's G-04 flip then rewrites `Approved` -> `Denied` with
+    // reason containing `"broker failed: ... not in resolved allowlist"`
+    // when widening is absent. The "widening reached" assertion is
+    // therefore a substring check: the reason MUST NOT contain
+    // `"not in resolved allowlist"` under the widened profile.
+    // =====================================================================
+
+    /// Build an `AipcResolvedAllowlist` from a test Profile JSON that
+    /// widens `capabilities.aipc.pipe` to include `"read+write"`. Exercises
+    /// the live `Profile::resolve_aipc_allowlist` resolution path end-to-end
+    /// rather than manually manipulating `default().pipe_directions`.
+    fn build_widened_pipe_allowlist() -> crate::profile::AipcResolvedAllowlist {
+        let json = r#"{
+            "meta": { "name": "test-widened-pipe" },
+            "capabilities": { "aipc": { "pipe": ["read+write"] } }
+        }"#;
+        let profile: crate::profile::Profile =
+            serde_json::from_str(json).expect("test profile json parses");
+        profile
+            .resolve_aipc_allowlist()
+            .expect("widened allowlist resolves")
+    }
+
+    /// Build an `AipcResolvedAllowlist` from a test Profile JSON that
+    /// widens `capabilities.aipc.socket` to include `"bind"`.
+    fn build_widened_socket_bind_allowlist() -> crate::profile::AipcResolvedAllowlist {
+        let json = r#"{
+            "meta": { "name": "test-widened-socket" },
+            "capabilities": { "aipc": { "socket": ["bind"] } }
+        }"#;
+        let profile: crate::profile::Profile =
+            serde_json::from_str(json).expect("test profile json parses");
+        profile
+            .resolve_aipc_allowlist()
+            .expect("widened allowlist resolves")
+    }
+
+    /// G-06 regression: Pipe ReadWrite request under a profile that widens
+    /// `capabilities.aipc.pipe` to include `"read+write"` reaches the
+    /// approval backend — proving the widening was consumed by the
+    /// dispatcher's resolved allowlist. Even if the broker step
+    /// ultimately fails downstream (pipe-name validation, DuplicateHandle
+    /// etc.), the key observable is that the rejection — if any — is NOT
+    /// due to the resolution allowlist missing the direction.
+    #[test]
+    fn profile_widening_for_pipe_readwrite_reaches_backend() {
+        let backend = CountingGrantBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        let allowlist = build_widened_pipe_allowlist();
+        assert!(
+            allowlist
+                .pipe_directions
+                .contains(&nono::supervisor::PipeDirection::ReadWrite),
+            "test setup failure: widened allowlist missing ReadWrite"
+        );
+
+        let token = "testtoken12345678";
+        let req = make_request_aipc(
+            token,
+            "g06-pipe-widened-001",
+            HandleKind::Pipe,
+            Some(HandleTarget::PipeName {
+                name: "g06-widened-rw".to_string(),
+            }),
+            policy::GENERIC_READ | policy::GENERIC_WRITE,
+        );
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(req),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            token,
+            "testaipc12345678",
+            std::ptr::null_mut(),
+            &allowlist,
+        )
+        .expect("dispatch");
+
+        assert_eq!(
+            backend.calls(),
+            1,
+            "backend MUST be consulted when the resolved allowlist admits ReadWrite"
+        );
+        assert_eq!(audit_log.len(), 1);
+        // Widening reached the dispatcher iff the denial (if any) is NOT
+        // the allowlist-gate rejection. Whether the downstream broker step
+        // succeeds or fails is irrelevant for G-06 — what matters is that
+        // the direction passed the resolution check.
+        if let nono::ApprovalDecision::Denied { reason } = &audit_log[0].decision {
+            assert!(
+                !reason.contains("not in resolved allowlist"),
+                "widening failed to reach the allowlist gate: reason={reason}"
+            );
+        }
+        let _ = child.recv_response().expect("drain");
+    }
+
+    /// G-06 revert behavior: without the widening (default allowlist), the
+    /// same Pipe ReadWrite request is rejected because
+    /// `pipe_directions = [Read, Write]` does NOT contain `ReadWrite`.
+    /// Per WR-01, the Pipe direction check lives INSIDE
+    /// `handle_pipe_request` (post-approval), so the backend IS consulted;
+    /// the G-04 flip then rewrites `Approved` -> `Denied` with the wrapped
+    /// reason `"broker failed: ... not in resolved allowlist ..."`.
+    #[test]
+    fn default_allowlist_rejects_pipe_readwrite_after_prompt() {
+        let backend = CountingGrantBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        let allowlist = AipcResolvedAllowlist::default();
+        assert!(
+            !allowlist
+                .pipe_directions
+                .contains(&nono::supervisor::PipeDirection::ReadWrite),
+            "test setup failure: default allowlist unexpectedly contains ReadWrite"
+        );
+
+        let token = "testtoken12345678";
+        let req = make_request_aipc(
+            token,
+            "g06-pipe-default-001",
+            HandleKind::Pipe,
+            Some(HandleTarget::PipeName {
+                name: "g06-default-rw".to_string(),
+            }),
+            policy::GENERIC_READ | policy::GENERIC_WRITE,
+        );
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(req),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            token,
+            "testaipc12345678",
+            std::ptr::null_mut(),
+            &allowlist,
+        )
+        .expect("dispatch");
+
+        // WR-01: Pipe direction check is post-approval, so backend IS
+        // consulted before the rejection fires inside handle_pipe_request.
+        assert_eq!(
+            backend.calls(),
+            1,
+            "WR-01 current behavior: Pipe direction check is POST-prompt"
+        );
+        assert_eq!(audit_log.len(), 1);
+        match &audit_log[0].decision {
+            nono::ApprovalDecision::Denied { reason } => {
+                // G-04 wrapped the inner Err into "broker failed: <inner>".
+                assert!(
+                    reason.contains("broker failed:"),
+                    "expected G-04 Denied shape: {reason}"
+                );
+                assert!(
+                    reason.contains("not in resolved allowlist"),
+                    "expected resolution-allowlist rejection (substring check on wrapped reason): {reason}"
+                );
+            }
+            other => panic!("expected Denied, got {other:?}"),
+        }
+        let _ = child.recv_response().expect("drain");
+    }
+
+    /// G-06 regression: Socket Bind-role request under a profile that
+    /// widens `capabilities.aipc.socket` to include `"bind"` reaches the
+    /// backend — proving the widening was consumed. Port=8080 is
+    /// non-privileged so the unconditional privileged-port deny does NOT
+    /// fire. The rejection — if any — is NOT due to the role allowlist
+    /// missing `Bind`.
+    #[test]
+    fn profile_widening_for_socket_bind_reaches_backend() {
+        let backend = CountingGrantBackend::new();
+        let (mut supervisor, mut child) = new_pair();
+        let mut seen = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        let allowlist = build_widened_socket_bind_allowlist();
+        assert!(
+            allowlist
+                .socket_roles
+                .contains(&nono::supervisor::SocketRole::Bind),
+            "test setup failure: widened allowlist missing Bind role"
+        );
+
+        let token = "testtoken12345678";
+        let req = make_request_aipc(
+            token,
+            "g06-socket-bind-widened-001",
+            HandleKind::Socket,
+            Some(HandleTarget::SocketEndpoint {
+                protocol: SocketProtocol::Tcp,
+                host: "127.0.0.1".to_string(),
+                port: 8080,
+                role: SocketRole::Bind,
+            }),
+            0,
+        );
+        handle_windows_supervisor_message(
+            &mut supervisor,
+            nono::supervisor::SupervisorMessage::Request(req),
+            &backend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen,
+            &mut audit_log,
+            token,
+            "testaipc12345678",
+            std::ptr::null_mut(),
+            &allowlist,
+        )
+        .expect("dispatch");
+
+        assert_eq!(backend.calls(), 1);
+        assert_eq!(audit_log.len(), 1);
+        // Widening reached the dispatcher iff the denial (if any) is NOT
+        // "socket role Bind not in resolved allowlist".
+        if let nono::ApprovalDecision::Denied { reason } = &audit_log[0].decision {
+            assert!(
+                !reason.contains("role Bind not in resolved allowlist"),
+                "Socket Bind widening failed to reach allowlist gate: {reason}"
+            );
+        }
+        let _ = child.recv_response().expect("drain");
+    }
 }
 
 #[cfg(all(test, target_os = "windows"))]
