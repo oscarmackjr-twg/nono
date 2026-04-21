@@ -1883,7 +1883,19 @@ pub(super) fn handle_windows_supervisor_message(
                     reason: format!("Approval backend error: {e}"),
                 });
 
-            let grant = if decision.is_granted() {
+            // G-04 fix: broker-helper failure AFTER approval MUST flip
+            // decision to Denied so the wire response never carries
+            // (Approved, grant=None). Without this flip, the 2026-04-20
+            // UAT re-run surfaced the child SDK's
+            // `send_capability_request` demultiplexer treating
+            // (Granted, None) as "supervisor granted but returned no
+            // ResourceGrant" — a protocol violation. The contract is
+            // structural: Approved ⟹ grant is Some, Denied ⟹ grant is
+            // None. The `(decision, grant)` tuple is constructed at this
+            // single site; the `Err` arm rewrites `decision` before the
+            // audit push + send_response, so the audit log and the wire
+            // response always record the same shape.
+            let (decision, grant) = if decision.is_granted() {
                 let result: Result<Option<nono::supervisor::ResourceGrant>> = match request.kind {
                     HandleKind::File => {
                         // Phase 11 path — preserved unchanged. Uses
@@ -1933,18 +1945,26 @@ pub(super) fn handle_windows_supervisor_message(
                     ),
                 };
                 match result {
-                    Ok(g) => g,
+                    Ok(g) => (decision, g),
                     Err(e) => {
                         tracing::warn!(
                             "AIPC broker failure for kind {:?}: {}",
                             request.kind,
                             e
                         );
-                        None
+                        // G-04: flip decision so audit + wire both
+                        // record Denied. Reason string is verbose-on-
+                        // purpose for debuggability (same rationale as
+                        // 18-CONTEXT D-07); not a security-sensitive
+                        // surface.
+                        let denied = nono::ApprovalDecision::Denied {
+                            reason: format!("broker failed: {e}"),
+                        };
+                        (denied, None)
                     }
                 }
             } else {
-                None
+                (decision, None)
             };
 
             audit_log.push(audit_entry_with_redacted_token(
@@ -3148,9 +3168,12 @@ mod capability_handler_tests {
 
         // Backend WAS consulted (mask check passes for QUERY); the runtime
         // guard fires INSIDE handle_job_object_request, after the backend
-        // grants. The audit decision shows Granted-by-backend but grant=None
-        // because the broker helper returned Err. This matches the
-        // broker-failure pattern from Plans 18-01/18-02.
+        // grants. Post Phase 18.1 G-04: the broker-helper Err(..) flips
+        // decision to Denied { reason: "broker failed: ..." } at the
+        // dispatcher, so grant is None AND the wire decision is Denied.
+        // This test only asserts grant.is_none(); the full G-04 shape is
+        // covered by the `dispatcher_flips_approved_to_denied_on_*_broker_failure`
+        // suite below.
         assert_eq!(backend.calls(), 1);
         assert_eq!(audit_log.len(), 1);
         let response = child.recv_response().expect("drain");
@@ -3291,10 +3314,12 @@ mod capability_handler_tests {
 
         // Backend WAS consulted (mask is now allowed by widening); the
         // runtime guard still fires INSIDE handle_job_object_request,
-        // producing grant=None even though the mask check passed. This
-        // proves the runtime guard is structurally above the profile
-        // widening — the worst case (terminating the supervisor's own
-        // containment Job) is impossible.
+        // producing grant=None even though the mask check passed. Post
+        // Phase 18.1 G-04 the dispatcher additionally flips decision to
+        // Denied { reason: "broker failed: ..." }. This proves the
+        // runtime guard is structurally above the profile widening —
+        // the worst case (terminating the supervisor's own containment
+        // Job) is impossible.
         assert_eq!(backend.calls(), 1);
         assert_eq!(audit_log.len(), 1);
         let response = child.recv_response().expect("drain");
@@ -3391,10 +3416,7 @@ mod capability_handler_tests {
                 grant,
                 ..
             } => {
-                assert!(
-                    reason.contains("broker failed:"),
-                    "wire reason: {reason}"
-                );
+                assert!(reason.contains("broker failed:"), "wire reason: {reason}");
                 assert!(grant.is_none(), "grant must be None on Denied");
             }
             other => panic!("unexpected wire response: {other:?}"),
@@ -3456,10 +3478,7 @@ mod capability_handler_tests {
                 grant,
                 ..
             } => {
-                assert!(
-                    reason.contains("broker failed:"),
-                    "wire reason: {reason}"
-                );
+                assert!(reason.contains("broker failed:"), "wire reason: {reason}");
                 assert!(grant.is_none(), "grant must be None on Denied");
             }
             other => panic!("unexpected wire response: {other:?}"),
@@ -3525,10 +3544,7 @@ mod capability_handler_tests {
                 grant,
                 ..
             } => {
-                assert!(
-                    reason.contains("broker failed:"),
-                    "wire reason: {reason}"
-                );
+                assert!(reason.contains("broker failed:"), "wire reason: {reason}");
                 assert!(grant.is_none(), "grant must be None on Denied");
             }
             other => panic!("unexpected wire response: {other:?}"),
@@ -3597,10 +3613,7 @@ mod capability_handler_tests {
                 grant,
                 ..
             } => {
-                assert!(
-                    reason.contains("broker failed:"),
-                    "wire reason: {reason}"
-                );
+                assert!(reason.contains("broker failed:"), "wire reason: {reason}");
                 assert!(grant.is_none(), "grant must be None on Denied");
             }
             other => panic!("unexpected wire response: {other:?}"),
@@ -3664,10 +3677,7 @@ mod capability_handler_tests {
                 grant,
                 ..
             } => {
-                assert!(
-                    reason.contains("broker failed:"),
-                    "wire reason: {reason}"
-                );
+                assert!(reason.contains("broker failed:"), "wire reason: {reason}");
                 assert!(grant.is_none(), "grant must be None on Denied");
             }
             other => panic!("unexpected wire response: {other:?}"),
