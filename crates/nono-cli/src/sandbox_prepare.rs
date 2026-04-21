@@ -16,6 +16,16 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use tracing::info;
 
+fn print_allow_domain_port_warnings(entries: &[String], context: &str, silent: bool) {
+    if silent {
+        return;
+    }
+
+    for warning in network_policy::collect_allow_domain_port_warnings(entries, context) {
+        output::print_warning(&warning);
+    }
+}
+
 fn collect_missing_cli_requested_paths(args: &SandboxArgs) -> Vec<String> {
     let mut missing = Vec::new();
 
@@ -232,14 +242,7 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
             .as_ref()
             .map(|network| network.allow_domains.clone())
             .unwrap_or_default();
-        if !silent {
-            for warning in network_policy::collect_allow_domain_port_warnings(
-                &allow_domain,
-                "manifest allow_domain",
-            ) {
-                output::print_warning(&warning);
-            }
-        }
+        print_allow_domain_port_warnings(&allow_domain, "manifest allow_domain", silent);
         let credentials = manifest
             .credentials
             .iter()
@@ -300,23 +303,12 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
     // OAUTH-03 (Plan 22-04): warn when allow_domain entries include `:port`
     // suffixes — nono now ignores ports in allow-domain rules and only applies
     // hostname filtering through the proxy. Cherry-picked from upstream
-    // 005579a9; deprecation-warning helper from upstream is intentionally
-    // omitted here — fork has no `command_blocking_deprecation` flow at this
-    // call site (deprecation warnings already emit at profile-load time).
-    if !silent {
-        for warning in network_policy::collect_allow_domain_port_warnings(
-            &profile_allow_domain,
-            "profile allow_domain",
-        ) {
-            output::print_warning(&warning);
-        }
-        for warning in network_policy::collect_allow_domain_port_warnings(
-            &args.allow_proxy,
-            "--allow-domain",
-        ) {
-            output::print_warning(&warning);
-        }
-    }
+    // 005579a9 + 60ad1eb3 (DRY helper). The deprecation-warning call from
+    // upstream's loaded_profile.as_ref() block is intentionally omitted —
+    // fork has no `command_blocking_deprecation` flow at this site
+    // (deprecation warnings emit at profile-load time instead).
+    print_allow_domain_port_warnings(&profile_allow_domain, "profile allow_domain", silent);
+    print_allow_domain_port_warnings(&args.allow_proxy, "--allow-domain", silent);
 
     #[cfg(target_os = "linux")]
     if args.profile.as_deref() == Some("claude-code") {
