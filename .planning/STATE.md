@@ -146,6 +146,7 @@ Progress: [██████████] 100% (62/62 plans implementation-comp
 | 260417-wla | Fix Windows CreateProcess ERROR_INVALID_HANDLE from temp-drop use-after-close in spawn_windows_child | 2026-04-17 | eb4730c | [260417-wla-fix-windows-createprocess-handle-uaf](./quick/260417-wla-fix-windows-createprocess-handle-uaf/) |
 | 260419-cad | Add Phase 20 entries for UPST-01..04 to CHANGELOG [Unreleased] | 2026-04-19 | 21401fd | [260419-cad-changelog-phase-20-upst](./quick/260419-cad-changelog-phase-20-upst/) |
 | 260419-dud | Document Phase 20 user-facing surfaces in docs/cli/ + crates/nono README version pin | 2026-04-19 | d2e18c3 | [260419-dud-docs-phase-20-flags-uri](./quick/260419-dud-docs-phase-20-flags-uri/) |
+| 260421-gry | Fix Windows Command::new relative-path hijacking (10 call sites; gemini security-high) | 2026-04-21 | 6499c3f | [260421-gry-fix-windows-system32-path-hijack](./quick/260421-gry-fix-windows-system32-path-hijack/) |
 
 ## Deferred Items
 
