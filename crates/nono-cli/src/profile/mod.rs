@@ -1378,6 +1378,7 @@ struct ProfileDeserialize {
     #[serde(default)]
     packs: Vec<String>,
     #[serde(default)]
+    #[serde(alias = "brokered_commands")]
     command_args: Vec<String>,
 }
 

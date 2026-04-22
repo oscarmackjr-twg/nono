@@ -255,11 +255,15 @@ pub(crate) fn warn_if_rollback_flags_ignored(rollback: &RollbackLaunchOptions, s
     }
 }
 
-/// Derive tracked paths from capabilities: user-granted writable directories.
+/// Derive snapshot tracked paths from capabilities: user-granted writable
+/// directories. Upstream 9db06336 split the derivation in two — these
+/// snapshot paths are the strictly-writable subset used for filesystem
+/// hashing and rollback snapshots.
 ///
-/// Upstream 4ec61c29 refactor: extracted from `initialize_rollback_state` so
-/// `initialize_audit_snapshots` can reuse the same selector for audit-only
-/// (no-rollback) sessions.
+/// (Plan 22-05a Task 8: kept the existing `derive_tracked_paths` name as
+/// the legacy alias so the Task 3 callsite in `initialize_audit_snapshots`
+/// keeps working without refactor; new audit-broader callers use
+/// `derive_audit_tracked_paths` below.)
 fn derive_tracked_paths(caps: &CapabilitySet) -> Vec<PathBuf> {
     caps.fs_capabilities()
         .iter()
@@ -268,6 +272,19 @@ fn derive_tracked_paths(caps: &CapabilitySet) -> Vec<PathBuf> {
                 && matches!(cap.access, AccessMode::Write | AccessMode::ReadWrite)
                 && matches!(cap.source, nono::CapabilitySource::User)
         })
+        .map(|cap| cap.resolved.clone())
+        .collect()
+}
+
+/// Derive audit tracked paths from capabilities: user-granted directories
+/// (writable AND read-only). Upstream 9db06336 introduced this broader
+/// selector so `audit list` can group sessions by scope rather than by
+/// the strictly-writable subset that rollback uses.
+#[allow(dead_code)]
+pub(crate) fn derive_audit_tracked_paths(caps: &CapabilitySet) -> Vec<PathBuf> {
+    caps.fs_capabilities()
+        .iter()
+        .filter(|cap| !cap.is_file && cap.source.is_user_intent())
         .map(|cap| cap.resolved.clone())
         .collect()
 }

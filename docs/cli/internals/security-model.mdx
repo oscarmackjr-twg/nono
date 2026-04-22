@@ -7,10 +7,6 @@ nono's security model is built on a single premise: **the sandboxed process is u
 
 This page explains the layered enforcement architecture, the trust boundaries between components, and why specific mechanisms were chosen.
 
-For the current Windows filesystem boundary and parity contract, see [Windows Filesystem Parity Contract](/cli/development/windows-filesystem-parity-contract). Windows currently exposes a narrower restricted-execution command surface than the Linux and macOS kernel-enforced models described below.
-
-Windows network enforcement now follows a separate backend-owned WFP contract rather than the Linux/macOS kernel path described on this page. For supported Windows runs, `nono-wfp-service` installs deterministic per-app WFP permit/block filters for blocked, proxy-only, connect-port, bind-port, and localhost-only policies, then removes that same filter set on cleanup. The current contract is still narrower than Linux/macOS because it depends on explicit backend readiness and service-managed activation instead of a single unprivileged kernel primitive.
-
 ## Trust Boundaries
 
 ![Trust boundaries: kernel space (Landlock, seccomp, Seatbelt), sandboxed child (untrusted), and supervisor (trusted)](/assets/kernel-space.png)
@@ -20,10 +16,14 @@ There are three trust domains:
 | Domain | Trust Level | Role |
 |--------|-------------|------|
 | Kernel | Fully trusted | Enforces Landlock rules, delivers seccomp notifications, blocks unauthorized syscalls |
-| Supervisor (parent) | Trusted | Receives trapped syscalls, consults approval backend, opens files, injects file descriptors |
+| Supervisor (parent) | Trusted | Records audit events, receives trapped syscalls, consults approval backend, opens files, injects file descriptors |
 | Sandboxed child | Untrusted | Runs the agent command under full kernel enforcement |
 
 The supervisor is trusted but constrained. It can only grant access to files it can open itself (standard Unix permissions apply), and protected nono state roots are checked before any approval backend is consulted.
+
+In supervised mode, audit recording also lives in this trust boundary. The sandboxed child does not write its own audit log. Instead, the trusted parent records session metadata, supervisor-observed events, session-local integrity data, the global audit ledger entry for that session, and any optional audit attestation signature.
+
+In plain terms: the child can generate events by doing things, but it does not control the audit writer. The trusted parent is the component that records the session, commits the event log into the integrity structure, and optionally signs the completed session. That is why the child cannot directly tamper with its own recorded audit trail.
 
 When proxy mode is active, a fourth domain exists:
 
@@ -31,7 +31,7 @@ When proxy mode is active, a fourth domain exists:
 |--------|-------------|------|
 | Network proxy | Trusted (runs in supervisor) | Filters outbound connections by host, injects credentials, enforces deny CIDRs |
 
-The proxy runs in the unsandboxed parent process alongside the supervisor. On Linux and macOS, the sandboxed child can only reach `localhost:<port>` because the kernel policy blocks the rest. On Windows, the same product contract is enforced by the WFP backend: the service installs loopback-only permit filters for the proxy port and fallback block filters for the remaining traffic surface. A session token (256-bit random) prevents other localhost processes from using the proxy.
+The proxy runs in the unsandboxed parent process alongside the supervisor. The sandboxed child can only reach `localhost:<port>` — all other outbound TCP is blocked at the kernel level. A session token (256-bit random) prevents other localhost processes from using the proxy.
 
 ## Attach and Detach Security Model
 
@@ -64,74 +64,8 @@ In supervised mode, the supervisor is already part of the trusted computing base
 - owns the seccomp-notify fd
 - mediates approvals
 - may run rollback snapshots
-- may run the network proxy
-- manages the session registry and PTY
-
-The attach socket does not introduce a new trust domain. It is another supervisor-owned interface inside that same trusted boundary.
-
-The important distinction is:
-
-- **sandbox boundary**: kernel-enforced restrictions on the child
-- **attach boundary**: who is allowed to connect to the supervisor's PTY relay
-
-These are separate concerns. Attach affects terminal access to the session, but it does not alter the kernel sandbox applied to the child.
-
-### Local authentication model
-
-Current attach is local-only and same-user only.
-
-The supervisor protects attach with:
-
-- a private session registry directory
-- owner-only attach socket permissions
-- kernel peer-credential checks on accepted Unix socket peers
-
-This is strong enough for the current local runtime model:
-
-- another local user should not be able to attach
-- a peer with the wrong uid is rejected before terminal replay or client attach proceeds
-
-This is **not** a remote authentication protocol. It does not distinguish between two processes running as the same uid, and it is not intended to support cross-host attach. Future HTTP or remote attach will support a much stronger authentication and authorization layer.
-
-nono's trust boundary is agent containment — restricting what the sandboxed child can access — not guest/host isolation between same-user processes. If an attacker has arbitrary code execution as your user, they already own all your processes and files; the attach socket does not expand their capabilities. If you need stronger isolation between same-user processes — for example, in a multi-tenant hosting environment — run nono inside a container or microVM. That adds a guest/host boundary that nono does not provide on its own.
-
-### Session metadata on disk
-
-Session JSON files in `~/.nono/sessions/` contain supervisor and child PIDs, the full command line, profile name, working directory, and network mode. These files are protected by directory permissions (`0o700`) and file permissions (`0o600`), but are readable by any process running as the same user.
-
-Command-line arguments are persisted verbatim. Avoid passing secrets as CLI arguments — use the keystore or environment variables instead.
-
-## Attach and Detach Security Model
-
-A natural question is: if the child is structurally sandboxed, how can `nono attach` reconnect to its terminal later?
-
-The answer is that attach does **not** connect to the sandboxed child directly.
-
-The PTY architecture is:
-
-1. The sandboxed child runs on the **slave** side of a PTY
-2. The trusted supervisor owns the **master** side of that PTY
-3. `nono attach` connects to a **local Unix socket exposed by the supervisor**
-4. The supervisor relays terminal I/O between the attached client and the PTY master
-
-So the attach path stays entirely inside the already-trusted supervisor boundary. The sandboxed child never gains a new capability just because a human attaches to watch or interact with it.
-
-### What attach does not do
-
-- It does **not** disable or relax the kernel sandbox
-- It does **not** give the child new filesystem or network rights
-- It does **not** create a backchannel from the child to arbitrary host terminals
-- It does **not** bypass supervisor mediation or protected-root checks
-
-Attach is a terminal transport, not a capability expansion mechanism.
-
-### Why this does not weaken the sandbox boundary
-
-In supervised mode, the supervisor is already part of the trusted computing base. It already:
-
-- owns the seccomp-notify fd
-- mediates approvals
-- may run rollback snapshots
+- records audit events and session metadata
+- may compute audit-log integrity metadata
 - may run the network proxy
 - manages the session registry and PTY
 
@@ -321,6 +255,28 @@ Because `stat` and `access` are not trapped, the sandboxed child can enumerate f
 
 The invariant is: **if anything goes wrong, the child does not get access**. The system fails closed at every decision point.
 
+## Audit Integrity Limits
+
+The audit subsystem has a narrower security claim than the sandbox itself.
+
+- The supervisor is trusted to record events honestly and completely. The sandboxed child cannot write its own audit log, but the audit log still depends on supervisor correctness.
+- Session-local hashes are not, by themselves, sufficient history integrity. nono therefore records audited sessions into a global audit ledger as sessions complete.
+- The current ledger is still local host state. Without a future signature or external anchor, a host attacker who can rewrite both the session files and the ledger can forge a self-consistent history.
+- For supervised sessions, the supervisor hashes the resolved main executable binary and binds that `{ resolved_path, sha256 }` identity into session metadata and the global audit ledger.
+- When `--audit-sign-key` is configured, the supervisor also signs the session's audit Merkle root and session context using a keyed DSSE/in-toto attestation. The signature is written into the session directory and can later be checked with the corresponding public key.
+- That signature is produced once, at session finalization. nono does not sign each individual audit event.
+- That executable identity is not full runtime provenance. Shared libraries, interpreter chains, scripts passed as arguments, and dynamically loaded runtime dependencies are not covered by that binary hash.
+- The executable hash is computed before `exec`, not from the final kernel-loaded file descriptor. A privileged attacker with write access to the executable path could still race between hash and execution.
+- The keyed audit attestation is only as strong as the signing key distribution model. If the verifier does not pin the expected public key, a rewritten session could also rewrite the embedded public key and remain self-consistent.
+- `nono audit verify --public-key-file <FILE>` is the path that pins verification to an expected signer key. Without that, attestation verification checks the keyed signature against the public key recorded in session metadata.
+- Filesystem Merkle roots under `--audit-integrity` or `--rollback` commit tracked writable paths, not the full machine state.
+
+The correct way to read the feature today is:
+
+- sandbox enforcement: kernel-enforced and fail-closed
+- audit trail: supervisor-recorded and tamper-evident within the local integrity model
+- attestation: keyed signing is available for session audit roots, but external anchoring and timestamping are still future work
+
 ## What If the Supervisor Is Compromised?
 
 A reasonable question: the supervisor can open any file and inject it into the child. If an attacker compromises the supervisor, can they use it as a proxy to feed arbitrary files to the sandboxed agent?
@@ -446,24 +402,6 @@ On macOS, Seatbelt provides the kernel enforcement layer via `sandbox_init()`. T
 - No userspace escape mechanism
 
 Supervised mode on macOS provides rollback snapshots (content-addressable filesystem snapshots for restoring pre-session state) and the diagnostic footer, but does not provide capability expansion. The Seatbelt sandbox is the single enforcement layer.
-
-## Windows Model
-
-Windows currently uses a narrower restricted-execution command surface than Linux or macOS.
-
-The current Windows filesystem/runtime path combines:
-
-- backend-owned executable and argument-path validation
-- exact-path file grants plus directory allowlists in the compiled Windows policy
-- low-integrity child launches for a real write boundary against ordinary medium-integrity host paths
-- writable runtime redirection into low-integrity-compatible roots when direct writes are not credible
-
-Two limitations matter:
-
-- Windows does not yet provide a general backend-native deny-within-allow filesystem rule comparable to Seatbelt
-- launch-time path mediation is still preflight, not a complete kernel-level substitute for broader filesystem enforcement
-
-That means the Linux and macOS models remain the reference design for full kernel-enforced sandbox behavior, while Windows is an intentionally explicit restricted command surface with fail-closed diagnostics where parity is not yet credible.
 
 ## Summary
 

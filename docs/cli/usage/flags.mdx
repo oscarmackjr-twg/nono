@@ -28,7 +28,6 @@ Available themes:
 - `frappe`
 - `macchiato`
 - `tokyo-night`
-- `dark-factory`
 - `minimal`
 
 Resolution order:
@@ -43,9 +42,6 @@ nono --theme tokyo-night run --allow-cwd -- claude
 
 # Via environment variable
 NONO_THEME=latte nono run --allow-cwd -- codex
-
-# Industrial dark theme
-nono --theme dark-factory run --allow-cwd -- cargo test
 
 # Config file
 # ~/.config/nono/config.toml
@@ -73,8 +69,6 @@ Start an interactive shell inside the sandbox.
 nono shell [OPTIONS]
 ```
 
-On Windows, live `nono shell` execution is intentionally unavailable as a product-surface limitation. Use `nono shell --dry-run` to inspect the resolved policy or `nono run -- <command>` for supported execution.
-
 ### `nono wrap`
 
 Apply sandbox and exec into command. nono disappears from the process tree — no parent process remains. For scripts, piping, and embedding where no parent process is wanted.
@@ -82,8 +76,6 @@ Apply sandbox and exec into command. nono disappears from the process tree — n
 ```bash
 nono wrap [OPTIONS] -- <COMMAND> [ARGS...]
 ```
-
-On Windows, live `nono wrap` execution is intentionally unavailable as a product-surface limitation. Use `nono wrap --dry-run` to inspect the resolved wrap policy or `nono run -- <command>` for supported execution.
 
 <Note>
   `nono wrap` does not support proxy flags (`--network-profile`, `--allow-domain`, `--credential`, `--upstream-proxy`, `--upstream-bypass`). The network proxy requires a parent process. Use `nono run` instead.
@@ -485,7 +477,9 @@ nono shell --allow-cwd --shell /bin/zsh
 
 #### `--allow-command`
 
-Allow a normally-blocked dangerous command. By default, destructive commands like `rm`, `dd`, `chmod` are blocked. Use this flag to override for a specific command.
+Deprecated in `v0.33.0`. Allows a normally-blocked startup command, but only for
+the directly-invoked executable. Child processes can bypass this check, so it
+should not be treated as a sandbox security boundary.
 
 ```bash
 # Allow rm (blocked by default)
@@ -496,14 +490,16 @@ nono run --allow-cwd --allow-command rm --allow-command mv -- my-script.sh
 ```
 
 <Note>
-  Even with `--allow-command`, the kernel sandbox still restricts file operations to granted paths. A command can only affect files within directories you explicitly allowed.
+  `--allow-command` and the default command blocklist are startup-only checks.
+  They do not prevent child processes, interpreters, language runtimes, shell
+  built-ins, renamed binaries, or equivalent APIs from performing the same
+  operation. For hard protection, rely on kernel-enforced path and network
+  controls such as `deny.access`, `deny.unlink`, narrower filesystem grants,
+  and network policy.
 </Note>
 
-<Note>
-  Command blocking is a best-effort surface-level control. It matches against the executable name being invoked directly. It does not prevent a process from performing the equivalent operation through language-level APIs (e.g., `os.remove()` in Python), shell built-ins, or renamed binaries. For hard protection against destructive filesystem operations, rely on kernel-enforced deny groups (`deny.access`, `deny.unlink`) and path-based sandboxing, which apply regardless of how the operation is invoked.
-</Note>
-
-Commands can also be allowed permanently via the `allowed_commands` field in a profile's security config:
+Commands can also be allowed temporarily via the deprecated `allowed_commands`
+field in a profile's security config:
 
 ```json
 {
@@ -519,7 +515,8 @@ nono run --profile my-profile -- rm /tmp/old-file.txt
 
 #### `--block-command`
 
-Block an additional command beyond the default blocklist.
+Deprecated in `v0.33.0`. Adds a startup-only command denylist entry for the
+directly-invoked executable. Child processes can bypass this check.
 
 ```bash
 # Block a custom tool in addition to defaults
@@ -611,49 +608,6 @@ For network API keys, prefer `--credential` instead for credential isolation —
 
 See [Credential Injection](/cli/features/credential-injection) for full documentation on storing and using credentials.
 
-#### `--env-allow`
-
-Allow-list pattern for environment variables that pass through to the sandboxed child. Repeatable. Available on `nono run`, `nono shell`, and `nono wrap`.
-
-```bash
-# Pass through only specific AWS vars
-nono run --env-allow AWS_REGION --env-allow 'AWS_PROFILE' --allow . -- terraform plan
-
-# Trailing-prefix glob: all AWS_* vars
-nono run --env-allow 'AWS_*' --allow . -- aws s3 ls
-
-# Bare wildcard: pass everything (useful for quick-debug)
-nono run --env-allow '*' --allow . -- /bin/env
-```
-
-Accepted pattern shapes:
-
-- **Exact name:** `AWS_REGION`, `HOME`, `PATH` — passes through only that variable.
-- **Trailing-prefix glob:** `AWS_*`, `KUBE_*` — passes through any variable starting with the prefix.
-- **Bare wildcard:** `*` — passes through all variables.
-
-Rejected at parse time (fail-closed, before the sandbox launches):
-
-- Middle-glob patterns (`AWS_*_REGION`)
-- Leading-glob patterns (`*_REGION`)
-- Empty patterns
-
-#### `--env-deny`
-
-Deny-list pattern for environment variables that are stripped from the child's env. Repeatable. Same pattern grammar as `--env-allow`. Deny wins when a variable matches both allow and deny rules.
-
-```bash
-# Strip AWS creds but keep the rest of the env
-nono run --env-deny 'AWS_SECRET_*' --allow . -- my-agent
-
-# Keep only the PATH-ish vars, drop everything else
-nono run --env-allow PATH --env-allow HOME --env-deny '*' --allow . -- my-agent
-```
-
-<Note>
-  `--env-allow` and `--env-deny` apply the CLI data path validator; full propagation to the sandboxed child's env boundary ships in a follow-up profile-surface change. Until then, the flags primarily validate that the patterns you'd store in a profile parse cleanly.
-</Note>
-
 ### Profile Options
 
 #### `--profile`, `-p`
@@ -699,24 +653,17 @@ nono run --profile claude-code --allow-launch-services -- claude
 
 #### `--allow-gpu`
 
-Grant GPU access to the sandboxed command. Available on `nono run`, `nono shell`, and `nono wrap`.
+Allow GPU compute access for workloads like ML inference and shader compilation.
+
+- **macOS (Apple Silicon):** Grants scoped IOKit access for Metal GPU compute (IOGPU, AGX, IOSurface). Intel Macs are not yet supported.
+- **Linux:** Grants access to DRM render nodes (`/dev/dri/renderD*`), NVIDIA compute devices (`nvidia[0-N]`, `nvidiactl`, `nvidia-uvm`), NVIDIA MIG caps, AMD KFD (`/dev/kfd`), and WSL2 DirectX passthrough (`/dev/dxg`). Also grants read-only access to Vulkan ICD manifests and GPU sysfs.
 
 ```bash
-# Run an ML workload that needs CUDA
-nono run --allow-gpu --allow . -- python train.py
-
-# macOS Metal workload
-nono run --allow-gpu --profile claude-code -- /Applications/MyApp.app/Contents/MacOS/myapp
+nono run --allow-gpu -- llama-cli -m ./model.gguf -p "hello"
 ```
 
-Per-platform behavior:
-
-- **Linux:** Adds a Landlock allowlist for `/dev/nvidia*` device nodes, DRM render nodes, AMD KFD, WSL2 DXG, and the NVIDIA procfs entries (`/proc/driver/nvidia`, `/dev/nvidia-uvm-tools`) required for the CUDA runtime and nvidia-uvm kernel module to initialize.
-- **macOS:** Adds Seatbelt grants for IOKit Metal / AGX GPU user-clients so Metal and CoreML workloads can open the framework.
-- **Windows:** Emits a `tracing::warn!` stating `--allow-gpu` is not enforced on this platform and leaves the Job Object / WFP sandbox state byte-identical to a run without the flag. The flag parses and the command runs, so scripts that target multiple platforms stay portable.
-
 <Note>
-  `--allow-gpu` grants access to the minimum device nodes required for the GPU runtime — it does not grant broad `/dev` access. The grant is additive with any profile-specified paths; if your workload needs access to specific model weights or dataset paths, you still need to pass those via `--allow`, `--read`, or a profile.
+  When used with a profile, the profile must opt into `allow_gpu`; otherwise nono fails closed with an error. Without a profile, the CLI flag alone is sufficient.
 </Note>
 
 ### Execution Mode Flags
@@ -776,14 +723,109 @@ nono run --no-rollback --allow . -- npm test
 
 #### `--no-audit`
 
-Disable the audit trail for this session. By default, every supervised execution records session metadata (command, timestamps, exit code, network events) to the platform rollback directory (`~/.nono/rollbacks/` on Unix-like systems, the nono state directory on Windows). Use this flag to suppress audit recording entirely.
+Disable the audit trail for this session. By default, every supervised execution records session metadata and audit events (command, timestamps, exit code, capability decisions, URL opens, network events) to `~/.nono/audit/`. Use this flag to suppress audit recording entirely.
 
 ```bash
 nono run --no-audit --allow-cwd -- my-command
 ```
 
 <Note>
-  `--no-audit` conflicts with `--rollback`. Rollback requires an audit session directory for snapshot storage.
+  `--no-audit` conflicts with `--audit-integrity`. Integrity metadata is computed from the audit event stream.
+</Note>
+
+#### `--audit-integrity`
+
+Enable append-only integrity metadata for the audit log. nono writes an `audit-events.ndjson` stream in session order, hashes each event into a leaf, maintains a running chain head, and stores a final Merkle root in the session metadata. This provides tamper evidence for the recorded audit log without enabling filesystem snapshots.
+
+Audit flags control three different layers:
+
+- **Session audit**
+  Record what happened during one `nono run`.
+
+- **Audit-log integrity**
+  Make the recorded audit event log tamper-evident with a hash chain and Merkle root.
+
+- **Filesystem integrity**
+  Hash the tracked writable filesystem state before and after the run.
+
+The modes are:
+
+- **Default**
+  Session audit + audit-log integrity
+
+- **`--no-audit`**
+  Disable audit recording completely
+
+- **`--no-audit-integrity`**
+  Keep the session audit, but disable the event-log integrity layer
+
+- **`--audit-integrity`**
+  Keep the default audit behavior and also add filesystem-state hashing
+
+- **`--rollback`**
+  Keep all of the above and also store rollback snapshots for restore
+
+```bash
+# Default: session audit + tamper-evident event log
+nono run --allow-cwd -- my-agent
+
+# Session audit only, without the integrity layer
+nono run --no-audit-integrity --allow-cwd -- my-agent
+
+# Add filesystem-state hashing over tracked writable paths
+nono run --audit-integrity --allow-cwd -- my-agent
+
+# Strongest mode: audit + filesystem integrity + restoreable rollback snapshots
+nono run --audit-integrity --rollback --profile claude-code -- claude
+```
+
+<Note>
+  `--audit-integrity` adds filesystem-state hashing for the tracked writable paths. `--rollback` is still the feature that stores full restoreable snapshots.
+</Note>
+
+#### `--audit-sign-key`
+
+Sign the completed session audit record with a keyed signing key loaded by the supervisor.
+
+This happens **once per session**, after the run ends. It does **not** sign every event individually.
+
+The supervisor:
+
+1. records audit events during the session
+2. computes the session's final audit Merkle root
+3. signs that final root plus session context
+4. writes the resulting keyed DSSE attestation to `audit-attestation.bundle`
+
+A summary is also recorded in `session.json`.
+
+Accepted secret references:
+- bare trust key IDs, for example `default`
+- `keystore://name`
+- `file:///absolute/path`
+- `op://vault/item/field`
+- `apple-password://server/account`
+- `keyring://service/account`
+- `env://VAR_NAME`
+
+```bash
+# Sign with the default trust key from the keystore
+nono run --audit-sign-key default --allow-cwd -- my-agent
+
+# Sign with an explicit file-backed key
+nono run --audit-sign-key file:///tmp/nono-audit-key.pem --allow-cwd -- my-agent
+
+# Sign with a 1Password-backed key
+nono run --audit-sign-key op://Development/Nono/audit-key --profile claude-code -- claude
+```
+
+The corresponding attestation can be pinned during verification:
+
+```bash
+nono audit verify <session-id> --public-key-file ./audit-signing-key.pub
+```
+
+<Note>
+  `--audit-sign-key` signs the session audit Merkle root and session context once, after the session completes. It does not, by itself, add an external timestamp, Rekor entry, or full runtime-closure attestation.
 </Note>
 
 #### `--rollback-exclude`
