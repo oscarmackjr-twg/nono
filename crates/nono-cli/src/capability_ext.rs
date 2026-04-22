@@ -597,7 +597,9 @@ impl CapabilitySetExt for CapabilitySet {
         // Apply CLI overrides (CLI args take precedence)
         add_cli_overrides(&mut caps, args)?;
 
-        // Expand profile-level override_deny paths for finalize_caps
+        // Expand profile-level override_deny paths for finalize_caps.
+        // Missing matching grants must fail closed in apply_deny_overrides
+        // rather than silently dropping the override.
         let mut profile_overrides = Vec::with_capacity(profile.policy.override_deny.len());
         for path_template in &profile.policy.override_deny {
             let path = expand_vars(path_template, workdir)?;
@@ -1740,6 +1742,45 @@ mod tests {
 
         let err = from_profile_locked(&profile, workdir.path(), &args)
             .expect_err("override_deny without user-intent grant should fail");
+        assert!(
+            err.to_string().contains("no matching grant"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_profile_override_deny_requires_matching_grant() {
+        // Upstream 5c301e8d adds this test at the same call-site as the
+        // fork's existing test_from_profile_policy_override_deny_requires_matching_grant.
+        // Both exercise the same fail-closed path; this one is preserved AS-IS
+        // for upstream-provenance traceability (D-19) but routed through the
+        // json_string helper so the JSON literal escapes Windows path separators.
+        let dir = tempdir().expect("tmpdir");
+        let denied = dir.path().join("denied_no_grant");
+        std::fs::create_dir_all(&denied).expect("mkdir denied");
+
+        let profile_path = dir.path().join("override-deny-no-grant.json");
+        std::fs::write(
+            &profile_path,
+            format!(
+                r#"{{
+                    "meta": {{ "name": "override-deny-no-grant" }},
+                    "policy": {{
+                        "add_deny_access": [{path}],
+                        "override_deny": [{path}]
+                    }}
+                }}"#,
+                path = json_string(&denied),
+            ),
+        )
+        .expect("write profile");
+        let profile = crate::profile::load_profile_from_path(&profile_path).expect("load profile");
+
+        let workdir = tempdir().expect("workdir");
+        let args = sandbox_args();
+
+        let err = from_profile_locked(&profile, workdir.path(), &args)
+            .expect_err("profile override_deny without grant should fail");
         assert!(
             err.to_string().contains("no matching grant"),
             "unexpected error: {err}"
