@@ -19,6 +19,13 @@ bindings/node/node_modules*
 
 # Gemini CLI planning state
 
+# GSD session scratch — per-session bookmarks and local workflow config.
+# Not project state; generated and managed by GSD tooling at runtime.
+.continue-here.md
+**/.continue-here.md
+.planning/config.json
+.planning/HANDOFF.json
+
 # WFP service debug crumbs (19-CLEAN-03 D-11)
 host.nono_binary.commit
 /query
