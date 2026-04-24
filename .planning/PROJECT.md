@@ -6,15 +6,40 @@
 
 v2.1 closed the live `nono run --profile claude-code` path on Windows end-to-end: per-file Low-IL mandatory-label filesystem grants (unblocking the profile's `git_config` group), AIPC handle brokering for Socket/Pipe/JobObject/Event/Mutex with `capabilities.aipc` profile widening wired end-to-end, anonymous-pipe-stdio `nono attach` on detached sessions, Job Object resource caps (CPU/memory/timeout/process-count) surfaced in `nono inspect`, upstream v0.37.1 parity sync (including RUSTSEC-2026-0098/0099 `rustls-webpki` fix), and a cleanup workstream that paid down v2.0 fmt/test/WIP/session-file debt.
 
-## Next Milestone Goals
+## Current Milestone: v2.2 Windows/macOS Parity Sweep
 
-No milestone locked yet. Candidate focus areas surfaced during v2.1:
+**Goal:** When v2.2 ships, a Windows user and a macOS user have the same `nono` commands available with the same flags and the same security guarantees. Close the current Windows-vs-macOS drift caused by upstream shipping v0.38 → v0.40 (+v0.41) without Windows ports, and establish a drift-prevention mechanism so v0.42+ don't recreate the gap.
 
-- **WR-01 reject-stage unification** (currently deferred to v2.2) — align all 5 AIPC HandleKinds on the same reject stage (BEFORE vs AFTER prompt) instead of the current Event/Mutex/JobObject-before + Pipe/Socket-after split. Product decision.
-- **AIPC G-04 wire-protocol compile-time tightening** (D-09 / D-11, deferred to v2.2) — `Approved(ResourceGrant)` inline at the wire type so `(Approved, grant=None)` becomes a compile-time error; removes the child SDK demultiplexer defense-in-depth branch.
-- **Cross-platform resource limits** — native Unix backends for RESL-01..04 (cgroup v2 `cpu.max` / `memory.max` / `pids.max`; macOS equivalents where practical).
-- **WR-02 EDR telemetry item 3** (deferred to v3.0) — rerun HUMAN-UAT on an EDR-instrumented host.
-- **Merge v2.0 + v2.1 to main** — `windows-squash` branch holds both milestones; publish PR after resolving any DCO/signoff items carried from v2.0 PR 555.
+**Target features:**
+- **Profile struct alignment** — deserialize upstream's new fields (`unsafe_macos_seatbelt_rules`, `packs`, `command_args`, `oauth2.custom_credentials`) without breaking Windows profile parse; add `claude-no-keychain` built-in.
+- **Policy tightening** — `override_deny` requires matching grant (fail-closed); `--rollback` + `--no-audit` conflict; `.claude.lock` moved to `allow_file`.
+- **Package manager + packs** — `nono package pull/remove/search/list` subcommand tree with Windows `install_dir` resolution, hook registration/unregistration, signed-artifact streaming download.
+- **OAuth2 proxy credential injection** — `OAuth2Config` + client-credentials token exchange in `nono-proxy`; `custom_credentials.oauth2` in profile; reverse-proxy HTTP upstream restricted to local-only targets.
+- **Audit integrity + attestation** — `--audit-integrity` hash-chained Merkle-rooted event ledger; `--audit-sign-key` DSSE/in-toto attestation; `nono audit verify`; exec identity recording; `prune` → `session cleanup` rename (preserves v2.1 CLEAN-04 invariants). Windows supervisor emits capability-decision + URL-open events.
+- **Parity-drift prevention** — `scripts/check-upstream-drift` tooling + GSD template for upstream-sync quick tasks so v0.42, v0.43 get absorbed within weeks of release.
+
+**Key context:**
+- Upstream is `always-further/nono`. macOS (upstream-maintained) gets new features via rebase; Windows fork does not. Every upstream release opens a gap — this milestone closes the current one and installs a process to prevent future accumulation.
+- `windows-squash` branch → `main` merge is a **pre-milestone quick task**, not a v2.2 phase. UPST2 cherry-picks should land on stable mainline.
+- Per-commit port strategy (preserving `Upstream-commit:` trailer) matches v2.1 Phase 20 UPST-01..04 pattern.
+
+**Out of scope (explicit deferrals):**
+- **WR-01 reject-stage unification** — deferred to v2.3. Windows-internal consistency issue, not a Windows-vs-macOS gap.
+- **AIPC G-04 wire-protocol compile-time tightening** — deferred to v2.3. Same reasoning.
+- **Cross-platform RESL Unix backends** — deferred to v2.3+. Reverse-direction drift (Windows shipped first, Unix behind); not v2.2's focus.
+- **WR-02 EDR HUMAN-UAT item** — remains v3.0-deferred pending EDR-instrumented runner.
+
+<details>
+<summary>Deferred candidate areas (not v2.2 scope)</summary>
+
+These surfaced during v2.1 close-out but are explicitly deferred per the "Windows/macOS parity first" prioritization (2026-04-24 decision):
+
+- **WR-01 reject-stage unification** — align all 5 AIPC HandleKinds on the same reject stage.
+- **AIPC G-04 wire-protocol compile-time tightening** — `Approved(ResourceGrant)` inline at the wire type.
+- **Cross-platform RESL Unix backends** — cgroup v2 / rlimit ports of Windows Job Object caps.
+- **WR-02 EDR telemetry item 3** — rerun HUMAN-UAT on an EDR-instrumented host.
+
+</details>
 
 <details>
 <summary>Previously Shipped</summary>
@@ -75,9 +100,16 @@ Windows security must be as structurally impossible and feature-complete as Unix
 - ✔ **WSFG-02** — `NonoError::LabelApplyFailed { path, hresult, hint }` + `AppliedLabelsGuard` RAII lifecycle wired into `prepare_live_windows_launch` (revert on `Drop`); ownership pre-check in `try_set_mandatory_label` skips system-owned paths (`C:\Windows`). — v2.1 Phase 21.
 - ✔ **WSFG-03** — Phase 18 HUMAN-UAT Path B + Path C close-out; frontmatter transition achieved; live-CONIN$ pass verdicts folded into Phase 18.1 HUMAN-UAT items 1+2 pass via live dual-run. — v2.1 Phase 21 + 18.1.
 
-### Active (v2.2+)
+### Active (v2.2)
 
-(No milestone locked. See "Next Milestone Goals" at top for candidate focus areas: WR-01 reject-stage unification, AIPC G-04 wire-protocol compile-time tightening, cross-platform RESL Unix backends, WR-02 EDR HUMAN-UAT item, merge `windows-squash` to main.)
+See "Current Milestone: v2.2 Windows/macOS Parity Sweep" at top. Requirements are defined in `.planning/REQUIREMENTS.md` (generated 2026-04-24) and mapped to phases 22–24 in `.planning/ROADMAP.md`.
+
+### Deferred (v2.3+)
+
+- **WR-01 reject-stage unification** — align all 5 AIPC HandleKinds on the same reject stage (product decision deferred from v2.1).
+- **AIPC G-04 wire-protocol compile-time tightening** — `Approved(ResourceGrant)` inline at the wire type (deferred from v2.1 Plan 18.1-02).
+- **Cross-platform RESL Unix backends** — cgroup v2 / rlimit ports of Windows Job Object caps.
+- **WR-02 EDR telemetry HUMAN-UAT item** — deferred to v3.0 pending EDR-instrumented runner.
 
 ### Out of Scope
 
@@ -149,4 +181,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-21 after v2.1 milestone. All 13 v2.1 requirements closed (RESL-01..04, ATCH-01, AIPC-01, CLEAN-01..04, UPST-01..04, WSFG-01..03). Deferred to v2.2+: WR-01 reject-stage unification, AIPC G-04 wire-protocol compile-time tightening, cross-platform RESL Unix backends, WR-02 EDR HUMAN-UAT item, merge `windows-squash` to main.*
+*Last updated: 2026-04-24 at v2.2 milestone start. v2.2 locked as "Windows/macOS Parity Sweep" — ingest upstream v0.38–v0.40 cross-platform features (profile, policy, package, OAuth2, audit integrity) + install parity-drift prevention process. Pre-milestone `windows-squash` → `main` merge is a quick task, not a v2.2 phase. Deferred to v2.3+: WR-01 reject-stage unification, AIPC G-04 compile-time tightening, cross-platform RESL Unix backends. v3.0-deferred: WR-02 EDR HUMAN-UAT.*

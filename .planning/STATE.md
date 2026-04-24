@@ -1,11 +1,11 @@
 ---
 gsd_state_version: 1.0
-milestone: post-v2.1
-milestone_name: (unscoped)
-status: v2.1 shipped 2026-04-21 — tag `v2.1` created, milestone archived to `.planning/milestones/v2.1-*`. Awaiting next milestone scope via `/gsd-new-milestone`. Candidate focus areas recorded in PROJECT.md § Next Milestone Goals: WR-01 reject-stage unification, AIPC G-04 wire-protocol compile-time tightening, cross-platform RESL Unix backends, WR-02 EDR HUMAN-UAT item, merge `windows-squash` to main.
-stopped_at: v2.1 milestone close complete. All 25 plans across 7 phases (16, 17, 18, 18.1, 19, 20, 21) shipped. ROADMAP.md collapsed to milestone groupings; REQUIREMENTS.md removed via `git rm` (history preserved); MILESTONES.md entry finalized; PROJECT.md evolved with v2.1 Validated requirements + Key Decisions; RETROSPECTIVE.md updated; git tag `v2.1` created. Awaiting `/gsd-new-milestone`.
-last_updated: "2026-04-21T16:45:00Z"
-last_activity: 2026-04-21 — v2.1 milestone closed via `/gsd-complete-milestone`. Archived ROADMAP + REQUIREMENTS to `.planning/milestones/v2.1-*`, reorganized ROADMAP.md to milestone groupings, evolved PROJECT.md (13 new v2.1 Validated requirements + 8 new Key Decisions), finalized MILESTONES.md entry, updated RETROSPECTIVE.md with v2.1 section, recorded 17 deferred items in STATE.md § Deferred Items, removed REQUIREMENTS.md via `git rm` (history preserved). Tag `v2.1` created. Next step: `/gsd-new-milestone` to scope v2.2.
+milestone: v2.2
+milestone_name: Windows/macOS Parity Sweep
+status: v2.2 started 2026-04-24. Scope locked as "Windows/macOS Parity Sweep" — ingest upstream v0.38–v0.40 cross-platform features (profile, policy, package manager, OAuth2, audit integrity) + install parity-drift prevention process. Pre-milestone `windows-squash` → `main` merge is a separate quick task, not a v2.2 phase. Awaiting `/gsd-plan-phase` invocation after roadmap approval.
+stopped_at: v2.2 milestone scope-gather complete. PROJECT.md updated with Current Milestone section, target features, key context, out-of-scope deferrals. REQUIREMENTS.md pending generation. ROADMAP.md pending roadmapper spawn.
+last_updated: "2026-04-24T00:00:00Z"
+last_activity: 2026-04-24 — v2.2 milestone started via `/gsd-new-milestone`. Quick task 260424-upr (upstream v0.37.1 → v0.40.1 review) immediately preceded scoping and surfaced the UPST2 target. User reframed objective from "upstream parity" to "Windows/macOS capability parity" — same work, cleaner goal. Deferred to v2.3+: WR-01 reject-stage unification, AIPC G-04 wire-protocol compile-time tightening, cross-platform RESL Unix backends.
 progress:
   total_phases: 22
   completed_phases: 22
@@ -14,42 +14,39 @@ progress:
   percent: 100
 ---
 
-# Project State: nono — post-v2.1 (awaiting next milestone scope)
+# Project State: nono — v2.2 Windows/macOS Parity Sweep
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-04-21 after v2.1 milestone close)
+See: .planning/PROJECT.md (updated 2026-04-24 at v2.2 milestone start)
 
 **Core Value:** Every nono command that works on Linux/macOS should work on Windows with equivalent security guarantees, or be explicitly documented as intentionally unsupported with a clear rationale.
 
-**Current Focus:** Planning v2.2. No phases locked. Candidate focus areas per PROJECT.md § Next Milestone Goals: WR-01 reject-stage unification, AIPC G-04 wire-protocol compile-time tightening, cross-platform RESL Unix backends, WR-02 EDR HUMAN-UAT item, merge `windows-squash` to main. Run `/gsd-new-milestone` to kick off scoping.
+**Current Focus:** v2.2 Windows/macOS Parity Sweep. Ingest upstream v0.38–v0.40 cross-platform features so Windows has the same `nono` commands/flags/security guarantees as macOS. Install drift-prevention tooling so v0.42+ don't recreate the gap. Pre-milestone `windows-squash` → `main` merge is a separate quick task.
 
 ## Current Position
 
-Phase: 18.1 (Extended IPC Gap Closure) — **ALL 4 WAVES COMPLETE 2026-04-21**. Plans 18.1-01 + 18.1-02 + 18.1-03 + 18.1-04 landed on windows-squash. All 5 HUMAN-UAT gaps G-02..G-06 closed: CONIN$ approval prompts render D-04 per-kind templates end-to-end (G-02, Wave 1); JobObject broker uses CreateJobObjectW (create-or-open) restoring parity with Event/Mutex/Pipe/Socket (G-03, Wave 2); dispatcher flow-control rewrite makes `(ApprovalDecision::Approved, grant=None)` structurally unreachable from `handle_windows_supervisor_message` (G-04, Wave 2); profile widening flows end-to-end from `--profile <widened>` through `Profile::resolve_aipc_allowlist()` into `WindowsSupervisorRuntime.resolved_aipc_allowlist` — Plan 18-03 Deferred Issue #1 RESOLVED (G-06, Wave 3); 5 new `wr01_*` regression tests empirically verify + lock the WR-01 reject-stage invariant across all 5 AIPC HandleKinds with module-docstring verdict matrix (G-05, Wave 4). Phase-level verification status: in-progress — awaiting gsd-verifier for phase sign-off.
-Plan: 18.1-04 complete on windows-squash. Commit: `1699339` `test(18.1-04): verify WR-01 reject-stage invariant across all 5 AIPC kinds (G-05)` — 1 commit, 1 file modified (crates/nono-cli/src/exec_strategy_windows/supervisor.rs; 447 insertions / 0 deletions). 5 new tests: wr01_event_rejects_before_prompt_on_out_of_allowlist_mask, wr01_mutex_rejects_before_prompt_on_out_of_allowlist_mask, wr01_job_object_rejects_before_prompt_on_terminate_mask, wr01_pipe_rejects_after_prompt_on_readwrite_default_profile, wr01_socket_privileged_port_rejects_after_prompt_empirical. Socket stage empirically observed as POST-prompt (backend.calls()==1, reason contains "broker failed:" + "privileged port"). Module-level `//!` docstring at top of capability_handler_tests documents verdict matrix + CONTEXT D-14 deferral note (WR-01 stage-unification deferred to v2.2 as product decision). Pre-existing handle_denies_job_object_with_terminate_mask_no_profile_widening extended with narrative comment tying backend.calls()==0 to WR-01 G-05 stage claim (assertion unchanged). 36/36 capability_handler_tests PASS (31 pre-existing + 5 new); 5/5 aipc_handle_brokering_integration PASS; 31/31 terminal_approval PASS (Wave 1 regression guard); 60/60 nono lib supervisor PASS (D-19 byte-identical proof). Clippy/fmt/build clean. D-19 verified: git diff --stat HEAD~1 HEAD shows ONLY supervisor.rs. D-21 preserved.
-Milestone: v2.1 — 21/22 phases implementation-complete (Phase 18.1: 4/4 plans implemented; awaiting gsd-verifier for phase-level sign-off). **Remaining gate to v2.1 milestone tag:** gsd-verifier phase verification on Phase 18.1, then tag + CHANGELOG + release bookkeeping.
+Phase: Not started (defining requirements — v2.2 milestone gathering)
+Plan: —
+Status: Defining requirements for v2.2 Windows/macOS Parity Sweep. PROJECT.md updated with Current Milestone section 2026-04-24. REQUIREMENTS.md pending generation; ROADMAP.md pending roadmapper spawn. Pre-milestone `windows-squash` → `main` merge tracked as a separate quick task (not a v2.2 phase).
+Milestone: v2.2 — 0/N phases (scope in gathering). Phase numbering continues from v2.1's Phase 21 → v2.2 starts at Phase 22.
 
   - v1.0 Windows Alpha — shipped 2026-03-31 (tag `v1.0`).
-  - v2.0 Windows Gap Closure — shipped 2026-04-18 (tag `v2.0` pending on merge). Carry-forward closed by Phase 15 the same day.
-  - v2.1 — started 2026-04-18, this milestone.
+  - v2.0 Windows Gap Closure — shipped 2026-04-18 (tag `v2.0` local; merge-to-main pending on pre-milestone quick task).
+  - v2.1 — shipped 2026-04-21 (tag `v2.1` local; merge-to-main pending on pre-milestone quick task).
+  - v2.2 — started 2026-04-24, this milestone.
 
-v2.1 phase structure (target — will be finalized by `/gsd-plan-phase`):
+v2.2 provisional phase structure (target — finalized by gsd-roadmapper):
 
-  - Phase 16: Resource Limits (RESL-01..04) — Job Object CPU/memory/timeout/process-count caps.
-  - Phase 17: Attach-Streaming (ATCH-01) — full ConPTY re-attach on detached Windows sessions.
-  - Phase 18: Extended IPC (AIPC-01) — broker additional handle types over Phase 11 cap pipe.
-  - Phase 19: Cleanup (CLEAN-01..04) — fmt drift, Windows test flakes, WIP triage, session-file housekeeping.
-
-Phases 1–15 complete on disk (see `.planning/ROADMAP.md` progress table).
+  - Phase 22: UPST2 — upstream v0.38–v0.40 parity (5 plans: profile struct, policy tightening, package manager, OAuth2, audit integrity last).
+  - Phase 23: Windows audit-event retrofit (conditional — only if Phase 22-05 reveals AIPC broker gap in upstream's ledger shape).
+  - Phase 24: Parity-drift prevention tooling.
 
 Next actions:
 
-  - Run gsd-verifier on Phase 18.1 — all 4 plans implemented; verifier confirms must-haves across G-02..G-06 and signs off the phase.
-  - Post-verifier: transition Phase 18 HUMAN-UAT.md items from blocked/partial/issue → pass (bookkeeping), flip Phase 18.1 top-level checkbox in ROADMAP.md to `[x]`.
-  - v2.1 milestone close-out: tag + CHANGELOG + release bookkeeping.
-
-Naming note: phase directories `13-v1-human-verification-uat/` and `14-v1-fix-pass/` retain v1-era naming — v2.0/v2.1 is the formal milestone sequence per PROJECT.md/REQUIREMENTS.md.
+  - Define REQUIREMENTS.md with PROF / POLY / PKG / OAUTH / AUD / DRIFT categories.
+  - Spawn gsd-roadmapper to map requirements → phases 22–24.
+  - Run the pre-milestone quick task: merge `windows-squash` → `main` before Phase 22 starts.
 
 Last activity: 2026-04-20 -- supervisor-pipe access-denied debug session RESOLVED on windows-squash after 3-commit fix chain. Root cause: Windows 11 26200's WRITE_RESTRICTED second-pass DACL access check requires an ACE for a group SID with SE_GROUP_MANDATORY in addition to the RestrictedSids ACE — OW Owner Rights does NOT satisfy this co-requirement. Discovered empirically via 13 SDDL variants tested through the new crates/nono-cli/examples/pipe-repro.rs harness. Fix: 3c68377 (session-SID ACE) + 938887f (runtime-resolved logon-SID ACE via current_logon_sid() helper querying TokenGroups for SE_GROUP_LOGON_ID) + e4c1bfa (companion Phase 18 Plan 18-04 fix: reconstruct_socket_from_blob now OnceLock-guards WSAStartup before WSASocketW(FROM_PROTOCOL_INFO)). Live UAT re-run successfully brokered 4 of 5 AIPC handle types end-to-end (Event, Mutex, Pipe, Socket); JobObject failed with separate bug tracked as G-03. Phase 18 HUMAN-UAT transitioned from [all issue: supervisor-pipe] to concrete verdicts: 1 issue (G-02 D-04 prompt templates not rendered), 1 partial (WR-01 stage semantic not verified — G-05), 2 skipped (profile widening — G-06; WR-02 EDR host unavailable). 5 new gap entries captured for Phase 18.1 --gaps follow-up. Three close-out docs commits: debug-file move to .planning/debug/resolved/, HUMAN-UAT transition, STATE Key Decisions. D-21 Windows-invariance preserved.
 
