@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.2
 milestone_name: Windows/macOS Parity Sweep
-status: v2.2 started 2026-04-24. Scope locked as "Windows/macOS Parity Sweep" — ingest upstream v0.38–v0.40 cross-platform features (profile, policy, package manager, OAuth2, audit integrity) + install parity-drift prevention process. Pre-milestone `windows-squash` → `main` merge is a separate quick task, not a v2.2 phase. Awaiting `/gsd-plan-phase` invocation after roadmap approval.
-stopped_at: v2.2 milestone scope-gather complete. PROJECT.md updated with Current Milestone section, target features, key context, out-of-scope deferrals. REQUIREMENTS.md pending generation. ROADMAP.md pending roadmapper spawn.
+status: v2.2 roadmap finalized 2026-04-24 by gsd-roadmapper. 21 requirements mapped to 3 phases (22 UPST2 / 23 Windows audit-event retrofit / 24 parity-drift prevention). Phase 22 has 5 plans, Phase 23 has 1 plan, Phase 24 has 2 plans — 8 plans total. Awaiting pre-milestone `windows-squash` → `main` merge quick task, then `/gsd-plan-phase 22`.
+stopped_at: v2.2 roadmap complete. PROJECT.md, REQUIREMENTS.md, ROADMAP.md, STATE.md all in sync. Traceability table filled (21/21 mapped, 0 unmapped). Next: pre-milestone merge quick task, then `/gsd-plan-phase 22`.
 last_updated: "2026-04-24T00:00:00Z"
 last_activity: 2026-04-24 — v2.2 milestone started via `/gsd-new-milestone`. Quick task 260424-upr (upstream v0.37.1 → v0.40.1 review) immediately preceded scoping and surfaced the UPST2 target. User reframed objective from "upstream parity" to "Windows/macOS capability parity" — same work, cleaner goal. Deferred to v2.3+: WR-01 reject-stage unification, AIPC G-04 wire-protocol compile-time tightening, cross-platform RESL Unix backends.
 progress:
-  total_phases: 22
+  total_phases: 25
   completed_phases: 22
-  total_plans: 62
+  total_plans: 70
   completed_plans: 62
-  percent: 100
+  percent: 88
 ---
 
 # Project State: nono — v2.2 Windows/macOS Parity Sweep
@@ -26,27 +26,27 @@ See: .planning/PROJECT.md (updated 2026-04-24 at v2.2 milestone start)
 
 ## Current Position
 
-Phase: Not started (defining requirements — v2.2 milestone gathering)
+Phase: Not started (roadmap complete — awaiting pre-milestone merge + `/gsd-plan-phase 22`)
 Plan: —
-Status: Defining requirements for v2.2 Windows/macOS Parity Sweep. PROJECT.md updated with Current Milestone section 2026-04-24. REQUIREMENTS.md pending generation; ROADMAP.md pending roadmapper spawn. Pre-milestone `windows-squash` → `main` merge tracked as a separate quick task (not a v2.2 phase).
-Milestone: v2.2 — 0/N phases (scope in gathering). Phase numbering continues from v2.1's Phase 21 → v2.2 starts at Phase 22.
+Status: v2.2 roadmap finalized 2026-04-24. 21 requirements mapped across 3 phases (22, 23, 24) with zero orphans. ROADMAP.md, REQUIREMENTS.md traceability, STATE.md all in sync. Pre-milestone `windows-squash` → `main` merge tracked as a separate quick task (not a v2.2 phase) — must land before Plan 22-01 cherry-picks so upstream parity work targets stable mainline.
+Milestone: v2.2 — 0/3 phases, 0/8 plans. Phase numbering continues from v2.1's Phase 21 → v2.2 starts at Phase 22.
 
   - v1.0 Windows Alpha — shipped 2026-03-31 (tag `v1.0`).
   - v2.0 Windows Gap Closure — shipped 2026-04-18 (tag `v2.0` local; merge-to-main pending on pre-milestone quick task).
   - v2.1 — shipped 2026-04-21 (tag `v2.1` local; merge-to-main pending on pre-milestone quick task).
   - v2.2 — started 2026-04-24, this milestone.
 
-v2.2 provisional phase structure (target — finalized by gsd-roadmapper):
+v2.2 finalized phase structure (locked 2026-04-24 by gsd-roadmapper):
 
-  - Phase 22: UPST2 — upstream v0.38–v0.40 parity (5 plans: profile struct, policy tightening, package manager, OAuth2, audit integrity last).
-  - Phase 23: Windows audit-event retrofit (conditional — only if Phase 22-05 reveals AIPC broker gap in upstream's ledger shape).
-  - Phase 24: Parity-drift prevention tooling.
+  - Phase 22: UPST2 — Upstream v0.38–v0.40 Parity Sync (5 plans). Covers PROF-01..04, POLY-01..03, PKG-01..04, OAUTH-01..03, AUD-01..04 (18 requirements). Locked plan sequence: 22-01 Profile struct → 22-02 Policy tightening (wave-parallel with 22-01) → 22-03 Package manager → 22-04 OAuth2 proxy → 22-05 Audit integrity + attestation (last — touches `rollback_runtime.rs`/`supervised_runtime.rs`/`exec_strategy.rs` which are heavily forked on windows-squash).
+  - Phase 23: Windows Audit-Event Retrofit (1 plan). Covers AUD-05 — wires ledger emissions into the 5 AIPC broker paths in `exec_strategy_windows/supervisor.rs`. Depends on Phase 22.
+  - Phase 24: Parity-Drift Prevention (2 plans). Covers DRIFT-01 (`check-upstream-drift` tooling) + DRIFT-02 (GSD quick-task template for upstream sync). Independent of Phase 22/23 sequencing.
 
 Next actions:
 
-  - Define REQUIREMENTS.md with PROF / POLY / PKG / OAUTH / AUD / DRIFT categories.
-  - Spawn gsd-roadmapper to map requirements → phases 22–24.
-  - Run the pre-milestone quick task: merge `windows-squash` → `main` before Phase 22 starts.
+  - Run the pre-milestone quick task: merge `windows-squash` → `main` before Phase 22 cherry-picks begin.
+  - Invoke `/gsd-plan-phase 22` to decompose Phase 22 into the 5 locked plans.
+  - Phase 24 may be started in parallel with Phase 22 (independent dependency chain).
 
 Last activity: 2026-04-20 -- supervisor-pipe access-denied debug session RESOLVED on windows-squash after 3-commit fix chain. Root cause: Windows 11 26200's WRITE_RESTRICTED second-pass DACL access check requires an ACE for a group SID with SE_GROUP_MANDATORY in addition to the RestrictedSids ACE — OW Owner Rights does NOT satisfy this co-requirement. Discovered empirically via 13 SDDL variants tested through the new crates/nono-cli/examples/pipe-repro.rs harness. Fix: 3c68377 (session-SID ACE) + 938887f (runtime-resolved logon-SID ACE via current_logon_sid() helper querying TokenGroups for SE_GROUP_LOGON_ID) + e4c1bfa (companion Phase 18 Plan 18-04 fix: reconstruct_socket_from_blob now OnceLock-guards WSAStartup before WSASocketW(FROM_PROTOCOL_INFO)). Live UAT re-run successfully brokered 4 of 5 AIPC handle types end-to-end (Event, Mutex, Pipe, Socket); JobObject failed with separate bug tracked as G-03. Phase 18 HUMAN-UAT transitioned from [all issue: supervisor-pipe] to concrete verdicts: 1 issue (G-02 D-04 prompt templates not rendered), 1 partial (WR-01 stage semantic not verified — G-05), 2 skipped (profile widening — G-06; WR-02 EDR host unavailable). 5 new gap entries captured for Phase 18.1 --gaps follow-up. Three close-out docs commits: debug-file move to .planning/debug/resolved/, HUMAN-UAT transition, STATE Key Decisions. D-21 Windows-invariance preserved.
 

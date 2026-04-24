@@ -304,37 +304,37 @@ Context: Without a process for absorbing upstream releases, v0.42 and v0.43 will
 
 ## Traceability
 
-To be filled by gsd-roadmapper during Step 10 of the new-milestone workflow.
+Mapped by gsd-roadmapper 2026-04-24 at v2.2 milestone scope-lock.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| PROF-01 | TBD | Pending |
-| PROF-02 | TBD | Pending |
-| PROF-03 | TBD | Pending |
-| PROF-04 | TBD | Pending |
-| POLY-01 | TBD | Pending |
-| POLY-02 | TBD | Pending |
-| POLY-03 | TBD | Pending |
-| PKG-01 | TBD | Pending |
-| PKG-02 | TBD | Pending |
-| PKG-03 | TBD | Pending |
-| PKG-04 | TBD | Pending |
-| OAUTH-01 | TBD | Pending |
-| OAUTH-02 | TBD | Pending |
-| OAUTH-03 | TBD | Pending |
-| AUD-01 | TBD | Pending |
-| AUD-02 | TBD | Pending |
-| AUD-03 | TBD | Pending |
-| AUD-04 | TBD | Pending |
-| AUD-05 | TBD | Pending |
-| DRIFT-01 | TBD | Pending |
-| DRIFT-02 | TBD | Pending |
+| PROF-01 | Phase 22 (Plan 22-01) | Pending |
+| PROF-02 | Phase 22 (Plan 22-01) | Pending |
+| PROF-03 | Phase 22 (Plan 22-01) | Pending |
+| PROF-04 | Phase 22 (Plan 22-01) | Pending |
+| POLY-01 | Phase 22 (Plan 22-02) | Pending |
+| POLY-02 | Phase 22 (Plan 22-02) | Pending |
+| POLY-03 | Phase 22 (Plan 22-02) | Pending |
+| PKG-01 | Phase 22 (Plan 22-03) | Pending |
+| PKG-02 | Phase 22 (Plan 22-03) | Pending |
+| PKG-03 | Phase 22 (Plan 22-03) | Pending |
+| PKG-04 | Phase 22 (Plan 22-03) | Pending |
+| OAUTH-01 | Phase 22 (Plan 22-04) | Pending |
+| OAUTH-02 | Phase 22 (Plan 22-04) | Pending |
+| OAUTH-03 | Phase 22 (Plan 22-04) | Pending |
+| AUD-01 | Phase 22 (Plan 22-05) | Pending |
+| AUD-02 | Phase 22 (Plan 22-05) | Pending |
+| AUD-03 | Phase 22 (Plan 22-05) | Pending |
+| AUD-04 | Phase 22 (Plan 22-05) | Pending |
+| AUD-05 | Phase 23 | Pending |
+| DRIFT-01 | Phase 24 | Pending |
+| DRIFT-02 | Phase 24 | Pending |
 
 **Coverage target:**
 - v2.2 requirements: 21 total
-- Mapped to phases: 0 (pending roadmapper)
-- Unmapped: 21 ⚠️
+- Mapped to phases: 21
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-04-24.*
-*Last updated: 2026-04-24 at v2.2 milestone start.*
+*Last updated: 2026-04-24 at v2.2 milestone scope-lock (traceability filled by gsd-roadmapper).*
