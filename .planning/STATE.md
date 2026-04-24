@@ -153,6 +153,7 @@ Progress: [██████████] 100% (62/62 plans implementation-comp
 | 260421-bpq | Quote driver binPath in sc create args (gemini high — service start breakage on paths with spaces) | 2026-04-21 | 7e58520 | [260421-bpq-fix-sc-create-binpath-quoting](./quick/260421-bpq-fix-sc-create-binpath-quoting/) |
 | 260421-owd | Reject directory paths with clear error in open_windows_supervisor_path (gemini medium) | 2026-04-21 | 7b01721 | [260421-owd-fix-open-supervisor-path-directory](./quick/260421-owd-fix-open-supervisor-path-directory/) |
 | 260421-inv | Flip inverted status check on FwpmGetAppIdFromFileName0 (gemini critical — PR 726) | 2026-04-21 | e4a9919 | [260421-inv-fix-fwpmgetappid-inverted-check](./quick/260421-inv-fix-fwpmgetappid-inverted-check/) |
+| 260424-upr | Review upstream v0.37.1 → v0.40.1 changes and assess Windows-native plan impact (research-only) | 2026-04-24 | — | [260424-upr-review-upstream-037-to-040](./quick/260424-upr-review-upstream-037-to-040/) |
 
 ## Deferred Items
 
