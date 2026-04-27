@@ -2,10 +2,10 @@
 gsd_state_version: 1.0
 milestone: v2.2
 milestone_name: Windows/macOS Parity Sweep
-status: v2.2 roadmap finalized 2026-04-24 by gsd-roadmapper. 21 requirements mapped to 3 phases (22 UPST2 / 23 Windows audit-event retrofit / 24 parity-drift prevention). Phase 22 has 5 plans, Phase 23 has 1 plan, Phase 24 has 2 plans — 8 plans total. Awaiting pre-milestone `windows-squash` → `main` merge quick task, then `/gsd-plan-phase 22`.
-stopped_at: v2.2 roadmap complete. PROJECT.md, REQUIREMENTS.md, ROADMAP.md, STATE.md all in sync. Traceability table filled (21/21 mapped, 0 unmapped). Next: pre-milestone merge quick task, then `/gsd-plan-phase 22`.
-last_updated: "2026-04-24T00:00:00Z"
-last_activity: 2026-04-24 — v2.2 milestone started via `/gsd-new-milestone`. Quick task 260424-upr (upstream v0.37.1 → v0.40.1 review) immediately preceded scoping and surfaced the UPST2 target. User reframed objective from "upstream parity" to "Windows/macOS capability parity" — same work, cleaner goal. Deferred to v2.3+: WR-01 reject-stage unification, AIPC G-04 wire-protocol compile-time tightening, cross-platform RESL Unix backends.
+status: Phase 22 context captured 2026-04-27 via `/gsd-discuss-phase 22`. 20 decisions locked across 4 areas (Plan 22-05 conflict strategy, working branch & origin push, plan sequencing/wave plan, test fixtures). Pre-milestone merge complete (commit 1ef30c63). Wave plan: 22-01 ‖ 22-02 (Wave 0) → 22-03 ‖ 22-04 (Wave 1) → 22-05 (Wave 2) → Phase 23 → Phase 24. Origin push to `main` + v2.0/v2.1 tags scheduled BEFORE `/gsd-plan-phase 22` per D-06.
+stopped_at: Phase 22 context gathered. CONTEXT.md + DISCUSSION-LOG.md committed (ecddb987). Next: push `main` + v2.0/v2.1 tags to origin (D-06/D-08), then `/gsd-plan-phase 22`.
+last_updated: "2026-04-27T00:00:00Z"
+last_activity: 2026-04-27 — Phase 22 discuss-phase complete. 20 decisions captured: D-01..D-04 (cherry-pick-first/soft-fallback/strict-chronological/per-commit-CLEAN-04 for 22-05 audit cluster), D-05..D-08 (main directly, push-now-then-per-plan-close, push v2.0/v2.1 tags), D-09..D-12 (sequencing/wave plan), D-13..D-16 (port upstream test fixtures + Windows-only tests atop, existing make-ci gate), D-17..D-20 (carry-forward from Phase 20: Windows-invariance, per-plan regression net, Upstream-commit trailer, manual-port for heavily-diverged files). AUD-05 stays in Phase 23 default; DRIFT-01..02 stay in Phase 24 sequenced after Phase 22 ships.
 progress:
   total_phases: 25
   completed_phases: 22
