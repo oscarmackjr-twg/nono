@@ -599,13 +599,13 @@ If any fails: STOP per CONTEXT STOP trigger #5 ("CLEAN-04 invariant test fails a
        ```
   </action>
   <verify>
-    <automated>cargo build --workspace --target x86_64-pc-windows-msvc 2&gt;/dev/null || cargo build --workspace &amp;&amp; test -f crates/nono-cli/src/audit/exec_identity_windows.rs &amp;&amp; grep -E 'Win32_Security_WinTrust' crates/nono-cli/Cargo.toml &amp;&amp; (cargo test -p nono-cli --test exec_identity_windows 2&gt;&amp;1 | tail || echo "Windows test only runs on Windows host")</automated>
+    <automated>cargo build --workspace &amp;&amp; test -f crates/nono-cli/src/audit/exec_identity_windows.rs &amp;&amp; grep -E 'Win32_Security_WinTrust' crates/nono-cli/Cargo.toml</automated>
   </verify>
   <acceptance_criteria>
     - `crates/nono-cli/src/audit/exec_identity_windows.rs` exists.
     - `crates/nono-cli/Cargo.toml` includes `Win32_Security_WinTrust` feature.
-    - `cargo build --workspace` exits 0 on Windows host.
-    - `cargo test -p nono-cli --test exec_identity_windows` passes on Windows (or documented-skip on non-Windows).
+    - `cargo build --workspace` exits 0 (host-native — Plan 22-05 runs on Windows host per phase posture; no cross-compile target needed).
+    - **Windows-host-gated test (manual gate):** On a Windows host, `cargo test -p nono-cli --test exec_identity_windows` must exit 0. On non-Windows hosts the test compiles to nothing (`#[cfg(target_os = "windows")]`) and is documented-skipped — record the skip in SUMMARY with rationale.
     - All `unsafe` blocks have `// SAFETY:` docs per CLAUDE.md.
     - No `.unwrap()` / `.expect()` in production code (clippy::unwrap_used).
     - Commit has Signed-off-by trailer; NO `Upstream-commit:` trailer (fork-only).
@@ -771,7 +771,7 @@ If any fails: STOP per CONTEXT STOP trigger #5 ("CLEAN-04 invariant test fails a
        ```
   </action>
   <verify>
-    <automated>cargo build --workspace &amp;&amp; test -f crates/nono-cli/tests/audit_attestation.rs &amp;&amp; cargo test -p nono-cli --test audit_attestation &amp;&amp; git log -1 --format='%b' | grep -E '^Upstream-commit: 9db06336'</automated>
+    <automated>cargo build --workspace &amp;&amp; test -f crates/nono-cli/tests/audit_attestation.rs &amp;&amp; cargo test -p nono-cli --test audit_attestation &amp;&amp; cargo test -p nono-cli session_commands::auto_prune_is_noop_when_sandboxed &amp;&amp; git log -1 --format='%b' | grep -E '^Upstream-commit: 9db06336'</automated>
   </verify>
   <acceptance_criteria>
     - `crates/nono-cli/tests/audit_attestation.rs` exists, ~188 LOC.
@@ -779,6 +779,7 @@ If any fails: STOP per CONTEXT STOP trigger #5 ("CLEAN-04 invariant test fails a
     - `MANUAL_TEST_STEPS.md` re-introduced.
     - `cargo build --workspace` exits 0.
     - `git log -1 --format=%B | grep '^Upstream-commit: 9db06336'` returns 1 line.
+    - **D-04 conservative gate** (per WARNING #4 from plan-checker — `9db06336` "refines audit path derivation" which could implicitly touch session paths): `cargo test -p nono-cli session_commands::auto_prune_is_noop_when_sandboxed` exits 0 (CLEAN-04 still preserved post-9db06336).
   </acceptance_criteria>
   <done>
     Full upstream AUD cluster landed. Audit attestation test fixture covering AUD-02 acceptance is green.

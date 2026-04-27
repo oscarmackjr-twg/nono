@@ -88,7 +88,7 @@ Purpose: A Windows user runs `nono package pull <name>` / `remove` / `search` / 
 - `\\?\` long-path prefix when joined path exceeds Windows MAX_PATH (260 chars). Detect via path length check; prepend `\\?\` only when needed.
 - `#[cfg(target_os = "windows")]`-gated tests for both behaviors.
 
-**D-17 caveat:** Upstream `8b2a5ffb` (correct SHA per RESEARCH finding #2 — was `8b5a2ffb` typo in CONTEXT) "fix(hooks): invoke bash via env" is N/A on Windows. If a cherry-pick attempt picks it up, ABORT (D-17 violation candidate). Verify fork's `nono-cli/data/hooks/nono-hook.sh` already handles the relevant path correctly.
+**D-17 caveat:** Upstream `8b5a2ffb` (correct SHA per RESEARCH finding #2 — was `8b2a5ffb` typo in CONTEXT) "fix(hooks): invoke bash via env" is N/A on Windows. If a cherry-pick attempt picks it up, ABORT (D-17 violation candidate). Verify fork's `nono-cli/data/hooks/nono-hook.sh` already handles the relevant path correctly.
 
 **D-17 caveat (continued):** Upstream `1d49246a` "claude-code integration package removal" is followed by the fork. Verify fork's `hooks.sh` doesn't reference removed surfaces before Plan 22-03 lands its hook installer per CONTEXT § Known Risks.
 
@@ -426,7 +426,7 @@ Purpose: A Windows user runs `nono package pull <name>` / `remove` / `search` / 
   <acceptance_criteria>
     - `grep -E 'canonicalize' crates/nono-cli/src/package_cmd.rs` returns ≥ 1 hit.
     - `grep -E 'verify.*signature|verify_signature' crates/nono-cli/src/registry_client.rs crates/nono-cli/src/package_cmd.rs` returns ≥ 1 hit.
-    - `grep -E '\.starts_with\("' crates/nono-cli/src/package_cmd.rs` returns 0 hits (or only on non-path strings — manual review required).
+    - **Path-component-comparison invariant (CLAUDE.md § Common Footguns #1):** Every callsite of `.starts_with(` in `crates/nono-cli/src/package_cmd.rs` must satisfy ONE of: (a) operates on `Path` (not `&str`/`String`) — verify with `grep -E 'Path::new\(.*\)\.starts_with\(' crates/nono-cli/src/package_cmd.rs`; (b) operates on a non-path string (e.g., URL scheme prefix check) AND has an inline `// SAFETY: not a path comparison — <reason>` comment within 3 lines; (c) returns 0 hits (no `.starts_with(` calls at all). Verify via: `grep -E '\.starts_with\(' crates/nono-cli/src/package_cmd.rs` then audit each hit per the rules above.
     - `cargo build --workspace` exits 0.
     - `git log -1 --format=%B | grep '^Upstream-commit: ec49a7af'` returns 1 line.
   </acceptance_criteria>

@@ -23,6 +23,7 @@ must_haves:
     - "Reverse-proxy HTTP upstream gating: loopback (127.0.0.0/8, ::1) allowed; non-loopback rejected fail-closed via `validate_upstream_url` (OAUTH-02)"
     - "`--allow-domain <host>` works in strict-proxy-only mode without bypassing host-network restrictions (OAUTH-03)"
     - "11 inline OAuth2 tests from upstream `9546c879` ported and pass on Windows host"
+    - "OAuth2 token cache is memory-only — no `write_to_disk` / `serialize_to_path` calls in `crates/nono-proxy/src/oauth2.rs` (T-22-04-02 BLOCKING mitigation; avoids Low-IL label issues from WSFG-01..03)"
     - "Every cherry-pick commit body contains D-19 trailers (Upstream-commit/tag/author + Signed-off-by)"
     - "`cargo test --workspace --all-features` exits 0 on Windows after each commit (D-18)"
   artifacts:
@@ -37,6 +38,10 @@ must_haves:
       to: "OAuth2 Bearer header injection on outbound requests"
       via: "nono-proxy/src/oauth2.rs token-cache lookup at request hook"
       pattern: "Authorization.*Bearer"
+    - from: "nono-proxy/src/oauth2.rs"
+      to: "nono::keystore::load_secret"
+      via: "keyring:// URI resolution for client_secret (cross-platform from v2.1 Phase 20 UPST-03)"
+      pattern: "keyring|load_secret"
 ---
 
 <objective>

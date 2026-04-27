@@ -11,6 +11,7 @@ files_modified:
   - crates/nono-cli/src/profile/mod.rs
   - crates/nono-cli/data/policy.json
   - crates/nono-cli/tests/rollback_audit_conflict.rs
+  - MANUAL_TEST_STEPS.md  # deleted by 5c301e8d (Task 2); re-introduced by 9db06336 in Plan 22-05 (round-trip per RESEARCH open question #4)
 autonomous: true
 requirements: ["POLY-01", "POLY-02", "POLY-03"]
 

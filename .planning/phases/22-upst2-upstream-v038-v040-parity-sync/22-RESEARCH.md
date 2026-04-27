@@ -485,7 +485,7 @@ cargo test -p nono-cli --bin nono is_prunable
 | A11 | `Win32_Security_Cryptography` feature is NOT needed for v0.0 (WinVerifyTrust suffices) | Standard Stack | Catalog-signed binaries (`CryptCATAdminAcquireContext`) are out of scope for dev builds; valid only for installed Windows components |
 | A12 | Plan 22-04 OAuth2 inline tests don't need Windows-specific `#[cfg]` gating | D-15 | Inline tests are TLS-pure (no filesystem); cross-platform by construction. Windows-specific tests per D-15 are ADDITIONAL (`keyring://`, Credential Manager resolution) — those are new test functions |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Should Plan 22-05 land Authenticode (REQ-AUD-03 acceptance #2/#3) in the SAME commit as `02ee0bd1` cherry-pick, or separately?**
    - What we know: Authenticode is fork-only; `02ee0bd1` is the upstream parent of `ExecutableIdentity`; D-19 says one commit per semantic change.
