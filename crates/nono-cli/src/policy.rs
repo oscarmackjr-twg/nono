@@ -134,6 +134,14 @@ pub struct ProfileDef {
     /// application is macOS-only (sandbox_prepare gates with cfg).
     #[serde(default)]
     pub unsafe_macos_seatbelt_rules: Vec<String>,
+    /// PROF-02 (Phase 22): pack dependencies. Built-in profiles MAY declare
+    /// packs via policy.json; resolution lands in Plan 22-03 (PKG).
+    #[serde(default)]
+    pub packs: Vec<String>,
+    /// PROF-02 (Phase 22): extra child-process arguments. Built-in profiles
+    /// MAY declare these via policy.json; expansion lands in Plan 22-03.
+    #[serde(default)]
+    pub command_args: Vec<String>,
 }
 
 impl ProfileDef {
@@ -173,6 +181,10 @@ impl ProfileDef {
             // verbatim so built-in profiles can declare them via policy.json.
             // Runtime application is macOS-only (sandbox_prepare cfg-gates).
             unsafe_macos_seatbelt_rules: self.unsafe_macos_seatbelt_rules.clone(),
+            // PROF-02 (Phase 22) per upstream 088bdad7: forward packs +
+            // command_args. Resolution + variable expansion land in Plan 22-03.
+            packs: self.packs.clone(),
+            command_args: self.command_args.clone(),
         }
     }
 }

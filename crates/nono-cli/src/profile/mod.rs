@@ -1220,6 +1220,19 @@ pub struct Profile {
     /// means the hard-coded supervisor defaults apply unchanged.
     #[serde(default)]
     pub capabilities: CapabilitiesConfig,
+    /// PROF-02 (Phase 22): pack dependencies verified at launch before
+    /// sandbox is applied. Each entry is a `<namespace>/<name>` reference
+    /// to an installed pack. On Windows the registry-pack resolution short-
+    /// circuits when the registry client is unavailable (Plan 22-03 lands
+    /// the actual resolution surface). Field deserializes on every platform.
+    #[serde(default)]
+    pub packs: Vec<String>,
+    /// PROF-02 (Phase 22): extra arguments appended to the child command
+    /// at launch. Supports variable expansion (e.g. `$NONO_PACKAGES` —
+    /// expansion lands with the rest of the package machinery in Plan
+    /// 22-03). Field deserializes on every platform.
+    #[serde(default)]
+    pub command_args: Vec<String>,
     /// Raw macOS-only Seatbelt S-expression rules applied verbatim to the sandbox policy.
     ///
     /// Expert escape hatch for capability gaps. Each entry must be a valid Seatbelt
@@ -1274,6 +1287,10 @@ struct ProfileDeserialize {
     capabilities: CapabilitiesConfig,
     #[serde(default)]
     unsafe_macos_seatbelt_rules: Vec<String>,
+    #[serde(default)]
+    packs: Vec<String>,
+    #[serde(default)]
+    command_args: Vec<String>,
 }
 
 impl From<ProfileDeserialize> for Profile {
@@ -1295,6 +1312,8 @@ impl From<ProfileDeserialize> for Profile {
             skipdirs: raw.skipdirs,
             capabilities: raw.capabilities,
             unsafe_macos_seatbelt_rules: raw.unsafe_macos_seatbelt_rules,
+            packs: raw.packs,
+            command_args: raw.command_args,
         }
     }
 }
@@ -1756,6 +1775,8 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
             &base.unsafe_macos_seatbelt_rules,
             &child.unsafe_macos_seatbelt_rules,
         ),
+        packs: dedup_append(&base.packs, &child.packs),
+        command_args: dedup_append(&base.command_args, &child.command_args),
     }
 }
 
@@ -3063,6 +3084,8 @@ mod tests {
             skipdirs: vec!["vendor".to_string()],
             capabilities: CapabilitiesConfig::default(),
             unsafe_macos_seatbelt_rules: Vec::new(),
+            packs: Vec::new(),
+            command_args: Vec::new(),
         }
     }
 
@@ -3133,6 +3156,8 @@ mod tests {
             skipdirs: vec!["dist".to_string()],
             capabilities: CapabilitiesConfig::default(),
             unsafe_macos_seatbelt_rules: Vec::new(),
+            packs: Vec::new(),
+            command_args: Vec::new(),
         }
     }
 
@@ -5019,6 +5044,69 @@ mod tests {
                 "(allow mach-lookup)".to_string(),
                 "(deny file-read*)".to_string(),
             ]
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // PROF-02 (Phase 22): packs + command_args deserialize coverage.
+    // VALIDATION 22-01-T2 — both fields use #[serde(default)] so absent
+    // fields produce empty Vecs without erroring; pack resolution is
+    // deserialize-only at this point (Plan 22-03 lands the resolver).
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn deserialize_packs_and_command_args() {
+        let json = r#"{
+            "meta": { "name": "test", "version": "1.0" },
+            "packs": ["acme/devtools", "acme/test-runner"],
+            "command_args": ["--verbose", "--target", "$NONO_PACKAGES/acme/devtools/bin"]
+        }"#;
+        let profile: Profile = serde_json::from_str(json).expect("parse profile");
+        assert_eq!(
+            profile.packs,
+            vec!["acme/devtools".to_string(), "acme/test-runner".to_string()]
+        );
+        assert_eq!(
+            profile.command_args,
+            vec![
+                "--verbose".to_string(),
+                "--target".to_string(),
+                "$NONO_PACKAGES/acme/devtools/bin".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn deserialize_packs_and_command_args_default_empty() {
+        // Both fields absent — must default to empty Vec via #[serde(default)].
+        let json = r#"{
+            "meta": { "name": "test", "version": "1.0" }
+        }"#;
+        let profile: Profile = serde_json::from_str(json).expect("parse profile");
+        assert!(profile.packs.is_empty());
+        assert!(profile.command_args.is_empty());
+    }
+
+    #[test]
+    fn merge_profiles_dedup_appends_packs_and_command_args() {
+        let mut base = base_profile();
+        let mut child = child_profile();
+        base.packs = vec!["acme/a".to_string(), "acme/shared".to_string()];
+        child.packs = vec!["acme/shared".to_string(), "acme/b".to_string()];
+        base.command_args = vec!["--base-flag".to_string()];
+        child.command_args = vec!["--child-flag".to_string()];
+        let merged = merge_profiles(base, child);
+        assert_eq!(
+            merged.packs,
+            vec![
+                "acme/a".to_string(),
+                "acme/shared".to_string(),
+                "acme/b".to_string(),
+            ]
+        );
+        assert_eq!(
+            merged.command_args,
+            vec!["--base-flag".to_string(), "--child-flag".to_string()]
         );
     }
 }
