@@ -858,6 +858,25 @@ pub fn apply_deny_overrides(
             }
         }
         if !grant_has_read && !grant_has_write {
+            // PROF-04 (Phase 22) cross-platform safety: if the override_deny
+            // target isn't actually denied on this platform (e.g. the deny
+            // rule comes from a `platform: "macos"` group while we're running
+            // on Windows), the override is a noop. Surfacing this as a hard
+            // error breaks cross-platform profile loading for profiles that
+            // mix platform-gated denies with profile-level override_deny —
+            // see e.g. claude-code's $HOME/Library/Keychains on Windows.
+            //
+            // Detect the noop case: the canonical path is NOT present in
+            // `deny_paths` (which already excludes platform-mismatched
+            // groups). When that's true, just warn and continue.
+            let path_is_actually_denied = deny_paths.iter().any(|d| d == &canonical);
+            if !path_is_actually_denied {
+                crate::output::print_warning(&format!(
+                    "override_deny for '{}' has no matching grant AND no matching deny on this platform — skipping",
+                    canonical.display()
+                ));
+                continue;
+            }
             return Err(NonoError::SandboxInit(format!(
                 "override_deny '{}' has no matching grant. \
                  Add a filesystem allow (--allow, --read, --write, or profile filesystem/policy) \
@@ -1351,17 +1370,18 @@ mod tests {
             .as_ref()
             .expect("claude_code_macos allow missing")
             .readwrite;
-        assert!(claude_code_macos
-            .allow
-            .as_ref()
-            .expect("claude_code_macos allow missing")
-            .read
-            .contains(&"$HOME/.local/share/claude".to_string()));
         // PROF-04 (Phase 22): upstream broadened keychain access to include
         // the entire `~/Library/Keychains` directory (was per-file in v0.37).
         // The pre-existing per-file assertions remain in place to keep both
         // the broader directory grant AND the legacy file-scoped grants
         // valid against the policy.json.
+        //
+        // Note: the upstream e3decf9d test added an additional assertion
+        // checking `claude_code_macos.allow.read` for `$HOME/.local/share/claude`
+        // but the fork's policy.json keeps that path under `claude_code_linux`
+        // (cross-platform CLAUDE state lives there per fork's data shape) so
+        // that assertion was dropped during the manual port to keep the test
+        // truthful against the embedded policy.json.
         assert!(claude_code_macos_paths.contains(&"$HOME/Library/Keychains".to_string()));
         assert!(claude_code_macos_paths
             .contains(&"$HOME/Library/Keychains/login.keychain-db".to_string()));
