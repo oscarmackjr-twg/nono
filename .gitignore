@@ -30,3 +30,6 @@ bindings/node/node_modules*
 host.nono_binary.commit
 /query
 
+# Plan-execution scratch directory (per-plan staging of upstream files for manual port)
+.tmp/
+

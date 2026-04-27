@@ -24,12 +24,12 @@ pub(crate) struct PreparedProfile {
     pub(crate) override_deny_paths: Vec<PathBuf>,
 }
 
-fn install_profile_hooks(profile: &profile::Profile, silent: bool) {
+fn install_profile_hooks(profile_name: Option<&str>, profile: &profile::Profile, silent: bool) {
     if profile.hooks.hooks.is_empty() {
         return;
     }
 
-    match hooks::install_profile_hooks(&profile.hooks.hooks) {
+    match hooks::install_profile_hooks(profile_name, &profile.hooks.hooks) {
         Ok(results) => {
             for (target, result) in results {
                 match result {
@@ -113,7 +113,7 @@ pub(crate) fn prepare_profile(
 ) -> crate::Result<PreparedProfile> {
     let loaded_profile = if let Some(ref profile_name) = args.profile {
         let profile = profile::load_profile(profile_name)?;
-        install_profile_hooks(&profile, silent);
+        install_profile_hooks(Some(profile_name.as_str()), &profile, silent);
         Some(profile)
     } else {
         None

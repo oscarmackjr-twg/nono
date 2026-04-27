@@ -168,6 +168,11 @@ fn cli_verbosity(cli: &Cli) -> u8 {
         | Commands::Prune(_)
         | Commands::Policy(_)
         | Commands::Profile(_)
+        | Commands::Pull(_)
+        | Commands::Remove(_)
+        | Commands::Update(_)
+        | Commands::Search(_)
+        | Commands::List(_)
         | Commands::OpenUrlHelper(_) => 0,
     }
 }

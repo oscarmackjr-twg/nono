@@ -31,6 +31,8 @@ mod open_url_runtime;
 #[path = "open_url_runtime_windows.rs"]
 mod open_url_runtime;
 mod output;
+mod package;
+mod package_cmd;
 mod policy;
 mod policy_cmd;
 mod profile;
@@ -44,6 +46,7 @@ mod pty_proxy;
 #[path = "pty_proxy_windows.rs"]
 mod pty_proxy;
 mod query_ext;
+mod registry_client;
 mod rollback_commands;
 mod rollback_preflight;
 mod rollback_runtime;
