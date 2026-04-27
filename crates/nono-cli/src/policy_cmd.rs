@@ -1325,15 +1325,20 @@ fn cmd_diff(args: PolicyDiffArgs) -> Result<()> {
                 );
             }
             if old.credential_key != new.credential_key {
+                // PROF-03 (Phase 22): credential_key is now Optional. Render
+                // missing values as "<oauth2>" to make the OAuth2 path visible
+                // in policy diff output.
+                let old_str = old.credential_key.as_deref().unwrap_or("<oauth2>");
+                let new_str = new.credential_key.as_deref().unwrap_or("<oauth2>");
                 println!(
                     "      {} credential_key: {}",
                     theme::fg("-", t.red),
-                    theme::fg(&old.credential_key, t.red)
+                    theme::fg(old_str, t.red)
                 );
                 println!(
                     "      {} credential_key: {}",
                     theme::fg("+", t.green),
-                    theme::fg(&new.credential_key, t.green)
+                    theme::fg(new_str, t.green)
                 );
             }
             if old.inject_mode != new.inject_mode {
@@ -2191,8 +2196,14 @@ fn resolve_to_manifest(
                 .upstream
                 .parse()
                 .map_err(|e| NonoError::ConfigParse(format!("invalid credential upstream: {e}")))?,
+            // PROF-03 (Phase 22): credential_key is now Optional. The manifest
+            // representation requires a source — when only OAuth2 `auth` is
+            // configured, surface a sentinel `oauth2://` source string so the
+            // manifest stays well-formed without leaking credential material.
             source: cred
                 .credential_key
+                .as_deref()
+                .unwrap_or("oauth2://")
                 .parse()
                 .map_err(|e| NonoError::ConfigParse(format!("invalid credential source: {e}")))?,
             inject: Some(manifest::CredentialInject {

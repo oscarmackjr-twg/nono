@@ -225,7 +225,9 @@ pub fn resolve_credentials(
             routes.push(RouteConfig {
                 prefix: name.clone(),
                 upstream: cred.upstream.clone(),
-                credential_key: Some(cred.credential_key.clone()),
+                // PROF-03 (Phase 22): credential_key is now Optional on
+                // CustomCredentialDef; clone the inner Option through.
+                credential_key: cred.credential_key.clone(),
                 inject_mode: cred.inject_mode.clone(),
                 inject_header: cred.inject_header.clone(),
                 credential_format: cred.credential_format.clone(),
@@ -241,10 +243,10 @@ pub fn resolve_credentials(
                         crate::policy::expand_path(p).map(|pb| pb.to_string_lossy().into_owned())
                     })
                     .transpose()?,
-                // PROF-03 (Plan 22-01): oauth2 wiring lands in Task 6 (b1ecbc02)
-                // when CustomCredentialDef.oauth2 is added. Plan 22-04 implements
-                // the actual token-exchange client.
-                oauth2: None,
+                // PROF-03 (Phase 22): forward OAuth2 auth from CustomCredentialDef
+                // through to RouteConfig. Plan 22-04 OAUTH wires this into the
+                // actual token-exchange client; here we just preserve the config.
+                oauth2: cred.auth.clone(),
             });
         } else if let Some(cred) = policy.credentials.get(name) {
             // Validate env_var against dangerous variable blocklist
@@ -450,7 +452,8 @@ mod tests {
             "telegram".to_string(),
             CustomCredentialDef {
                 upstream: "https://api.telegram.org".to_string(),
-                credential_key: "telegram_bot_token".to_string(),
+                credential_key: Some("telegram_bot_token".to_string()),
+                auth: None,
                 inject_mode: InjectMode::Header,
                 inject_header: "Authorization".to_string(),
                 credential_format: "Bearer {}".to_string(),
@@ -486,7 +489,8 @@ mod tests {
             "openai".to_string(),
             CustomCredentialDef {
                 upstream: "https://my-proxy.example.com/openai".to_string(),
-                credential_key: "my_openai_key".to_string(),
+                credential_key: Some("my_openai_key".to_string()),
+                auth: None,
                 inject_mode: InjectMode::Header,
                 inject_header: "X-Custom-Auth".to_string(),
                 credential_format: "Token {}".to_string(),
@@ -518,7 +522,8 @@ mod tests {
             "telegram".to_string(),
             CustomCredentialDef {
                 upstream: "https://api.telegram.org".to_string(),
-                credential_key: "telegram_bot_token".to_string(),
+                credential_key: Some("telegram_bot_token".to_string()),
+                auth: None,
                 inject_mode: InjectMode::Header,
                 inject_header: "Authorization".to_string(),
                 credential_format: "Bearer {}".to_string(),
@@ -560,7 +565,8 @@ mod tests {
             "local".to_string(),
             CustomCredentialDef {
                 upstream: "http://localhost:8080/api".to_string(),
-                credential_key: "local_api_key".to_string(),
+                credential_key: Some("local_api_key".to_string()),
+                auth: None,
                 inject_mode: InjectMode::Header,
                 inject_header: "Authorization".to_string(),
                 credential_format: "Bearer {}".to_string(),
@@ -638,7 +644,8 @@ mod tests {
             "local".to_string(),
             CustomCredentialDef {
                 upstream: "http://127.1.2.3:8080/api".to_string(),
-                credential_key: "local_api_key".to_string(),
+                credential_key: Some("local_api_key".to_string()),
+                auth: None,
                 inject_mode: InjectMode::Header,
                 inject_header: "Authorization".to_string(),
                 credential_format: "Bearer {}".to_string(),
@@ -667,7 +674,8 @@ mod tests {
             "local".to_string(),
             CustomCredentialDef {
                 upstream: "http://0.0.0.0:3000/api".to_string(),
-                credential_key: "local_api_key".to_string(),
+                credential_key: Some("local_api_key".to_string()),
+                auth: None,
                 inject_mode: InjectMode::Header,
                 inject_header: "Authorization".to_string(),
                 credential_format: "Bearer {}".to_string(),
@@ -696,7 +704,8 @@ mod tests {
             "test".to_string(),
             CustomCredentialDef {
                 upstream: "https://api.example.com".to_string(),
-                credential_key: "api_key".to_string(),
+                credential_key: Some("api_key".to_string()),
+                auth: None,
                 inject_mode: InjectMode::Header,
                 inject_header: "X-Custom-Auth".to_string(),
                 credential_format: "Token {}".to_string(),
@@ -730,7 +739,8 @@ mod tests {
             "openai".to_string(),
             CustomCredentialDef {
                 upstream: "https://api.openai.com/v1".to_string(),
-                credential_key: "op://Development/OpenAI/credential".to_string(),
+                credential_key: Some("op://Development/OpenAI/credential".to_string()),
+                auth: None,
                 inject_mode: InjectMode::Header,
                 inject_header: "Authorization".to_string(),
                 credential_format: "Bearer {}".to_string(),
@@ -838,7 +848,8 @@ mod tests {
             "evil".to_string(),
             CustomCredentialDef {
                 upstream: "https://api.example.com".to_string(),
-                credential_key: "safe_key".to_string(),
+                credential_key: Some("safe_key".to_string()),
+                auth: None,
                 inject_mode: InjectMode::Header,
                 inject_header: "Authorization".to_string(),
                 credential_format: "Bearer {}".to_string(),
