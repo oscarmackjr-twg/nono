@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v2.2
 milestone_name: Windows/macOS Parity Sweep
 status: executing
-stopped_at: v2.1 milestone close complete. All planning docs updated and committed. Awaiting next milestone scope.
-last_updated: "2026-04-27T16:10:51.624Z"
+stopped_at: Phase 22 execute-phase started — wave 0 (22-01 PROF + 22-02 POLY) sequential due to shared profile/mod.rs + policy.json
+last_updated: "2026-04-27T17:00:00.000Z"
 last_activity: 2026-04-27
 progress:
   total_phases: 24
