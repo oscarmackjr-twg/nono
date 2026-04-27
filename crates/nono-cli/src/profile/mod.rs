@@ -5241,7 +5241,10 @@ mod tests {
         let cred = &profile.network.custom_credentials["vendor_api"];
         assert!(cred.credential_key.is_none());
         let auth = cred.auth.as_ref().expect("auth set");
-        assert_eq!(auth.token_url, "https://auth.vendor.example.com/oauth/token");
+        assert_eq!(
+            auth.token_url,
+            "https://auth.vendor.example.com/oauth/token"
+        );
         assert_eq!(auth.client_id, "agent-1");
         assert_eq!(auth.client_secret, "keyring://nono/oauth2-test");
         assert_eq!(auth.scope, "api.read");
@@ -5348,8 +5351,7 @@ mod tests {
         let err = validate_custom_credential("v", &cred)
             .expect_err("must require credential_key or auth");
         assert!(
-            err.to_string().contains("credential_key")
-                || err.to_string().contains("auth"),
+            err.to_string().contains("credential_key") || err.to_string().contains("auth"),
             "{}",
             err
         );

@@ -238,14 +238,17 @@ mod tests {
     fn claude_no_keychain_loads() {
         // Upstream calls the profile `claude-no-kc`; the plan calls it
         // `claude-no-keychain` conceptually. We follow upstream's naming.
-        let profile = get_builtin("claude-no-kc")
-            .expect("claude-no-kc must be a registered builtin");
+        let profile =
+            get_builtin("claude-no-kc").expect("claude-no-kc must be a registered builtin");
         assert_eq!(profile.meta.name, "claude-no-kc");
 
         // The no-keychain variant inherits the claude-code agent groups
         // EXCEPT claude_code_macos (which carries the keychain access).
         assert!(
-            !profile.security.groups.contains(&"claude_code_macos".to_string()),
+            !profile
+                .security
+                .groups
+                .contains(&"claude_code_macos".to_string()),
             "claude-no-kc must not include claude_code_macos (keychain group)"
         );
         // Network unblocked + readwrite workdir match claude-code semantics.
@@ -648,8 +651,7 @@ mod tests {
             .tempdir_in(std::env::current_dir().expect("cwd"))
             .expect("home tempdir");
         #[cfg(not(target_os = "windows"))]
-        std::fs::create_dir_all(home.path().join("Library/Keychains"))
-            .expect("mkdir keychains");
+        std::fs::create_dir_all(home.path().join("Library/Keychains")).expect("mkdir keychains");
 
         #[cfg(not(target_os = "windows"))]
         let _env = crate::test_env::EnvVarGuard::set_all(&[
