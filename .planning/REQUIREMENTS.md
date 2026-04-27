@@ -308,10 +308,10 @@ Mapped by gsd-roadmapper 2026-04-24 at v2.2 milestone scope-lock.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| PROF-01 | Phase 22 (Plan 22-01) | Pending |
-| PROF-02 | Phase 22 (Plan 22-01) | Pending |
-| PROF-03 | Phase 22 (Plan 22-01) | Pending |
-| PROF-04 | Phase 22 (Plan 22-01) | Pending |
+| PROF-01 | Phase 22 (Plan 22-01) | Complete (commit d12b6535) |
+| PROF-02 | Phase 22 (Plan 22-01) | Complete (commit 5040411c) |
+| PROF-03 | Phase 22 (Plan 22-01) | Complete (commits bb79552a + 41ac5898) |
+| PROF-04 | Phase 22 (Plan 22-01) | Complete (commit 52d4ee49) |
 | POLY-01 | Phase 22 (Plan 22-02) | Pending |
 | POLY-02 | Phase 22 (Plan 22-02) | Pending |
 | POLY-03 | Phase 22 (Plan 22-02) | Pending |
