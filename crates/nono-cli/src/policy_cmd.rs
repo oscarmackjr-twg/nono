@@ -681,6 +681,21 @@ fn cmd_show(args: PolicyShowArgs) -> Result<()> {
         }
     }
 
+    // Raw Seatbelt rules (PROF-01) — surfaced on every platform for auditing
+    // visibility per REQ-PROF-01 acceptance #2. The rules only execute on
+    // macOS, but operators on Windows/Linux still need to see them when
+    // inspecting profiles (e.g., reviewing a profile authored by a teammate).
+    if !profile.unsafe_macos_seatbelt_rules.is_empty() {
+        println!();
+        println!(
+            "  {}",
+            theme::fg("Raw Seatbelt rules (unsafe_macos_seatbelt_rules):", t.yellow).bold()
+        );
+        for rule in &profile.unsafe_macos_seatbelt_rules {
+            println!("    {}", theme::fg(rule, t.text));
+        }
+    }
+
     Ok(())
 }
 
@@ -816,6 +831,13 @@ fn profile_to_json(
     // Allow launch services
     if let Some(als) = profile.allow_launch_services {
         val["allow_launch_services"] = serde_json::json!(als);
+    }
+
+    // Raw Seatbelt rules (PROF-01) — emit only when non-empty so existing
+    // golden snapshots without the field remain stable.
+    if !profile.unsafe_macos_seatbelt_rules.is_empty() {
+        val["unsafe_macos_seatbelt_rules"] =
+            serde_json::json!(profile.unsafe_macos_seatbelt_rules);
     }
 
     val

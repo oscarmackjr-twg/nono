@@ -163,6 +163,11 @@ impl ProfileDef {
             // policy.json verbatim. Default (empty `CapabilitiesConfig`) means
             // the hard-coded supervisor defaults apply (D-05).
             capabilities: self.capabilities.clone(),
+            // PROF-01 (Phase 22): built-in profiles cannot declare raw Seatbelt
+            // rules via policy.json (the field is profile-JSON only). Always
+            // forward an empty Vec; user-supplied profiles add rules at parse
+            // time via the Profile struct's `unsafe_macos_seatbelt_rules` field.
+            unsafe_macos_seatbelt_rules: Vec::new(),
         }
     }
 }

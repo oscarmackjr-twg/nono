@@ -321,6 +321,26 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
         CapabilitySet::from_args(args)?
     };
 
+    // PROF-01 (Phase 22): apply raw Seatbelt rules from the profile (macOS only).
+    // On Linux/Windows the field deserializes but is intentionally ignored —
+    // there is no equivalent escape hatch on those platforms (REQ-PROF-01).
+    #[cfg(target_os = "macos")]
+    if let Some(ref profile) = loaded_profile {
+        if !profile.unsafe_macos_seatbelt_rules.is_empty() {
+            tracing::warn!(
+                "Profile uses {} raw Seatbelt rule(s) via unsafe_macos_seatbelt_rules — review carefully",
+                profile.unsafe_macos_seatbelt_rules.len()
+            );
+            for rule in &profile.unsafe_macos_seatbelt_rules {
+                caps.add_platform_rule(rule).map_err(|e| {
+                    NonoError::ConfigParse(format!(
+                        "unsafe_macos_seatbelt_rules: invalid rule {rule:?}: {e}"
+                    ))
+                })?;
+            }
+        }
+    }
+
     let allow_launch_services_active = maybe_enable_macos_launch_services(
         &mut caps,
         args.allow_launch_services,

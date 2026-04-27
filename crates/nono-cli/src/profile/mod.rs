@@ -1220,6 +1220,20 @@ pub struct Profile {
     /// means the hard-coded supervisor defaults apply unchanged.
     #[serde(default)]
     pub capabilities: CapabilitiesConfig,
+    /// Raw macOS-only Seatbelt S-expression rules applied verbatim to the sandbox policy.
+    ///
+    /// Expert escape hatch for capability gaps. Each entry must be a valid Seatbelt
+    /// S-expression such as `(allow iokit-open)`. Rules are validated at load time
+    /// and rejected if malformed. Ignored on Linux and Windows (deserialize-only;
+    /// runtime application is macOS-only by design per REQ-PROF-01). Prominently
+    /// surfaced in `nono policy profile` output when present so it is obvious a
+    /// profile uses raw platform rules.
+    ///
+    /// This field is intentionally named `unsafe_*` — it bypasses nono's capability
+    /// model. If a rule pattern becomes common, prefer promoting it to a typed
+    /// first-class capability.
+    #[serde(default)]
+    pub unsafe_macos_seatbelt_rules: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -1258,6 +1272,8 @@ struct ProfileDeserialize {
     skipdirs: Vec<String>,
     #[serde(default)]
     capabilities: CapabilitiesConfig,
+    #[serde(default)]
+    unsafe_macos_seatbelt_rules: Vec<String>,
 }
 
 impl From<ProfileDeserialize> for Profile {
@@ -1278,6 +1294,7 @@ impl From<ProfileDeserialize> for Profile {
             interactive: raw.interactive,
             skipdirs: raw.skipdirs,
             capabilities: raw.capabilities,
+            unsafe_macos_seatbelt_rules: raw.unsafe_macos_seatbelt_rules,
         }
     }
 }
@@ -1735,6 +1752,10 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
                 }),
             },
         },
+        unsafe_macos_seatbelt_rules: dedup_append(
+            &base.unsafe_macos_seatbelt_rules,
+            &child.unsafe_macos_seatbelt_rules,
+        ),
     }
 }
 
@@ -3041,6 +3062,7 @@ mod tests {
             interactive: false,
             skipdirs: vec!["vendor".to_string()],
             capabilities: CapabilitiesConfig::default(),
+            unsafe_macos_seatbelt_rules: Vec::new(),
         }
     }
 
@@ -3110,6 +3132,7 @@ mod tests {
             interactive: false,
             skipdirs: vec!["dist".to_string()],
             capabilities: CapabilitiesConfig::default(),
+            unsafe_macos_seatbelt_rules: Vec::new(),
         }
     }
 
@@ -4939,5 +4962,63 @@ mod tests {
                 result.err().map(|e| format!("{e}"))
             );
         }
+    }
+
+    // -------------------------------------------------------------------
+    // PROF-01 (Phase 22): unsafe_macos_seatbelt_rules deserialize coverage.
+    // VALIDATION 22-01-T1 — runtime application is macOS-only by design;
+    // Windows + Linux must deserialize the field cleanly without runtime
+    // surface. The platform gating lives in sandbox_prepare.rs.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn deserialize_seatbelt_rules_with_field() {
+        let json = r#"{
+            "meta": { "name": "test", "version": "1.0" },
+            "unsafe_macos_seatbelt_rules": [
+                "(allow iokit-open)",
+                "(allow mach-lookup (global-name \"com.apple.test\"))"
+            ]
+        }"#;
+        let profile: Profile = serde_json::from_str(json).expect("parse profile");
+        assert_eq!(profile.unsafe_macos_seatbelt_rules.len(), 2);
+        assert_eq!(profile.unsafe_macos_seatbelt_rules[0], "(allow iokit-open)");
+        assert_eq!(
+            profile.unsafe_macos_seatbelt_rules[1],
+            "(allow mach-lookup (global-name \"com.apple.test\"))"
+        );
+    }
+
+    #[test]
+    fn deserialize_seatbelt_rules_default_is_empty() {
+        // Field is absent — must default to empty Vec via #[serde(default)].
+        let json = r#"{
+            "meta": { "name": "test", "version": "1.0" }
+        }"#;
+        let profile: Profile = serde_json::from_str(json).expect("parse profile");
+        assert!(profile.unsafe_macos_seatbelt_rules.is_empty());
+    }
+
+    #[test]
+    fn merge_profiles_dedup_appends_seatbelt_rules() {
+        let mut base = base_profile();
+        let mut child = child_profile();
+        base.unsafe_macos_seatbelt_rules = vec![
+            "(allow iokit-open)".to_string(),
+            "(allow mach-lookup)".to_string(),
+        ];
+        child.unsafe_macos_seatbelt_rules = vec![
+            "(allow mach-lookup)".to_string(), // duplicate — must dedup
+            "(deny file-read*)".to_string(),
+        ];
+        let merged = merge_profiles(base, child);
+        assert_eq!(
+            merged.unsafe_macos_seatbelt_rules,
+            vec![
+                "(allow iokit-open)".to_string(),
+                "(allow mach-lookup)".to_string(),
+                "(deny file-read*)".to_string(),
+            ]
+        );
     }
 }
