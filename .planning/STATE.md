@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.2
 milestone_name: Windows/macOS Parity Sweep
-status: Phase 22 context captured 2026-04-27 via `/gsd-discuss-phase 22`. 20 decisions locked across 4 areas (Plan 22-05 conflict strategy, working branch & origin push, plan sequencing/wave plan, test fixtures). Pre-milestone merge complete (commit 1ef30c63). Wave plan: 22-01 ‖ 22-02 (Wave 0) → 22-03 ‖ 22-04 (Wave 1) → 22-05 (Wave 2) → Phase 23 → Phase 24. Origin push to `main` + v2.0/v2.1 tags scheduled BEFORE `/gsd-plan-phase 22` per D-06.
-stopped_at: Phase 22 context gathered. CONTEXT.md + DISCUSSION-LOG.md committed (ecddb987). Next: push `main` + v2.0/v2.1 tags to origin (D-06/D-08), then `/gsd-plan-phase 22`.
-last_updated: "2026-04-27T00:00:00Z"
-last_activity: 2026-04-27 — Phase 22 discuss-phase complete. 20 decisions captured: D-01..D-04 (cherry-pick-first/soft-fallback/strict-chronological/per-commit-CLEAN-04 for 22-05 audit cluster), D-05..D-08 (main directly, push-now-then-per-plan-close, push v2.0/v2.1 tags), D-09..D-12 (sequencing/wave plan), D-13..D-16 (port upstream test fixtures + Windows-only tests atop, existing make-ci gate), D-17..D-20 (carry-forward from Phase 20: Windows-invariance, per-plan regression net, Upstream-commit trailer, manual-port for heavily-diverged files). AUD-05 stays in Phase 23 default; DRIFT-01..02 stay in Phase 24 sequenced after Phase 22 ships.
+status: executing
+stopped_at: v2.1 milestone close complete. All planning docs updated and committed. Awaiting next milestone scope.
+last_updated: "2026-04-27T16:10:51.624Z"
+last_activity: 2026-04-27
 progress:
-  total_phases: 25
-  completed_phases: 22
-  total_plans: 70
+  total_phases: 24
+  completed_phases: 20
+  total_plans: 67
   completed_plans: 62
-  percent: 88
+  percent: 93
 ---
 
 # Project State: nono — v2.2 Windows/macOS Parity Sweep
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-04-24 at v2.2 milestone start)
 
 Phase: Not started (roadmap complete — awaiting pre-milestone merge + `/gsd-plan-phase 22`)
 Plan: —
-Status: v2.2 roadmap finalized 2026-04-24. 21 requirements mapped across 3 phases (22, 23, 24) with zero orphans. ROADMAP.md, REQUIREMENTS.md traceability, STATE.md all in sync. Pre-milestone `windows-squash` → `main` merge tracked as a separate quick task (not a v2.2 phase) — must land before Plan 22-01 cherry-picks so upstream parity work targets stable mainline.
+Status: Ready to execute
 Milestone: v2.2 — 0/3 phases, 0/8 plans. Phase numbering continues from v2.1's Phase 21 → v2.2 starts at Phase 22.
 
   - v1.0 Windows Alpha — shipped 2026-03-31 (tag `v1.0`).
@@ -48,7 +48,7 @@ Next actions:
   - Invoke `/gsd-plan-phase 22` to decompose Phase 22 into the 5 locked plans.
   - Phase 24 may be started in parallel with Phase 22 (independent dependency chain).
 
-Last activity: 2026-04-20 -- supervisor-pipe access-denied debug session RESOLVED on windows-squash after 3-commit fix chain. Root cause: Windows 11 26200's WRITE_RESTRICTED second-pass DACL access check requires an ACE for a group SID with SE_GROUP_MANDATORY in addition to the RestrictedSids ACE — OW Owner Rights does NOT satisfy this co-requirement. Discovered empirically via 13 SDDL variants tested through the new crates/nono-cli/examples/pipe-repro.rs harness. Fix: 3c68377 (session-SID ACE) + 938887f (runtime-resolved logon-SID ACE via current_logon_sid() helper querying TokenGroups for SE_GROUP_LOGON_ID) + e4c1bfa (companion Phase 18 Plan 18-04 fix: reconstruct_socket_from_blob now OnceLock-guards WSAStartup before WSASocketW(FROM_PROTOCOL_INFO)). Live UAT re-run successfully brokered 4 of 5 AIPC handle types end-to-end (Event, Mutex, Pipe, Socket); JobObject failed with separate bug tracked as G-03. Phase 18 HUMAN-UAT transitioned from [all issue: supervisor-pipe] to concrete verdicts: 1 issue (G-02 D-04 prompt templates not rendered), 1 partial (WR-01 stage semantic not verified — G-05), 2 skipped (profile widening — G-06; WR-02 EDR host unavailable). 5 new gap entries captured for Phase 18.1 --gaps follow-up. Three close-out docs commits: debug-file move to .planning/debug/resolved/, HUMAN-UAT transition, STATE Key Decisions. D-21 Windows-invariance preserved.
+Last activity: 2026-04-27 -- Phase 22 planning complete
 
 ```
 Progress: [██████████] 100% (62/62 plans implementation-complete — Phase 21 closed 2026-04-20; supervisor-pipe debug RESOLVED via 3-commit fix chain; Phase 18.1 Plan 18.1-01 (G-02 CONIN$ prompt routing) complete 2026-04-21; Phase 18.1 Plan 18.1-02 (G-03 JobObject CreateJobObjectW + G-04 broker-failure flip) complete 2026-04-21; Phase 18.1 Plan 18.1-03 (G-06 profile widening end-to-end wiring, Plan 18-03 Deferred Issue #1 RESOLVED) complete 2026-04-21; Phase 18.1 Plan 18.1-04 (G-05 WR-01 reject-stage verification, commit 1699339) complete 2026-04-21 — all 5 HUMAN-UAT gaps G-02..G-06 closed. Remaining gate to v2.1 milestone tag: gsd-verifier phase-level sign-off on Phase 18.1)
@@ -182,7 +182,7 @@ Known deferred items at close: 17 (5 UAT bookkeeping gaps, 3 verification human_
 ## Session Continuity
 
 **Current Milestone:** (unscoped) — v2.1 shipped 2026-04-21 (tag `v2.1`).
-**Last Activity:** 2026-04-21 — v2.1 milestone closed via `/gsd-complete-milestone`. Archived ROADMAP + REQUIREMENTS; reorganized ROADMAP.md into milestone groupings; evolved PROJECT.md with 13 new Validated requirements + 8 new Key Decisions; finalized MILESTONES.md entry; updated RETROSPECTIVE.md; recorded 17 deferred items in STATE.md § Deferred Items; removed REQUIREMENTS.md via `git rm` (history preserved); tag `v2.1` created.
+**Last Activity:** 2026-04-27
 **Stopped At:** v2.1 milestone close complete. All planning docs updated and committed. Awaiting next milestone scope.
 **Next Steps:** Run `/gsd-new-milestone` to scope v2.2. Candidate focus areas documented in PROJECT.md § Next Milestone Goals.
 
