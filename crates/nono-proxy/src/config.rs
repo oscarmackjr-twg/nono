@@ -143,6 +143,15 @@ pub struct RouteConfig {
     /// Kubernetes API servers).
     #[serde(default)]
     pub tls_ca: Option<String>,
+
+    /// Optional OAuth2 client_credentials configuration (PROF-03, Phase 22).
+    /// When present, the proxy handles token exchange automatically instead
+    /// of using a static credential from the keystore.
+    /// Mutually exclusive with `credential_key` — use one or the other.
+    /// The actual OAuth2 token-exchange client lands in Plan 22-04 (OAUTH);
+    /// Plan 22-01 lands the type definition + serde wiring only.
+    #[serde(default)]
+    pub oauth2: Option<OAuth2Config>,
 }
 
 /// An HTTP method+path access rule for reverse proxy endpoint filtering.
@@ -295,6 +304,37 @@ pub struct ExternalProxyAuth {
 
 fn default_auth_scheme() -> String {
     "basic".to_string()
+}
+
+/// OAuth2 client_credentials configuration for automatic token exchange.
+///
+/// When configured on a route, the proxy handles the token lifecycle:
+/// 1. Exchanges client_id + client_secret for an access_token at startup
+/// 2. Caches the token with TTL from the `expires_in` response
+/// 3. Refreshes automatically before expiry (30s buffer)
+/// 4. Injects the access_token as `Authorization: Bearer <token>`
+///
+/// The agent never sees client_id or client_secret — only a phantom token.
+///
+/// Plan 22-01 (Phase 22) lands the type definition only; the actual token-
+/// exchange client implementation (`nono-proxy/src/oauth2.rs`) is owned by
+/// Plan 22-04 (OAUTH). PROF-03 fail-secure semantics (https-only token_url,
+/// keyring:// resolution for client_secret) are validated in profile/mod.rs
+/// at deserialize time per Plan 22-01 Task 6.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OAuth2Config {
+    /// Token endpoint URL (e.g., "https://auth.example.com/oauth/token").
+    /// MUST be HTTPS — http:// schemes are rejected fail-closed at profile
+    /// load time per REQ-PROF-03 acceptance #2.
+    pub token_url: String,
+    /// Client ID — plain value or credential reference (env://, file://, op://).
+    pub client_id: String,
+    /// Client secret — credential reference (env://, file://, op://, keyring://).
+    /// Resolved through `nono::keystore::load_secret` for `keyring://` URIs.
+    pub client_secret: String,
+    /// OAuth2 scopes (space-separated). Empty = no scope parameter sent.
+    #[serde(default)]
+    pub scope: String,
 }
 
 #[cfg(test)]
@@ -625,5 +665,35 @@ mod tests {
         let deserialized: EndpointRule = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.method, "GET");
         assert_eq!(deserialized.path, "/api/*/data");
+    }
+
+    // ========================================================================
+    // OAuth2Config tests (PROF-03 prereq, Phase 22 Plan 22-01 Task 5)
+    // ========================================================================
+
+    #[test]
+    fn test_oauth2_config_deserialization() {
+        let json = r#"{
+            "token_url": "https://auth.example.com/oauth/token",
+            "client_id": "my-client",
+            "client_secret": "env://CLIENT_SECRET",
+            "scope": "read write"
+        }"#;
+        let config: OAuth2Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.token_url, "https://auth.example.com/oauth/token");
+        assert_eq!(config.client_id, "my-client");
+        assert_eq!(config.client_secret, "env://CLIENT_SECRET");
+        assert_eq!(config.scope, "read write");
+    }
+
+    #[test]
+    fn test_oauth2_config_default_scope() {
+        let json = r#"{
+            "token_url": "https://auth.example.com/oauth/token",
+            "client_id": "my-client",
+            "client_secret": "env://SECRET"
+        }"#;
+        let config: OAuth2Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.scope, "");
     }
 }

@@ -248,6 +248,7 @@ mod tests {
             env_var: None,
             endpoint_rules: vec![],
             tls_ca: None,
+            oauth2: None,
         }];
         let store = CredentialStore::load(&routes);
         assert!(store.is_ok());

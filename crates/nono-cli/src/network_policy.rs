@@ -241,6 +241,10 @@ pub fn resolve_credentials(
                         crate::policy::expand_path(p).map(|pb| pb.to_string_lossy().into_owned())
                     })
                     .transpose()?,
+                // PROF-03 (Plan 22-01): oauth2 wiring lands in Task 6 (b1ecbc02)
+                // when CustomCredentialDef.oauth2 is added. Plan 22-04 implements
+                // the actual token-exchange client.
+                oauth2: None,
             });
         } else if let Some(cred) = policy.credentials.get(name) {
             // Validate env_var against dangerous variable blocklist
@@ -268,6 +272,7 @@ pub fn resolve_credentials(
                 env_var: cred.env_var.clone(),
                 endpoint_rules: cred.endpoint_rules.clone(),
                 tls_ca: None, // Built-in credentials don't support custom CAs
+                oauth2: None, // PROF-03 (Plan 22-01): Task 6 will wire oauth2
             });
         }
         // We already validated existence above, so this else branch won't be hit

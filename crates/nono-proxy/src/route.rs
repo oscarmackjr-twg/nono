@@ -283,6 +283,7 @@ mod tests {
                 },
             ],
             tls_ca: None,
+            oauth2: None,
         }];
 
         let store = RouteStore::load(&routes).unwrap();
@@ -314,6 +315,7 @@ mod tests {
             env_var: None,
             endpoint_rules: vec![],
             tls_ca: None,
+            oauth2: None,
         }];
 
         let store = RouteStore::load(&routes).unwrap();
@@ -336,6 +338,7 @@ mod tests {
             env_var: None,
             endpoint_rules: vec![],
             tls_ca: None,
+            oauth2: None,
         }];
 
         let store = RouteStore::load(&routes).unwrap();
@@ -359,6 +362,7 @@ mod tests {
                 env_var: None,
                 endpoint_rules: vec![],
                 tls_ca: None,
+                oauth2: None,
             },
             RouteConfig {
                 prefix: "anthropic".to_string(),
@@ -373,6 +377,7 @@ mod tests {
                 env_var: None,
                 endpoint_rules: vec![],
                 tls_ca: None,
+                oauth2: None,
             },
         ];
 
