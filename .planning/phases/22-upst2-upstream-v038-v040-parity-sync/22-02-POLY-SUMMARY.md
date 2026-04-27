@@ -128,8 +128,9 @@ Total: 5 files modified/created, ~161 net LOC added.
 | 5 | `c13c1cc5` | fix | add ~/.local/share/claude read entry to claude_code_macos (POLY-* cont.) | `a524b1a7` (Luke Hinds / v0.39.0) |
 | 6 | `320a4003` | fix | improve unlink rules; add Claude Code URL Handler read path (POLY-* cont.) | `7d1d9a0d` (Luke Hinds / v0.40.1) |
 | 7 | `490a8a5c` | test | add rollback_audit_conflict integration tests (POLY-02) | (fork-only; no Upstream-commit: trailer) |
+| 8 | `df88acea` | docs | complete POLY policy tightening plan | (fork-only; SUMMARY + STATE/ROADMAP/REQUIREMENTS bookkeeping) |
 
-All 7 commits will be pushed to `origin/main` post-Task 8.
+All 8 commits pushed to `origin/main` post-Task 8 (origin head = `df88aceaa8f4b31c4ac24bb869e5ccce49984099`).
 
 ## Deviations from plan
 
