@@ -65,7 +65,7 @@ Full details: `.planning/milestones/v2.1-ROADMAP.md`.
 
 **Requirement coverage:** 21 requirements across 6 categories (PROF, POLY, PKG, OAUTH, AUD, DRIFT). All mapped; zero orphans.
 
-- [ ] **Phase 22: UPST2 — Upstream v0.38–v0.40 Parity Sync** (1/5 plans) — ingest cross-platform feature clusters (profile struct, policy tightening, package manager, OAuth2 proxy, audit integrity) with Windows parity in lockstep — Plan 22-01 (PROF) complete (12 commits, origin/main = d7fc4ed8)
+- [ ] **Phase 22: UPST2 — Upstream v0.38–v0.40 Parity Sync** (2/5 plans) — ingest cross-platform feature clusters (profile struct, policy tightening, package manager, OAuth2 proxy, audit integrity) with Windows parity in lockstep — Plan 22-01 (PROF) complete (12 commits, origin/main = d7fc4ed8); Plan 22-02 (POLY) complete (7 commits, HEAD = 490a8a5c, ready to push)
 - [ ] **Phase 23: Windows Audit-Event Retrofit** (0/1 plan) — wire Windows supervisor's 5 AIPC broker paths (File, Socket, Pipe, JobObject, Event, Mutex) into the Phase 22-05 ledger
 - [ ] **Phase 24: Parity-Drift Prevention** (0/2 plans) — `scripts/check-upstream-drift` tooling + GSD quick-task template for upstream-sync cadence
 

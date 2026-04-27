@@ -312,9 +312,9 @@ Mapped by gsd-roadmapper 2026-04-24 at v2.2 milestone scope-lock.
 | PROF-02 | Phase 22 (Plan 22-01) | Complete (commit 5040411c) |
 | PROF-03 | Phase 22 (Plan 22-01) | Complete (commits bb79552a + 41ac5898) |
 | PROF-04 | Phase 22 (Plan 22-01) | Complete (commit 52d4ee49) |
-| POLY-01 | Phase 22 (Plan 22-02) | Pending |
-| POLY-02 | Phase 22 (Plan 22-02) | Pending |
-| POLY-03 | Phase 22 (Plan 22-02) | Pending |
+| POLY-01 | Phase 22 (Plan 22-02) | Complete (commits 0d83a1e2 + a47c5962; orphan override_deny fails closed via NonoError::SandboxInit + .exists() pre-filter cross-platform safety) |
+| POLY-02 | Phase 22 (Plan 22-02) | Complete (commit 490a8a5c integration test; clap conflicts_with at cli.rs:1602 was already in fork — CONTRADICTION-B confirmed) |
+| POLY-03 | Phase 22 (Plan 22-02) | Complete (commit ef0facdc; .claude.lock in filesystem.allow_file for both claude-code and claude-no-kc) |
 | PKG-01 | Phase 22 (Plan 22-03) | Pending |
 | PKG-02 | Phase 22 (Plan 22-03) | Pending |
 | PKG-03 | Phase 22 (Plan 22-03) | Pending |
