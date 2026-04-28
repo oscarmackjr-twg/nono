@@ -686,11 +686,18 @@ fn validate_upstream_url(url: &str, service_name: &str) -> Result<()> {
     match parsed.scheme() {
         "https" => Ok(()),
         "http" => {
+            // OAUTH-02 security tightening (Plan 22-04, ports semantic of
+            // upstream 0c990116): HTTP upstreams are permitted ONLY for
+            // explicit loopback addresses (127.0.0.0/8, ::1, "localhost").
+            // Unspecified addresses (0.0.0.0, ::) are REJECTED — binding
+            // an insecure http upstream to all interfaces would expose it
+            // to the local network. Per CLAUDE.md "Fail Secure".
+            //
             // For IPv6 addresses, url::Url returns the address in host()
             // but host_str() may include brackets. We need to handle both cases.
             let is_loopback = match parsed.host() {
-                Some(url::Host::Ipv4(ip)) => ip.is_loopback() || ip.is_unspecified(),
-                Some(url::Host::Ipv6(ip)) => ip.is_loopback() || ip.is_unspecified(),
+                Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+                Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
                 Some(url::Host::Domain(domain)) => domain == "localhost",
                 None => false,
             };
@@ -700,7 +707,8 @@ fn validate_upstream_url(url: &str, service_name: &str) -> Result<()> {
             } else {
                 Err(NonoError::ProfileParse(format!(
                     "Upstream URL for custom credential '{}' must use HTTPS \
-                     (HTTP only allowed for loopback addresses): {}",
+                     (HTTP only allowed for loopback addresses, not unspecified \
+                     addresses like 0.0.0.0 or ::): {}",
                     service_name, url
                 )))
             }
@@ -2819,11 +2827,27 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_custom_credential_http_0_0_0_0_allowed() {
+    fn test_validate_custom_credential_http_0_0_0_0_rejected() {
+        // OAUTH-02 security tightening (ports upstream 0c990116):
+        // unspecified addresses (0.0.0.0, ::) are REJECTED for http://
+        // upstreams — only explicit loopback (127.0.0.0/8, ::1) is allowed.
         let mut cred = header_cred_builder();
         cred.upstream = "http://0.0.0.0:3000/api".to_string();
         cred.credential_key = Some("local_key".to_string());
-        assert!(validate_custom_credential("local", &cred).is_ok());
+        let result = validate_custom_credential("local", &cred);
+        let err = result.expect_err("HTTP to 0.0.0.0 should be rejected");
+        assert!(err.to_string().contains("loopback"));
+    }
+
+    #[test]
+    fn test_validate_custom_credential_http_ipv6_unspecified_rejected() {
+        // OAUTH-02: IPv6 unspecified (::) also rejected.
+        let mut cred = header_cred_builder();
+        cred.upstream = "http://[::]:3000/api".to_string();
+        cred.credential_key = Some("local_key".to_string());
+        let result = validate_custom_credential("local", &cred);
+        let err = result.expect_err("HTTP to :: should be rejected");
+        assert!(err.to_string().contains("loopback"));
     }
 
     // ============================================================================
