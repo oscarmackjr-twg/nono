@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.2
 milestone_name: Windows/macOS Parity Sweep
 status: planned
-stopped_at: Plan 22-05a AUD-CORE complete; ready for /gsd-execute-phase 22 --wave 3 (22-05b rename + Windows signature-trust). 11 commits landed (50a03eca..6f3d1f49) including SUMMARY; pushed to origin/main at 6f3d1f49. AUD-01 + AUD-02 + AUD-03 SHA-256 portion landed on the v2.1 fork. Boundary discipline held end-to-end (no rename surface touched, no Authenticode literal hits, CLEAN-04 invariants identical to baseline, AppliedLabelsGuard + loaded_profile structural surfaces byte-identical). Plan 22-05b unblocked.
-last_updated: "2026-04-28T18:30:00.000Z"
+stopped_at: Phase 22 all 6 plans complete (22-01, 22-02, 22-03 partial, 22-04, 22-05a, 22-05b); ready for /gsd-secure-phase 22 + /gsd-code-review 22 + phase verification. Plan 22-05b AUD-RENAME landed 6 fork-only commits (5d41a71c..a17eb307) + SUMMARY. T-22-05-04 ABSOLUTE STOP guard held end-to-end (CLEAN-04 invariants byte-identical AFTER every source-code commit; session_commands*.rs zero diff per Decision 2 LOCKED reframe — upstream-faithful Cmd::Session+#[command(hide)] shape, NOT Cmd::Prune→SessionCleanup rename). T-22-05-05 mitigated via formal applied_labels_guard::audit_flush_before_drop regression test (83 LOC). Decision 4 fallback: Authenticode discriminant recorded (Valid/Unsigned/InvalidSignature{hresult}); chain-walker subject extraction deferred to v2.3 backlog. AUD-04 #1/#2/#3/#4/#5 + AUD-03 Windows portion landed on v2.1 fork. Phase 22 implementation done.
+last_updated: "2026-04-28T20:00:00.000Z"
 last_activity: 2026-04-28
 progress:
   total_phases: 25
   completed_phases: 21
   total_plans: 70
-  completed_plans: 69
-  percent: 98
+  completed_plans: 70
+  percent: 100
 ---
 
 # Project State: nono — v2.2 Windows/macOS Parity Sweep

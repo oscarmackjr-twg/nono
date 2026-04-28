@@ -175,7 +175,7 @@ Full details: `.planning/milestones/v2.1-ROADMAP.md`.
 | 19. Cleanup (CLEAN) | v2.1 | 4/4 | Complete | 2026-04-19 |
 | 20. Upstream Parity Sync (UPST) | v2.1 | 4/4 | Complete | 2026-04-19 |
 | 21. Windows Single-File Grants (WSFG) | v2.1 | 5/5 | Complete-with-issues (supervisor-pipe regression resolved in-flight; HUMAN-UAT folded into Phase 18.1) | 2026-04-20 |
-| 22. UPST2 — Upstream v0.38–v0.40 Parity Sync | v2.2 | 4/6 | In progress (22-01, 22-02, 22-04 complete; 22-03 partial close — 6/8 cherry-picks, 2 deferred to v2.3; 22-05 split into 22-05a + 22-05b after CONTEXT STOP trigger #3, both planned and ready to execute) | — |
+| 22. UPST2 — Upstream v0.38–v0.40 Parity Sync | v2.2 | 6/6 | Implementation-complete (22-01, 22-02, 22-04, 22-05a, 22-05b complete; 22-03 partial close — 6/8 cherry-picks, 2 deferred to v2.3; phase-level verification + secure + code-review pending) | 2026-04-28 |
 | 23. Windows Audit-Event Retrofit | v2.2 | 0/1 | Pending | — |
 | 24. Parity-Drift Prevention | v2.2 | 2/2 | Complete | 2026-04-27 |
 
@@ -188,3 +188,7 @@ Full details: `.planning/milestones/v2.1-ROADMAP.md`.
   4. Cherry-pick `9ebad89a` with the streaming + tempdir + semver machinery, plus the `bundle_json` field on `DownloadedArtifact` that 22-03's `73e1e3b8` skipped.
   5. Cherry-pick `115b5cfa` (`load_registry_profile` auto-pull) which Plan 22-01's empty provenance commit `3bde347c` deferred until package machinery landed.
   Rationale: each prerequisite is a Rule-4 architectural decision that exceeds cherry-pick scope. Hand-merging 9ebad89a (~+267/-109 LOC across 5 files) under cherry-pick pressure is the highest-risk option in the chain and is the wrong place to make those decisions. See `.planning/phases/22-upst2-upstream-v038-v040-parity-sync/22-03-PKG-SUMMARY.md` § Deviations and `22-03-PKG-PROGRESS.md` for full context.
+
+- **Audit-attestation D-13 fixtures re-enablement** (deferred from Plan 22-05b, 2026-04-28). The 2 `#[ignore]`'d tests in `crates/nono-cli/tests/audit_attestation.rs` blocked by KeyPair `from_pkcs8` re-enablement (sigstore-rs 0.6.4 doesn't expose it). Two viable paths: (a) sigstore-rs upgrade (architectural Rule 4 — may cascade through other crates); (b) fork-internal pkcs8 parser (architectural Rule 4 — adds parsing surface). Either approach should land before publishing v2.2 attestation as production-ready. Document as part of v2.3 audit-attestation hardening sweep.
+
+  Companion deferral on the SAME backlog row: Plan 22-05b's `crates/nono-cli/src/exec_identity_windows.rs::parse_signer_subject` + `parse_thumbprint` chain walkers are similarly deferred — `windows-sys 0.59` does not expose `WTHelperProvDataFromStateData` / `WTHelperGetProvSignerFromChain` without the `Win32_Security_Cryptography_Catalog` + `Win32_Security_Cryptography_Sip` features (`CRYPT_PROVIDER_DATA` shape gated). Plan 22-05b records the `WinVerifyTrust` discriminant alone (Valid/Unsigned/InvalidSignature{hresult}) and sets `signer_subject = "<unknown>"` + empty thumbprint on Valid, plus marks the `authenticode_signed_records_subject` substring assertion test `#[ignore]`. Re-enable the chain walkers (either via Catalog/Sip features OR an in-tree pkcs8 parser providing equivalent walking) alongside the D-13 fixture re-enablement above.
