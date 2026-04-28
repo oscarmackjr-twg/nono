@@ -94,9 +94,7 @@ fn dispatch_command(
             // Silent-mode preserves the deprecation note: AUD-04
             // acceptance #3 says "still works AND surfaces a deprecation
             // note" — silencing it would defeat the migration prompt.
-            eprintln!(
-                "warning: `nono prune` is deprecated; use `nono session cleanup` instead"
-            );
+            eprintln!("warning: `nono prune` is deprecated; use `nono session cleanup` instead");
             session_commands::run_prune(&args)
         }),
         Commands::Session(args) => run_command_with_update(update_handle, silent, || {

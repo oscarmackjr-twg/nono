@@ -9,11 +9,13 @@
 //! `MerkleScheme::DomainSeparatedV3`, `audit_ledger.rs` flock changes, and
 //! cross-file refactors that breached D-02 thresholds for cherry-pick).
 //!
-//! **NOT in this file (per Plan 22-05a boundary discipline LOCKED):** Windows
-//! signature-trust verification. That ships in Plan 22-05b as a SIBLING
-//! field on the audit envelope (per RESEARCH Contradiction #2 — upstream's
-//! `ExecutableIdentity` is SHA-256 only at v0.40.1; the additional Windows
-//! signature-trust portion is fork-only and lands later).
+//! Plan 22-05b Task 4 (fork-only D-17 ALLOWED): Windows Authenticode
+//! signer-trust verification lands as a SIBLING `AuthenticodeStatus`
+//! field on the audit envelope per RESEARCH Contradiction #2 — upstream's
+//! `ExecutableIdentity` is SHA-256 only and stays unchanged. The
+//! `platform_authenticode` dispatch below routes to
+//! `exec_identity_windows::query_authenticode_status` on Windows and
+//! returns `None` on other platforms (SHA-256-only audit envelope).
 
 use nono::undo::{ContentHash, ExecutableIdentity};
 use nono::{NonoError, Result};
@@ -21,6 +23,49 @@ use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
+
+#[cfg(target_os = "windows")]
+pub use crate::exec_identity_windows::AuthenticodeStatus;
+
+/// Cross-platform `AuthenticodeStatus` placeholder for non-Windows hosts.
+/// Construction is impossible (no public constructors); the
+/// `platform_authenticode` dispatch on non-Windows returns `None` so
+/// downstream encoders skip the field cleanly.
+#[cfg(not(target_os = "windows"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthenticodeStatus {
+    /// Marker variant — never constructed on non-Windows hosts.
+    NotApplicable,
+}
+
+/// Sibling field on the audit envelope per RESEARCH Contradiction #2.
+/// Does NOT mutate upstream's `ExecutableIdentity { resolved_path, sha256 }`.
+///
+/// On Windows: delegates to `exec_identity_windows::query_authenticode_status`.
+/// On any FFI failure: returns `None` so the SHA-256-only audit envelope
+/// (captured by `compute()`) is the recorded ground truth (AUD-03
+/// acceptance #3 fallback path).
+#[cfg(target_os = "windows")]
+#[allow(dead_code)]
+pub(crate) fn platform_authenticode(path: &Path) -> Option<AuthenticodeStatus> {
+    match crate::exec_identity_windows::query_authenticode_status(path) {
+        Ok(status) => Some(status),
+        Err(e) => {
+            tracing::debug!(
+                "Authenticode query failed for {}: {e} — falling back to SHA-256",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
+/// Non-Windows: SHA-256-only audit envelope (no Authenticode concept).
+#[cfg(not(target_os = "windows"))]
+#[allow(dead_code)]
+pub(crate) fn platform_authenticode(_path: &Path) -> Option<AuthenticodeStatus> {
+    None
+}
 
 /// Compute the canonical path + SHA-256 hash of the launched executable.
 ///
