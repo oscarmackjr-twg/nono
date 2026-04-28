@@ -396,9 +396,7 @@ fn download_and_verify_artifacts(
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|e| {
-            NonoError::RegistryError(format!("failed to create async runtime: {e}"))
-        })?;
+        .map_err(|e| NonoError::RegistryError(format!("failed to create async runtime: {e}")))?;
     let trusted_root = rt.block_on(nono::trust::load_production_trusted_root())?;
     let policy = nono::trust::VerificationPolicy::default();
     let bundle_path = Path::new(".nono-trust.bundle");
@@ -650,19 +648,18 @@ fn install_manifest_artifact(
             write_bytes(&path, bytes)?;
             ensure_executable(&path)?;
             path
-        }
-        // NOTE: upstream ec49a7af also adds an ArtifactType::Plugin arm here.
-        // Fork's ArtifactType enum does not yet have Plugin (introduced by a
-        // later upstream commit not in Plan 22-03's cherry-pick chain). When
-        // that variant lands, restore upstream's Plugin arm verbatim:
-        //
-        //     ArtifactType::Plugin => {
-        //         if artifact.path.contains("..") { return Err(...) }
-        //         let path = staging_root.join(&artifact.path);
-        //         write_bytes(&path, bytes)?;
-        //         validate_path_within(staging_root, &path)?;
-        //         ...
-        //     }
+        } // NOTE: upstream ec49a7af also adds an ArtifactType::Plugin arm here.
+          // Fork's ArtifactType enum does not yet have Plugin (introduced by a
+          // later upstream commit not in Plan 22-03's cherry-pick chain). When
+          // that variant lands, restore upstream's Plugin arm verbatim:
+          //
+          //     ArtifactType::Plugin => {
+          //         if artifact.path.contains("..") { return Err(...) }
+          //         let path = staging_root.join(&artifact.path);
+          //         write_bytes(&path, bytes)?;
+          //         validate_path_within(staging_root, &path)?;
+          //         ...
+          //     }
     };
 
     // Defense-in-depth (Rule 2): every artifact path must remain inside the
