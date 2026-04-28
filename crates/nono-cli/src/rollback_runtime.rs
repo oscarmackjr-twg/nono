@@ -1,9 +1,11 @@
+use crate::audit_integrity::AuditRecorder;
 use crate::launch_runtime::{rollback_base_exclusions, RollbackLaunchOptions};
 use crate::{config, output, rollback_preflight, rollback_session, rollback_ui};
 use nono::undo::RollbackStatus;
 use nono::{AccessMode, CapabilitySet, NonoError, Result};
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use tracing::warn;
 
 pub(crate) struct AuditState {
@@ -23,6 +25,13 @@ pub(crate) struct RollbackExitContext<'a> {
     pub(crate) rollback_state: Option<RollbackRuntimeState>,
     /// The rollback status recorded at session start (from `initialize_rollback_state`).
     pub(crate) rollback_status: RollbackStatus,
+    /// Plan 22-05a Decision 5 minimal scope: the audit-integrity recorder
+    /// (when `--audit-integrity` is set). `finalize_supervised_exit` emits the
+    /// `session_ended` event and calls `finalize()` to populate
+    /// `audit_event_count` + `audit_integrity` on `SessionMetadata`. `None`
+    /// when audit-integrity was not requested (zero-overhead path; existing
+    /// callers see byte-identical behavior to pre-22-05a).
+    pub(crate) audit_recorder: Option<&'a Mutex<AuditRecorder>>,
     pub(crate) proxy_handle: Option<&'a nono_proxy::server::ProxyHandle>,
     pub(crate) started: &'a str,
     pub(crate) ended: &'a str,
@@ -130,9 +139,20 @@ pub(crate) fn create_audit_state(
     rollback_requested: bool,
     rollback_disabled: bool,
     audit_disabled: bool,
+    audit_integrity_requested: bool,
     rollback_destination: Option<&PathBuf>,
 ) -> Result<Option<AuditState>> {
-    if !rollback_requested || rollback_disabled || audit_disabled {
+    if audit_disabled {
+        return Ok(None);
+    }
+    let rollback_active = rollback_requested && !rollback_disabled;
+    // Plan 22-05a Decision 5 minimal scope: when --audit-integrity is set
+    // without --rollback, create an audit-only session under
+    // ~/.nono/audit/<id> via crate::audit_session::ensure_audit_session_dir.
+    // This keeps audit sessions namespaced separately from rollback sessions
+    // (per upstream 4f9552ec restructuring). When --rollback is active, fall
+    // back to the existing rollback root path for backward compatibility.
+    if !rollback_active && !audit_integrity_requested {
         return Ok(None);
     }
 
@@ -142,30 +162,36 @@ pub(crate) fn create_audit_state(
         std::process::id()
     );
 
-    let rollback_root = match rollback_destination {
-        Some(path) => path.clone(),
-        None => {
-            let home = dirs::home_dir().ok_or(nono::NonoError::HomeNotFound)?;
-            home.join(".nono").join("rollbacks")
-        }
-    };
-    let session_dir = rollback_root.join(&session_id);
-    std::fs::create_dir_all(&session_dir).map_err(|e| {
-        nono::NonoError::Snapshot(format!(
-            "Failed to create session directory {}: {}",
-            session_dir.display(),
-            e
-        ))
-    })?;
+    let session_dir = if rollback_active {
+        let rollback_root = match rollback_destination {
+            Some(path) => path.clone(),
+            None => {
+                let home = dirs::home_dir().ok_or(nono::NonoError::HomeNotFound)?;
+                home.join(".nono").join("rollbacks")
+            }
+        };
+        let dir = rollback_root.join(&session_id);
+        std::fs::create_dir_all(&dir).map_err(|e| {
+            nono::NonoError::Snapshot(format!(
+                "Failed to create session directory {}: {}",
+                dir.display(),
+                e
+            ))
+        })?;
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o700);
-        if let Err(e) = std::fs::set_permissions(&session_dir, perms) {
-            warn!("Failed to set session directory permissions to 0700: {e}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o700);
+            if let Err(e) = std::fs::set_permissions(&dir, perms) {
+                warn!("Failed to set session directory permissions to 0700: {e}");
+            }
         }
-    }
+        dir
+    } else {
+        // Audit-only session: route to ~/.nono/audit/<id>.
+        crate::audit_session::ensure_audit_session_dir(&session_id)?
+    };
 
     Ok(Some(AuditState {
         session_id,
@@ -410,6 +436,7 @@ pub(crate) fn finalize_supervised_exit(ctx: RollbackExitContext<'_>) -> Result<(
         audit_state,
         rollback_state,
         rollback_status,
+        audit_recorder,
         proxy_handle,
         started,
         ended,
@@ -423,6 +450,24 @@ pub(crate) fn finalize_supervised_exit(ctx: RollbackExitContext<'_>) -> Result<(
         Vec::new,
         nono_proxy::server::ProxyHandle::drain_audit_events,
     );
+
+    // Plan 22-05a Decision 5 minimal scope: emit the trailing
+    // `session_ended` event before the recorder is finalized so the
+    // hash-chain commits to the exit code. `finalize()` returns
+    // `Some(AuditIntegritySummary)` whenever ANY event was appended.
+    // T-22-05a-03 mitigation: this flush completes BEFORE
+    // `AppliedLabelsGuard::drop` triggers (the guard is owned by callers
+    // upstream of `execute_supervised`; this fn runs synchronously inside
+    // `execute_supervised` before its return).
+    let (audit_event_count, audit_integrity_summary) = if let Some(mutex) = audit_recorder {
+        let mut recorder = mutex
+            .lock()
+            .map_err(|_| NonoError::Snapshot("Audit recorder lock poisoned".to_string()))?;
+        recorder.record_session_ended(ended.to_string(), exit_code)?;
+        (recorder.event_count(), recorder.finalize())
+    } else {
+        (0, None)
+    };
 
     let mut audit_saved = false;
 
@@ -442,8 +487,8 @@ pub(crate) fn finalize_supervised_exit(ctx: RollbackExitContext<'_>) -> Result<(
             exit_code: Some(exit_code),
             merkle_roots,
             network_events: std::mem::take(&mut network_events),
-            audit_event_count: 0,
-            audit_integrity: None,
+            audit_event_count,
+            audit_integrity: audit_integrity_summary.clone(),
             rollback_status: RollbackStatus::Available,
         };
         manager.save_session_metadata(&meta)?;
@@ -472,8 +517,8 @@ pub(crate) fn finalize_supervised_exit(ctx: RollbackExitContext<'_>) -> Result<(
                 exit_code: Some(exit_code),
                 merkle_roots: Vec::new(),
                 network_events,
-                audit_event_count: 0,
-                audit_integrity: None,
+                audit_event_count,
+                audit_integrity: audit_integrity_summary,
                 rollback_status,
             };
             nono::undo::SnapshotManager::write_session_metadata(&audit_state.session_dir, &meta)?;

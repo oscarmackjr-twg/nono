@@ -1,3 +1,4 @@
+use crate::audit_integrity::AuditRecorder;
 use crate::launch_runtime::{
     ProxyLaunchOptions, ResourceLimits, RollbackLaunchOptions, SessionLaunchOptions,
     TrustLaunchOptions,
@@ -12,6 +13,7 @@ use crate::{
     DETACHED_SESSION_ID_ENV,
 };
 use nono::{CapabilitySet, Result};
+use std::sync::Mutex;
 
 struct SessionRuntimeState {
     started: String,
@@ -209,9 +211,28 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
         rollback.requested,
         rollback.disabled,
         rollback.audit_disabled,
+        rollback.audit_integrity,
         rollback.destination.as_ref(),
     )?;
     warn_if_rollback_flags_ignored(rollback, silent);
+
+    // Plan 22-05a Decision 5 minimal scope: instantiate the audit-integrity
+    // recorder when --audit-integrity is set and an audit session was created.
+    // The recorder lives for the lifetime of the supervised execution; its
+    // session_started event is emitted here, the session_ended event +
+    // finalize() are triggered in `finalize_supervised_exit` (called from
+    // exec_strategy). Capability-decision and URL-open hooks are deferred to
+    // follow-up cherry-picks (4ec61c29..9db06336). Mutex follows upstream
+    // 4f9552ec to permit future concurrent emissions from the supervisor IPC
+    // dispatcher without revisiting the ownership shape.
+    let audit_recorder = if rollback.audit_integrity {
+        audit_state
+            .as_ref()
+            .map(|state| AuditRecorder::new(state.session_dir.clone()).map(Mutex::new))
+            .transpose()?
+    } else {
+        None
+    };
     let (rollback_state, rollback_status) =
         initialize_rollback_state(rollback, caps, audit_state.as_ref(), silent)?;
 
@@ -303,6 +324,17 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
         pty_pair,
     } = session_runtime;
 
+    // Plan 22-05a Decision 5 minimal scope: emit the session_started event
+    // before handing off to `execute_supervised`. The matching session_ended
+    // event is emitted from `finalize_supervised_exit` once the child has
+    // exited (see `RollbackExitContext.audit_recorder`).
+    if let Some(recorder_mutex) = audit_recorder.as_ref() {
+        let mut recorder = recorder_mutex
+            .lock()
+            .map_err(|_| nono::NonoError::Snapshot("Audit recorder lock poisoned".to_string()))?;
+        recorder.record_session_started(started.clone(), command.to_vec())?;
+    }
+
     if !session.detached_start {
         output::finish_status_line_for_handoff(silent);
     }
@@ -325,6 +357,7 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
                 audit_state,
                 rollback_state,
                 rollback_status,
+                audit_recorder.as_ref(),
                 proxy_handle,
                 command,
                 &started,
@@ -344,6 +377,7 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
                 audit_state,
                 rollback_state,
                 rollback_status,
+                audit_recorder.as_ref(),
                 proxy_handle,
                 command,
                 &started,

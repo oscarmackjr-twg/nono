@@ -65,6 +65,14 @@ pub(crate) struct RollbackLaunchOptions {
     pub(crate) disabled: bool,
     pub(crate) prompt_disabled: bool,
     pub(crate) audit_disabled: bool,
+    /// `--audit-integrity` flag: enable Merkleized append-only audit ledger
+    /// (hash-chain + Merkle root). When true and `audit_state` is created,
+    /// `supervised_runtime` instantiates an `AuditRecorder` that emits
+    /// `session_started`/`session_ended` events into
+    /// `<session_dir>/audit-events.ndjson`. Plan 22-05a Decision 5 minimal
+    /// scope: capability-decision and URL-open hooks land in follow-up
+    /// cherry-picks (4ec61c29..9db06336).
+    pub(crate) audit_integrity: bool,
     pub(crate) destination: Option<PathBuf>,
     pub(crate) track_all: bool,
     pub(crate) skip_dirs: Vec<String>,
@@ -204,6 +212,7 @@ pub(crate) fn prepare_run_launch_plan(
     let rollback = run_args.rollback;
     let no_rollback_prompt = run_args.no_rollback_prompt;
     let no_audit = run_args.no_audit;
+    let audit_integrity = run_args.audit_integrity && !run_args.no_audit_integrity;
     let trust_override = run_args.trust_override;
 
     let mut prepared = prepare_sandbox(&args, silent)?;
@@ -300,6 +309,7 @@ pub(crate) fn prepare_run_launch_plan(
                 disabled: run_args.no_rollback,
                 prompt_disabled: no_rollback_prompt,
                 audit_disabled: no_audit,
+                audit_integrity,
                 destination: run_args.rollback_dest,
                 ..rollback_options
             },

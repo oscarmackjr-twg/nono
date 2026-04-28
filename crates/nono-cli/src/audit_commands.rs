@@ -230,6 +230,25 @@ fn cmd_show(args: AuditShowArgs) -> Result<()> {
         .map(|p| p.display().to_string())
         .collect();
     eprintln!("  Paths:    {}", paths.join(", "));
+
+    // Plan 22-05a Decision 5 minimal scope: surface the audit-integrity
+    // summary (chain_head + merkle_root + event_count) when the session was
+    // recorded with `--audit-integrity`. Fields are absent for sessions
+    // recorded before this commit landed.
+    if let Some(integrity) = session.metadata.audit_integrity.as_ref() {
+        eprintln!();
+        eprintln!("  Audit Integrity:");
+        eprintln!("    Algorithm:     {}", integrity.hash_algorithm);
+        eprintln!("    Event count:   {}", integrity.event_count);
+        eprintln!("    Chain head:    {}", integrity.chain_head);
+        eprintln!("    Merkle root:   {}", integrity.merkle_root);
+    } else if session.metadata.audit_event_count > 0 {
+        eprintln!();
+        eprintln!(
+            "  Audit Events:   {} (no integrity summary)",
+            session.metadata.audit_event_count
+        );
+    }
     eprintln!();
 
     // Show snapshot details
@@ -335,6 +354,22 @@ fn print_show_json(session: &SessionInfo) -> Result<()> {
         }));
     }
 
+    // Plan 22-05a Decision 5 minimal scope: include audit-integrity summary
+    // in JSON output when present. Absent for sessions recorded before this
+    // commit landed; null is the canonical absence marker.
+    let audit_integrity_json = session
+        .metadata
+        .audit_integrity
+        .as_ref()
+        .map(|s| {
+            serde_json::json!({
+                "hash_algorithm": s.hash_algorithm,
+                "event_count": s.event_count,
+                "chain_head": s.chain_head.to_string(),
+                "merkle_root": s.merkle_root.to_string(),
+            })
+        });
+
     let output = serde_json::json!({
         "session_id": session.metadata.session_id,
         "started": session.metadata.started,
@@ -344,6 +379,8 @@ fn print_show_json(session: &SessionInfo) -> Result<()> {
         "exit_code": session.metadata.exit_code,
         "merkle_roots": session.metadata.merkle_roots.iter().map(|r| r.to_string()).collect::<Vec<_>>(),
         "network_events": &session.metadata.network_events,
+        "audit_event_count": session.metadata.audit_event_count,
+        "audit_integrity": audit_integrity_json,
         "snapshots": snapshots,
     });
 

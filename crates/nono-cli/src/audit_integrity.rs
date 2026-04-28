@@ -14,6 +14,8 @@ const HASH_ALGORITHM: &str = "sha256";
 
 #[derive(Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(dead_code)] // CapabilityDecision/UrlOpen/Network variants and their constructors land in
+                    // follow-up cherry-picks 4ec61c29..9db06336 per Plan 22-05a Decision 5.
 enum AuditEventPayload {
     SessionStarted {
         started: String,
@@ -85,10 +87,16 @@ impl AuditRecorder {
         self.append_event(AuditEventPayload::SessionEnded { ended, exit_code })
     }
 
+    // Plan 22-05a Decision 5 minimal scope: capability-decision, URL-open,
+    // and network event constructors are wired into supervisor callsites by
+    // follow-up cherry-picks (4ec61c29..9db06336). They live here now so the
+    // `AuditRecorder` API is upstream-compatible.
+    #[allow(dead_code)]
     pub(crate) fn record_capability_decision(&mut self, entry: AuditEntry) -> Result<()> {
         self.append_event(AuditEventPayload::CapabilityDecision { entry })
     }
 
+    #[allow(dead_code)]
     pub(crate) fn record_open_url(
         &mut self,
         request: UrlOpenRequest,
@@ -102,6 +110,7 @@ impl AuditRecorder {
         })
     }
 
+    #[allow(dead_code)]
     pub(crate) fn record_network_event(&mut self, event: NetworkAuditEvent) -> Result<()> {
         self.append_event(AuditEventPayload::Network { event })
     }
