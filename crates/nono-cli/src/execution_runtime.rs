@@ -187,6 +187,20 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
 
     let current_dir = execution_start_dir(&flags.workdir, &caps)?;
 
+    // AUD-03 SHA-256 portion (upstream 02ee0bd1): capture the canonical
+    // path + SHA-256 of the executable BEFORE sandbox apply so the audit
+    // trail commits to exactly the bytes the supervisor handed off. Only
+    // computed for Supervised strategy (Direct/Monitor record nothing).
+    // Hash failure is non-fatal for the launch path: `crate::exec_identity::compute`
+    // bubbles `NonoError::CommandExecution`; we propagate that so the user
+    // sees a concrete diagnostic rather than running with no audit identity.
+    let executable_identity =
+        if matches!(strategy, exec_strategy::ExecStrategy::Supervised) {
+            Some(crate::exec_identity::compute(&resolved_program)?)
+        } else {
+            None
+        };
+
     apply_pre_fork_sandbox(strategy, &caps, flags.silent)?;
 
     // Generate per-session runtime capability expansion credentials BEFORE
@@ -360,6 +374,7 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
                 trust,
                 proxy,
                 proxy_handle: proxy_handle.as_ref(),
+                executable_identity: executable_identity.as_ref(),
                 silent: flags.silent,
                 resource_limits: &flags.resource_limits,
                 // Plan 18.1-03 G-06: pass a reference to the owned

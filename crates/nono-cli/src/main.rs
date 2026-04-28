@@ -13,6 +13,7 @@ mod command_blocking_deprecation;
 mod command_runtime;
 mod config;
 mod credential_runtime;
+mod exec_identity;
 #[cfg(not(target_os = "windows"))]
 mod exec_strategy;
 #[cfg(target_os = "windows")]

@@ -33,6 +33,10 @@ pub(crate) struct SupervisedRuntimeContext<'a> {
     pub(crate) trust: &'a TrustLaunchOptions,
     pub(crate) proxy: &'a ProxyLaunchOptions,
     pub(crate) proxy_handle: Option<&'a nono_proxy::server::ProxyHandle>,
+    /// AUD-03 SHA-256 portion (upstream 02ee0bd1): canonical path + SHA-256
+    /// of the launched binary, computed in `execution_runtime` before
+    /// sandbox apply. `None` for Direct/Monitor strategies.
+    pub(crate) executable_identity: Option<&'a nono::undo::ExecutableIdentity>,
     pub(crate) silent: bool,
     /// Resource limits (CPU / memory / timeout / process-count) populated from
     /// `ExecutionFlags.resource_limits`. On Windows, Task 2 of Plan 16-01 will
@@ -178,6 +182,7 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
         trust,
         proxy,
         proxy_handle,
+        executable_identity,
         silent,
         resource_limits,
         loaded_profile,
@@ -376,6 +381,7 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
                 rollback_status,
                 audit_recorder.as_ref(),
                 audit_snapshot_state,
+                executable_identity.cloned(),
                 proxy_handle,
                 command,
                 &started,
@@ -397,6 +403,7 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
                 rollback_status,
                 audit_recorder.as_ref(),
                 audit_snapshot_state,
+                executable_identity.cloned(),
                 proxy_handle,
                 command,
                 &started,

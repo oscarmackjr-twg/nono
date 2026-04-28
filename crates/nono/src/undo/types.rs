@@ -227,6 +227,21 @@ pub struct AuditIntegritySummary {
     pub merkle_root: ContentHash,
 }
 
+/// Identity of the executable binary launched for a session.
+///
+/// Cross-platform SHA-256 hash + canonical path of the binary executed by the
+/// supervisor. Captured before sandbox apply so the hash commits to exactly
+/// the bytes that ran. AUD-03 SHA-256 portion (Plan 22-05a Task 4); the
+/// Windows Authenticode addition lands in Plan 22-05b as a SIBLING field on
+/// the audit envelope (see RESEARCH Contradiction #2).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutableIdentity {
+    /// Canonical path to the executable file hashed by the supervisor.
+    pub resolved_path: PathBuf,
+    /// SHA-256 digest of the executable file contents.
+    pub sha256: ContentHash,
+}
+
 /// Rollback availability status for a session.
 ///
 /// Recorded in [`SessionMetadata`] so that `nono rollback list/show/restore`
@@ -280,6 +295,10 @@ pub struct SessionMetadata {
     pub ended: Option<String>,
     /// Command that was executed
     pub command: Vec<String>,
+    /// Canonical executable identity hashed by the supervisor before launch.
+    /// AUD-03 SHA-256 portion (upstream 02ee0bd1).
+    #[serde(default)]
+    pub executable_identity: Option<ExecutableIdentity>,
     /// Paths being tracked for changes
     pub tracked_paths: Vec<PathBuf>,
     /// Number of snapshots taken
@@ -458,6 +477,7 @@ mod tests {
             started: "2025-01-01T00:00:00Z".to_string(),
             ended: None,
             command: vec!["test".to_string()],
+            executable_identity: None,
             tracked_paths: vec![],
             snapshot_count: 0,
             exit_code: None,
@@ -481,6 +501,7 @@ mod tests {
             started: "2025-01-01T00:00:00Z".to_string(),
             ended: None,
             command: vec!["test".to_string()],
+            executable_identity: None,
             tracked_paths: vec![],
             snapshot_count: 0,
             exit_code: None,

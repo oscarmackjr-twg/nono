@@ -231,6 +231,16 @@ fn cmd_show(args: AuditShowArgs) -> Result<()> {
         .collect();
     eprintln!("  Paths:    {}", paths.join(", "));
 
+    // AUD-03 SHA-256 portion (upstream 02ee0bd1): surface executable
+    // identity (canonical path + SHA-256) when recorded.
+    if let Some(identity) = session.metadata.executable_identity.as_ref() {
+        eprintln!(
+            "  Binary:   {} (sha256:{})",
+            identity.resolved_path.display(),
+            &identity.sha256.to_string()[..16],
+        );
+    }
+
     // Plan 22-05a Decision 5 minimal scope: surface the audit-integrity
     // summary (chain_head + merkle_root + event_count) when the session was
     // recorded with `--audit-integrity`. Fields are absent for sessions
@@ -370,11 +380,21 @@ fn print_show_json(session: &SessionInfo) -> Result<()> {
             })
         });
 
+    // AUD-03 SHA-256 portion (upstream 02ee0bd1): include executable
+    // identity in JSON output when present.
+    let executable_identity_json = session.metadata.executable_identity.as_ref().map(|e| {
+        serde_json::json!({
+            "resolved_path": e.resolved_path.display().to_string(),
+            "sha256": e.sha256.to_string(),
+        })
+    });
+
     let output = serde_json::json!({
         "session_id": session.metadata.session_id,
         "started": session.metadata.started,
         "ended": session.metadata.ended,
         "command": session.metadata.command,
+        "executable_identity": executable_identity_json,
         "tracked_paths": session.metadata.tracked_paths,
         "exit_code": session.metadata.exit_code,
         "merkle_roots": session.metadata.merkle_roots.iter().map(|r| r.to_string()).collect::<Vec<_>>(),

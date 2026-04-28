@@ -1,7 +1,7 @@
 use crate::audit_integrity::AuditRecorder;
 use crate::launch_runtime::{rollback_base_exclusions, RollbackLaunchOptions};
 use crate::{config, output, rollback_preflight, rollback_session, rollback_ui};
-use nono::undo::RollbackStatus;
+use nono::undo::{ExecutableIdentity, RollbackStatus};
 use nono::{AccessMode, CapabilitySet, NonoError, Result};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -49,6 +49,12 @@ pub(crate) struct RollbackExitContext<'a> {
     /// `SessionMetadata.merkle_roots` for tamper-evidence (no full
     /// snapshot storage overhead).
     pub(crate) audit_snapshot_state: Option<AuditSnapshotState>,
+    /// Upstream 02ee0bd1 AUD-03 SHA-256 portion: canonical path + SHA-256
+    /// of the launched binary, captured by `exec_identity::compute()`
+    /// before sandbox apply for supervised sessions only. Persisted into
+    /// `SessionMetadata.executable_identity`. Authenticode addition is
+    /// reserved for Plan 22-05b (sibling field; no mutation of this type).
+    pub(crate) executable_identity: Option<ExecutableIdentity>,
     pub(crate) proxy_handle: Option<&'a nono_proxy::server::ProxyHandle>,
     pub(crate) started: &'a str,
     pub(crate) ended: &'a str,
@@ -505,6 +511,7 @@ pub(crate) fn finalize_supervised_exit(ctx: RollbackExitContext<'_>) -> Result<(
         rollback_status,
         audit_recorder,
         audit_snapshot_state,
+        executable_identity,
         proxy_handle,
         started,
         ended,
@@ -550,6 +557,7 @@ pub(crate) fn finalize_supervised_exit(ctx: RollbackExitContext<'_>) -> Result<(
             started: started.to_string(),
             ended: Some(ended.to_string()),
             command: command.to_vec(),
+            executable_identity: executable_identity.clone(),
             tracked_paths,
             snapshot_count: manager.snapshot_count(),
             exit_code: Some(exit_code),
@@ -591,6 +599,7 @@ pub(crate) fn finalize_supervised_exit(ctx: RollbackExitContext<'_>) -> Result<(
                 started: started.to_string(),
                 ended: Some(ended.to_string()),
                 command: command.to_vec(),
+                executable_identity,
                 tracked_paths,
                 snapshot_count: 0,
                 exit_code: Some(exit_code),
