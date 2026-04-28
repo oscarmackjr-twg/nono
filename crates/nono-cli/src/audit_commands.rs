@@ -6,8 +6,10 @@
 
 use crate::audit_attestation::verify_audit_attestation;
 use crate::audit_integrity::verify_audit_log;
-use crate::cli::{AuditArgs, AuditCommands, AuditListArgs, AuditShowArgs, AuditVerifyArgs};
-use crate::rollback_session::{discover_sessions, load_session, SessionInfo};
+use crate::cli::{
+    AuditArgs, AuditCleanupArgs, AuditCommands, AuditListArgs, AuditShowArgs, AuditVerifyArgs,
+};
+use crate::rollback_session::{discover_sessions, load_session, remove_session, SessionInfo};
 use crate::theme;
 use colored::Colorize;
 use nono::undo::SnapshotManager;
@@ -27,7 +29,113 @@ pub fn run_audit(args: AuditArgs) -> Result<()> {
         AuditCommands::List(args) => cmd_list(args),
         AuditCommands::Show(args) => cmd_show(args),
         AuditCommands::Verify(args) => cmd_verify(args),
+        AuditCommands::Cleanup(args) => cmd_cleanup(args),
     }
+}
+
+// ---------------------------------------------------------------------------
+// nono audit cleanup
+// ---------------------------------------------------------------------------
+
+/// Plan 22-05b Task 2 (upstream `4f9552ec`): peer to `nono session cleanup`,
+/// operates on audit ledger sessions. AUD-04 acceptance #2.
+///
+/// Filters audit-tracked sessions by `--older-than` (in DAYS, matching
+/// upstream's `Option<u64>` shape) and/or `--keep` (retain N newest), or
+/// `--all` (remove every non-active audit session). Active sessions
+/// (`is_alive == true`) are skipped to mirror the runtime-side
+/// `auto_prune_if_needed` retention contract.
+///
+/// `--dry-run` previews what would be removed without deleting.
+fn cmd_cleanup(args: AuditCleanupArgs) -> Result<()> {
+    if args.keep.is_none() && args.older_than.is_none() && !args.all {
+        return Err(NonoError::ConfigParse(
+            "audit cleanup: specify one of --keep <N>, --older-than <DAYS>, or --all".to_string(),
+        ));
+    }
+
+    let mut sessions = discover_sessions()?;
+    // Newest first so `--keep N` is intuitive.
+    sessions.sort_by(|a, b| b.metadata.started.cmp(&a.metadata.started));
+
+    // Filter to sessions that have an audit ledger (audit_integrity recorded
+    // OR audit-tracked paths present). Don't touch rollback-only sessions.
+    let mut audit_sessions: Vec<&SessionInfo> = sessions
+        .iter()
+        .filter(|s| s.metadata.audit_integrity.is_some() || !s.metadata.tracked_paths.is_empty())
+        .collect();
+
+    // Always skip active sessions.
+    audit_sessions.retain(|s| !s.is_alive);
+
+    let to_remove: Vec<&SessionInfo> = if args.all {
+        audit_sessions.clone()
+    } else {
+        let mut filtered: Vec<&SessionInfo> = Vec::new();
+
+        if let Some(days) = args.older_than {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| NonoError::Snapshot(format!("System time error: {e}")))?
+                .as_secs();
+            let cutoff = now.saturating_sub(days.saturating_mul(86_400));
+            for s in &audit_sessions {
+                if let Some(started) = parse_session_start_time(s) {
+                    if started <= cutoff {
+                        filtered.push(s);
+                    }
+                }
+            }
+        }
+
+        if let Some(keep) = args.keep {
+            // Newest-first list; everything past index `keep` is eligible.
+            for s in audit_sessions.iter().skip(keep) {
+                if !filtered.iter().any(|x| x.dir == s.dir) {
+                    filtered.push(s);
+                }
+            }
+        }
+
+        filtered
+    };
+
+    if to_remove.is_empty() {
+        eprintln!("{} No audit sessions match the cleanup filters.", prefix());
+        return Ok(());
+    }
+
+    if args.dry_run {
+        eprintln!(
+            "{} Would remove {} audit session(s):",
+            prefix(),
+            to_remove.len()
+        );
+        for s in &to_remove {
+            eprintln!("  {} ({})", s.metadata.session_id, s.metadata.started);
+        }
+        return Ok(());
+    }
+
+    let mut removed = 0usize;
+    let mut errors: Vec<(String, String)> = Vec::new();
+    for s in &to_remove {
+        match remove_session(&s.dir) {
+            Ok(()) => removed += 1,
+            Err(e) => errors.push((s.metadata.session_id.clone(), format!("{e}"))),
+        }
+    }
+
+    eprintln!(
+        "{} Removed {}/{} audit session(s).",
+        prefix(),
+        removed,
+        to_remove.len()
+    );
+    for (id, err) in &errors {
+        eprintln!("  warning: failed to remove {id}: {err}");
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

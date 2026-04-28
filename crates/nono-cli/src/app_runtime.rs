@@ -1,5 +1,5 @@
 use crate::audit_commands;
-use crate::cli::{Cli, Commands, RunArgs, SetupArgs};
+use crate::cli::{Cli, Commands, RunArgs, SessionCommands, SetupArgs};
 use crate::command_runtime::{run_sandbox, run_shell, run_wrap};
 use crate::learn_runtime::run_learn;
 use crate::open_url_runtime::run_open_url_helper;
@@ -87,6 +87,18 @@ fn dispatch_command(
         Commands::Prune(args) => {
             run_command_with_update(update_handle, silent, || session_commands::run_prune(&args))
         }
+        Commands::Session(args) => run_command_with_update(update_handle, silent, || {
+            // Plan 22-05b Task 2 (upstream `4f9552ec`): `nono session cleanup`
+            // is the renamed entry point. It routes to the unchanged
+            // `session_commands::run_prune` worker per Decision 2 LOCKED
+            // reframe — `auto_prune_if_needed` + `AUTO_PRUNE_STALE_THRESHOLD`
+            // stay byte-identical so the v2.1 Phase 19 CLEAN-04 invariants
+            // (auto_prune_is_noop_when_sandboxed; NONO_CAP_FILE early-return
+            // first statement) are preserved trivially.
+            match args.command {
+                SessionCommands::Cleanup(prune_args) => session_commands::run_prune(&prune_args),
+            }
+        }),
         Commands::Policy(args) => {
             run_command_with_update(update_handle, silent, || policy_cmd::run_policy(args))
         }

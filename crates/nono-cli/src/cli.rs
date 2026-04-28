@@ -784,6 +784,31 @@ pub enum Commands {
     #[command(after_help = PRUNE_AFTER_HELP)]
     Prune(PruneArgs),
 
+    /// Manage runtime session storage
+    ///
+    /// Plan 22-05b Task 2 (upstream `4f9552ec`): introduces `nono session
+    /// cleanup` as the renamed entry point for the prune semantics.
+    /// `Cmd::Prune` is preserved as a hidden alias (Plan 22-05b Task 3
+    /// adds `#[command(hide = true)]` + the deprecation note); both
+    /// variants delegate to the unchanged `auto_prune_if_needed` /
+    /// `run_prune` worker family per Decision 2 LOCKED reframe.
+    #[command(subcommand_help_heading = "COMMANDS")]
+    #[command(help_template = "\
+{about}
+
+\x1b[1mUSAGE\x1b[0m
+  nono session <command>
+
+{all-args}
+{after-help}")]
+    #[command(after_help = "\x1b[1mEXAMPLES\x1b[0m
+  nono session cleanup --dry-run                # Preview what would be cleaned
+  nono session cleanup --older-than 7d          # Remove exited sessions older than 7 days
+  nono session cleanup --all-exited             # Remove every exited session (escape hatch)
+  nono session cleanup --keep 10                # Keep only 10 most recent sessions
+")]
+    Session(SessionArgs),
+
     // ── Policy & profiles ────────────────────────────────────────────────
     /// Inspect policy groups, profiles, and security rules
     #[command(subcommand_help_heading = "COMMANDS")]
@@ -2274,6 +2299,12 @@ pub enum AuditCommands {
     /// fail-closes if any commitment in `SessionMetadata.audit_integrity`
     /// does not match. AUD-02 acceptance criterion #2.
     Verify(AuditVerifyArgs),
+    /// Remove old audit sessions
+    ///
+    /// Plan 22-05b Task 2 (upstream `4f9552ec`): peer to the new
+    /// `nono session cleanup` runtime cleanup; operates on audit
+    /// ledger sessions. AUD-04 acceptance #2.
+    Cleanup(AuditCleanupArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -2349,6 +2380,62 @@ pub struct AuditVerifyArgs {
     /// Print help
     #[arg(long, short = 'h', action = clap::ArgAction::Help, help_heading = "OPTIONS")]
     pub help: Option<bool>,
+}
+
+/// Arguments for `nono audit cleanup` (Plan 22-05b Task 2, upstream
+/// `4f9552ec`). Peer to the new `nono session cleanup` runtime cleanup;
+/// operates on audit ledger sessions. AUD-04 acceptance #2.
+#[derive(Parser, Debug)]
+#[command(disable_help_flag = true)]
+pub struct AuditCleanupArgs {
+    /// Retain N newest audit sessions
+    #[arg(long, value_name = "N")]
+    pub keep: Option<usize>,
+
+    /// Remove sessions older than N days
+    #[arg(long, value_name = "DAYS")]
+    pub older_than: Option<u64>,
+
+    /// Show what would be removed without deleting
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Remove all audit sessions (skips active sessions)
+    #[arg(long)]
+    pub all: bool,
+
+    /// Print help
+    #[arg(long, short = 'h', action = clap::ArgAction::Help, help_heading = "OPTIONS")]
+    pub help: Option<bool>,
+}
+
+/// Arguments for `nono session` (Plan 22-05b Task 2, upstream `4f9552ec`).
+/// Hosts `nono session cleanup` as the renamed entry point for the prune
+/// semantics. The inner `SessionCommands::Cleanup` reuses the existing
+/// fork `PruneArgs` so the CLEAN-04 `parse_prune_duration` enforcement
+/// (no raw integers without a suffix) is preserved trivially.
+#[derive(Parser, Debug)]
+#[command(disable_help_flag = true)]
+pub struct SessionArgs {
+    #[command(subcommand)]
+    pub command: SessionCommands,
+
+    /// Print help
+    #[arg(long, short = 'h', action = clap::ArgAction::Help, help_heading = "OPTIONS")]
+    pub help: Option<bool>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SessionCommands {
+    /// Remove old runtime sessions
+    ///
+    /// Reuses the existing fork `PruneArgs` shape so the v2.1 CLEAN-04
+    /// `parse_prune_duration` enforcement (rejects `--older-than 30`
+    /// without a suffix) is preserved verbatim. Routes to the unchanged
+    /// `session_commands::run_prune` worker; `auto_prune_if_needed` and
+    /// `AUTO_PRUNE_STALE_THRESHOLD = 100` stay byte-identical per
+    /// Decision 2 LOCKED reframe.
+    Cleanup(PruneArgs),
 }
 
 #[derive(Parser, Debug)]

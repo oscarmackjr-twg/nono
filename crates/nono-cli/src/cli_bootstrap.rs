@@ -166,6 +166,7 @@ fn cli_verbosity(cli: &Cli) -> u8 {
         | Commands::Logs(_)
         | Commands::Inspect(_)
         | Commands::Prune(_)
+        | Commands::Session(_)
         | Commands::Policy(_)
         | Commands::Profile(_)
         | Commands::Pull(_)
