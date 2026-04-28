@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.2
 milestone_name: Windows/macOS Parity Sweep
 status: planned
-stopped_at: Phase 22 re-planned — 22-05 archived; replacement plans 22-05a (Wave 2, audit core no rename) + 22-05b (Wave 3, prune→cleanup rename + Authenticode) authored and plan-checked (1 revision iteration cleared 3 blockers + 7 warnings). Working tree at 9b8b2cf7. Ready for /gsd-execute-phase 22 --wave 2 to spawn 22-05a.
-last_updated: "2026-04-28T15:30:00.000Z"
+stopped_at: Plan 22-05a AUD-CORE complete; ready for /gsd-execute-phase 22 --wave 3 (22-05b rename + Windows signature-trust). 11 commits landed (50a03eca..6f3d1f49) including SUMMARY; pushed to origin/main at 6f3d1f49. AUD-01 + AUD-02 + AUD-03 SHA-256 portion landed on the v2.1 fork. Boundary discipline held end-to-end (no rename surface touched, no Authenticode literal hits, CLEAN-04 invariants identical to baseline, AppliedLabelsGuard + loaded_profile structural surfaces byte-identical). Plan 22-05b unblocked.
+last_updated: "2026-04-28T18:30:00.000Z"
 last_activity: 2026-04-28
 progress:
   total_phases: 25
   completed_phases: 21
   total_plans: 70
-  completed_plans: 68
-  percent: 97
+  completed_plans: 69
+  percent: 98
 ---
 
 # Project State: nono — v2.2 Windows/macOS Parity Sweep
