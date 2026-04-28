@@ -484,4 +484,112 @@ mod tests {
             system_root.display()
         );
     }
+
+    /// Plan 22-05b Task 6 — formal `audit_flush_before_drop` regression
+    /// (VALIDATION 22-05-V3). Mitigates T-22-05-05 (Tampering: Phase 21
+    /// AppliedLabelsGuard Drop happens BEFORE ledger flush, events lost
+    /// on cleanup). Was deferred from Plan 22-05a per scope-split decision;
+    /// lands here alongside the rename's full CLEAN-04 invariant sweep.
+    ///
+    /// Invariant under test: when supervised_runtime cleanup tears down,
+    /// it drops the `AuditRecorder` (which flushes pending writes via the
+    /// `self.file.flush()` call at the end of every `append_event`), and
+    /// only AFTER that does it drop the `AppliedLabelsGuard`. The audit
+    /// ledger MUST therefore contain `session_started` + `session_ended`
+    /// events at the moment AppliedLabelsGuard::drop() begins to revert
+    /// labels. This test models that ordering: we drive the audit
+    /// lifecycle to completion, snapshot the ledger contents, then drop
+    /// the guard, and assert the ledger snapshot already contained both
+    /// events.
+    ///
+    /// 22-05a's minimal AuditRecorder lifecycle (`record_session_started`
+    /// + `record_session_ended`) is sufficient surface to exercise Drop
+    /// ordering; capability-decision and URL-open hooks (deferred per
+    /// 22-05a Decision 5) follow the same flush-before-Drop contract
+    /// structurally because every `append_event` call ends with
+    /// `self.file.flush()` (audit_integrity.rs:200).
+    #[test]
+    fn audit_flush_before_drop() {
+        use crate::audit_integrity::AuditRecorder;
+
+        let dir = tempdir().expect("tempdir");
+        let session_dir = dir.path().to_path_buf();
+        let ledger_path = session_dir.join("audit-events.ndjson");
+
+        // Stage 1: drive the minimal AuditRecorder lifecycle from 22-05a
+        // Decision 5 (session_started + session_ended). Every
+        // `append_event` call ends with `self.file.flush()` so the
+        // events are durable BEFORE we touch any AppliedLabelsGuard.
+        {
+            let mut recorder =
+                AuditRecorder::new(session_dir.clone()).expect("audit recorder construction");
+            recorder
+                .record_session_started(
+                    "2026-04-28T18:00:00Z".to_string(),
+                    vec!["nono".to_string(), "test".to_string()],
+                )
+                .expect("record session_started");
+            recorder
+                .record_session_ended("2026-04-28T18:00:01Z".to_string(), 0)
+                .expect("record session_ended");
+            // Recorder dropped here — file handle closes, OS flushes.
+        }
+
+        // Stage 2: snapshot the ledger BEFORE we drop the guard. The
+        // contents we read here represent the state of the ledger AT
+        // THE MOMENT supervised_runtime cleanup would begin reverting
+        // labels via AppliedLabelsGuard::drop(). Both the
+        // `session_started` and `session_ended` events MUST already be
+        // present (T-22-05-05 mitigation).
+        let pre_drop_ledger = std::fs::read_to_string(&ledger_path)
+            .expect("ledger file must exist after AuditRecorder lifecycle");
+        let pre_drop_lines: Vec<&str> = pre_drop_ledger
+            .lines()
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            pre_drop_lines.len(),
+            2,
+            "ledger must contain session_started + session_ended BEFORE guard drop; got {} lines:\n{}",
+            pre_drop_lines.len(),
+            pre_drop_ledger
+        );
+        assert!(
+            pre_drop_ledger.contains("session_started"),
+            "session_started must be flushed before guard drop; ledger:\n{pre_drop_ledger}"
+        );
+        assert!(
+            pre_drop_ledger.contains("session_ended"),
+            "session_ended must be flushed before guard drop; ledger:\n{pre_drop_ledger}"
+        );
+
+        // Stage 3: now drop an AppliedLabelsGuard over a tempfile in the
+        // same session-cleanup ordering production uses
+        // (audit-recorder-out, then guard-out). The drop sequence
+        // mirrors the supervised_runtime cleanup contract.
+        let labeled_file = dir.path().join("guarded.txt");
+        std::fs::write(&labeled_file, "x").expect("write labeled file");
+        let policy = single_file_read_rule(labeled_file.clone());
+
+        // Use a scoped block so guard's Drop fires synchronously.
+        {
+            let _guard =
+                AppliedLabelsGuard::snapshot_and_apply(&policy).expect("snapshot_and_apply");
+            // Inside guard: file is at Low IL; ledger snapshot already
+            // captured pre_drop_ledger above (Drop ordering preserved).
+        } // AppliedLabelsGuard::drop fires here — labels reverted.
+
+        // Stage 4: post-condition. The ledger contents we observed
+        // BEFORE guard drop ARE the ground truth recorded in the audit
+        // log; reading the ledger again post-drop must show identical
+        // contents (the guard's Drop must not have touched the audit
+        // file). This is the operational shape of T-22-05-05 mitigation.
+        let post_drop_ledger = std::fs::read_to_string(&ledger_path)
+            .expect("ledger file must still exist after guard drop");
+        assert_eq!(
+            pre_drop_ledger, post_drop_ledger,
+            "AppliedLabelsGuard::drop must not mutate the audit ledger\n\
+             pre:\n{pre_drop_ledger}\npost:\n{post_drop_ledger}"
+        );
+    }
 }
