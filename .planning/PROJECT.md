@@ -163,6 +163,17 @@ Feedback/observations from v2.1 shipping:
 | Phase 21 Low-IL ownership pre-check in `try_set_mandatory_label` (commit `da25619`) | Low-IL integrity is subtractive; Medium-IL system paths (e.g. `C:\Windows`) are already readable to Low-IL subjects through OS ACLs, so labeling them is unnecessary AND trips `ERROR_ACCESS_DENIED` for unprivileged users. | ✔ Good — inline comment preserved in source for future readers |
 | WR-01 reject-stage asymmetry accepted as product decision (Plan 18.1-04, CONTEXT D-14) | Event/Mutex/JobObject reject BEFORE prompt (pre-broker mask gate); Pipe/Socket reject AFTER prompt (G-04-wrapped; direction/role/host checks post-approval). Locked by `wr01_*` regression tests. | ⚠️ Revisit v2.2 — stage unification requires product decision, not bug fix |
 
+## Upstream Parity Process
+
+To prevent the Windows-vs-macOS parity gap from re-opening as upstream ships v0.41+:
+
+1. **Inventory drift** — `make check-upstream-drift` reports unabsorbed upstream commits grouped by file category. JSON output (`make check-upstream-drift ARGS="--from <tag> --to <tag> --format json"`) is suitable for templates and CI; default `--format table` for human review.
+2. **Scaffold the sync** — copy `.planning/templates/upstream-sync-quick.md` to `.planning/quick/YYMMDD-xxx-upstream-sync-vX.Y/PLAN.md` and fill the single-brace `{placeholder}` markers (smoke check: `grep -oE '\{[a-z_]+\}' PLAN.md` returns zero).
+3. **Cherry-pick per commit** — preserve the `Upstream-commit:` / `Upstream-tag:` / `Upstream-author:` / `Co-Authored-By:` / `Signed-off-by:` D-19 trailer block on every cherry-pick (template encodes the verbatim 6-line shape).
+4. **Verify Windows retrofit** — for every cross-platform feature absorbed, confirm the Windows path either exists or is added behind `#[cfg(target_os = "windows")]`; the template's "Windows-specific retrofit checklist" enumerates the per-feature questions.
+
+For the long-form runbook (output formats, categorization rules, fixture regeneration procedure, fork-divergence catalog rationale), see [`docs/cli/development/upstream-drift.mdx`](../docs/cli/development/upstream-drift.mdx).
+
 ## Evolution
 
 This document evolves at phase transitions and milestone boundaries.

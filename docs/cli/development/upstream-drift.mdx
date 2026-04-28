@@ -1,0 +1,157 @@
+---
+title: Upstream Drift Check
+description: How to inventory unabsorbed upstream commits and scaffold an upstream-sync quick task
+---
+
+The `make check-upstream-drift` target reports upstream commits the fork hasn't absorbed,
+grouped by file category. Use it before starting an upstream-sync quick task to inventory
+the work; combine it with the `.planning/templates/upstream-sync-quick.md` template to
+scaffold the PLAN.md.
+
+## Running the drift check
+
+```bash
+make check-upstream-drift                                                # auto-detect range, table format
+make check-upstream-drift ARGS="--from v0.40.1 --to v0.42.0"             # specific range
+make check-upstream-drift ARGS="--from v0.40.1 --to v0.42.0 --format json"  # JSON for templates / CI
+```
+
+The script auto-detects the last-synced upstream tag (highest `v0.*` reachable from `HEAD`)
+and the latest upstream tag (`git describe --tags --abbrev=0 upstream/main`). Pass `--from`
+and/or `--to` to override.
+
+If the `upstream` remote is missing, the script exits 1 with an actionable hint:
+
+```bash
+git remote add upstream https://github.com/always-further/nono.git
+```
+
+The script never adds the remote for you, never fetches, and never modifies git config —
+it is strictly read-only over the local `.git` directory. After invocation, `git status`
+remains clean.
+
+## Output formats
+
+| Format | Default | Best for |
+|--------|---------|----------|
+| `table` | yes | Human review during initial drift assessment |
+| `json`  | no  | Pasting into the upstream-sync template; CI consumption |
+
+The JSON output shape:
+
+```json
+{
+  "range": "v0.40.1..v0.42.0",
+  "from": "v0.40.1",
+  "to": "v0.42.0",
+  "total_unique_commits": 24,
+  "by_category": {
+    "profile": 5, "policy": 2, "package": 3, "proxy": 1, "audit": 6, "other": 7
+  },
+  "commits": [
+    {
+      "sha": "abc123...",
+      "subject": "feat(audit): ...",
+      "author": "...",
+      "date": "2026-...",
+      "additions": 152, "deletions": 31,
+      "files_changed": ["..."],
+      "categories": ["audit", "policy"]
+    }
+  ]
+}
+```
+
+A commit touching multiple categories appears under each one in `--format table` (so
+sum-of-rows can exceed `total_unique_commits`); in JSON, each commit's `categories`
+field lists the union.
+
+## Categorization rules
+
+The script categorizes by file path prefix (no subject-line keyword scanning). The lookup
+table is the single source of truth at the top of `scripts/check-upstream-drift.sh`:
+
+| Path prefix | Category |
+|-------------|----------|
+| `crates/nono-cli/src/profile/` or `profile.rs` | `profile` |
+| `crates/nono-cli/src/policy.rs` or `data/policy.json` | `policy` |
+| `crates/nono-cli/src/package*` or `crates/nono/src/package*` | `package` |
+| `crates/nono-proxy/` | `proxy` |
+| `crates/nono/src/audit/` or `audit_attestation*` or `crates/nono-cli/src/audit*` | `audit` |
+| anything else under `crates/{nono,nono-cli,nono-proxy}/src/` or `crates/nono/Cargo.toml` | `other` |
+
+**Excluded paths** (D-11 path filter): `*_windows.rs` (suffix glob, covers all Windows-only
+files), `crates/nono-cli/src/exec_strategy_windows/` (directory). Commits that touch ONLY
+excluded paths do not appear in the report; commits that touch BOTH excluded and
+cross-platform paths appear with only their cross-platform files listed.
+
+## Using the output with the upstream-sync template
+
+After running `make check-upstream-drift > drift.json`:
+
+1. Copy `.planning/templates/upstream-sync-quick.md` to `.planning/quick/YYMMDD-xxx-upstream-sync-vX.Y/PLAN.md`.
+2. Replace single-brace `{placeholder}` markers with values from `drift.json` (e.g., `{from_tag}` ← `from`, `{commit_count}` ← `total_unique_commits`, per-category counts from `by_category`).
+3. Curate the per-category commit lists from `drift.json["commits"]` into the template's `## Drift inventory > Commits to absorb` sub-sections.
+4. Run the placeholder smoke check before committing the filled PLAN.md:
+
+```bash
+grep -oE '\{[a-z_]+\}' .planning/quick/YYMMDD-xxx-upstream-sync-vX.Y/PLAN.md
+```
+
+Output should be empty. Any remaining marker is an unfilled blank.
+
+## D-19 cherry-pick trailer block
+
+Every commit in an upstream-sync quick task carries a 6-line trailer block:
+
+```
+Upstream-commit: <8-char abbrev sha>
+Upstream-tag: <upstream tag containing it>
+Upstream-author: <full name> <email>
+Co-Authored-By: <upstream author full name> <email>
+Signed-off-by: <fork author full name> <email>
+Signed-off-by: <fork author github handle> <email>
+```
+
+Field rules (verbatim from commits `73e1e3b8`, `adf81aec`, `869349df`):
+
+- Field order is fixed; do not rearrange.
+- `Upstream-author` uses a lowercase 'a' — capitalizing the 'a' is a regression.
+- TWO `Signed-off-by` lines: full name + github handle (DCO + GitHub attribution).
+- Trailer block separated from body by exactly one blank line.
+
+The template at `.planning/templates/upstream-sync-quick.md` encodes this exact block
+with `{placeholder}` markers ready for substitution.
+
+## Regenerating the test fixtures
+
+The drift check is regression-tested against frozen JSON fixtures under
+`tests/integration/fixtures/upstream-drift/`. To regenerate (e.g., after upstream
+publishes a new tag, or after the script's lookup table is updated):
+
+```bash
+bash scripts/check-upstream-drift.sh --from v0.37.1 --to v0.40.1 --format json \
+  > tests/integration/fixtures/upstream-drift/v0.37.1__v0.40.1.json
+bash scripts/check-upstream-drift.sh --from v0.39.0 --to v0.40.0 --format json \
+  > tests/integration/fixtures/upstream-drift/v0.39.0__v0.40.0.json
+bash scripts/check-upstream-drift.sh --from v0.40.0 --to v0.40.1 --format json \
+  > tests/integration/fixtures/upstream-drift/v0.40.0__v0.40.1.json
+
+bash tests/integration/test_upstream_drift.sh
+```
+
+The integration test diffs both `bash scripts/check-upstream-drift.sh` AND
+`pwsh -File scripts/check-upstream-drift.ps1` (when PowerShell is available) against
+the same fixture file, byte-for-byte. Twin-script parity is the structural enforcer:
+update one twin, the other diff fails.
+
+See `tests/integration/fixtures/upstream-drift/README.md` for the full regeneration
+procedure and the documented 22-commit informational delta vs the
+`.planning/quick/260424-upr-review-upstream-037-to-040/SUMMARY.md` headline.
+
+## See also
+
+- `scripts/check-upstream-drift.sh` and `scripts/check-upstream-drift.ps1` — the script source
+- `.planning/templates/upstream-sync-quick.md` — the GSD quick-task template
+- `tests/integration/test_upstream_drift.sh` — the integration test
+- `.planning/PROJECT.md` § "Upstream Parity Process" — the 4-step workflow summary
