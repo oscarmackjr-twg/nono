@@ -83,6 +83,31 @@ $gitLogPaths = @(
 )
 
 # ---------------------------------------------------------------------------
+# Categorization lookup table (D-05; ORDER IS LOAD-BEARING)
+# ---------------------------------------------------------------------------
+# Same prefix order as the bash twin's case-statement order. First-match-wins.
+# Audit must match before any generic crates/nono/src/* fallback. No subject-
+# line keyword scanning per D-05.
+function Get-Category {
+    param([string]$Path)
+    switch -Regex ($Path) {
+        '^crates/nono-cli/src/profile/'                      { return 'profile' }
+        '^crates/nono-cli/src/profile\.rs$'                  { return 'profile' }
+        '^crates/nono-cli/data/profile-authoring-guide\.md$' { return 'profile' }
+        '^crates/nono-cli/src/policy\.rs$'                   { return 'policy' }
+        '^crates/nono-cli/data/policy\.json$'                { return 'policy' }
+        '^crates/nono-cli/src/package'                       { return 'package' }
+        '^crates/nono-cli/src/package_cmd\.rs$'              { return 'package' }
+        '^crates/nono/src/package'                           { return 'package' }
+        '^crates/nono-proxy/'                                { return 'proxy' }
+        '^crates/nono/src/audit/'                            { return 'audit' }
+        '^crates/nono/src/audit_attestation'                 { return 'audit' }
+        '^crates/nono-cli/src/audit'                         { return 'audit' }
+        default                                              { return 'other' }
+    }
+}
+
+# ---------------------------------------------------------------------------
 # Drive git log; consume per-commit blocks; build per-commit hashtables.
 # Wave 1 emits per-commit objects without `categories`; Wave 2 (Task 2) adds
 # `by_category` + per-commit `categories: [...]`.
@@ -106,10 +131,38 @@ if ($LASTEXITCODE -ne 0) {
 $commits = New-Object System.Collections.ArrayList
 $current = $null
 
+# by_category aggregate. Multi-category commits double-count (D-06; the
+# total_unique_commits header line disambiguates).
+$byCategory = [ordered]@{
+    profile = 0
+    policy  = 0
+    package = 0
+    proxy   = 0
+    audit   = 0
+    other   = 0
+}
+
 function Add-CurrentCommit {
     if ($null -ne $script:current) {
-        # Wave 1 commit shape: sha, subject, author, date, additions, deletions, files_changed.
-        # Wave 2 (Task 2) appends `categories`.
+        # Compute categories: deduplicated, fixed-order iteration over the 6
+        # known categories so JSON output is deterministic across the twin.
+        $catSet = @{}
+        foreach ($f in $script:current.files) {
+            $cat = Get-Category $f
+            $catSet[$cat] = $true
+        }
+        # Same fixed-order emission as bash for byte-parity (audit-first lex).
+        $cats = New-Object System.Collections.ArrayList
+        foreach ($c in @('audit','other','package','policy','profile','proxy')) {
+            if ($catSet.ContainsKey($c)) { [void]$cats.Add($c) }
+        }
+        # Update by_category aggregate.
+        foreach ($c in $cats) {
+            $script:byCategory[$c]++
+        }
+        # Wave 2 commit shape: sha, subject, author, date, additions, deletions,
+        # files_changed, categories. @() wrapping prevents PS 5.1 single-element
+        # unwrap (Pitfall 6).
         $commitObj = [ordered]@{
             sha           = $script:current.sha
             subject       = $script:current.subject
@@ -118,6 +171,7 @@ function Add-CurrentCommit {
             additions     = [int]$script:current.additions
             deletions     = [int]$script:current.deletions
             files_changed = @($script:current.files)
+            categories    = @($cats)
         }
         [void]$script:commits.Add($commitObj)
         $script:current = $null
@@ -168,13 +222,16 @@ $total = $commits.Count
 # ---------------------------------------------------------------------------
 
 function Emit-Json {
-    # Wave 1 outer shape: range, from, to, total_unique_commits, commits.
-    # Wave 2 (Task 2) inserts `by_category` between total_unique_commits and commits.
+    # Outer key order locked: range, from, to, total_unique_commits,
+    # by_category, commits. by_category key order is the SUMMARY.md narrative
+    # order: profile, policy, package, proxy, audit, other (locked by the
+    # [ordered]@{} hashtable above).
     $result = [ordered]@{
         range                = "${From}..${To}"
         from                 = $From
         to                   = $To
         total_unique_commits = [int]$total
+        by_category          = $byCategory
         commits              = @($commits)
     }
     # -Depth 6 (NOT default 2!) so nested arrays don't serialize as
@@ -186,13 +243,22 @@ function Emit-Json {
 }
 
 function Emit-Table {
-    # Use [Console]::Out.Write with explicit LF to match bash printf
-    # byte-for-byte (PS Write-Output appends CRLF on Windows).
+    # Header + per-category grouped output (D-06). The SAME commit appears
+    # under EACH matching category. Use [Console]::Out.Write with explicit LF
+    # to match bash printf byte-for-byte.
     [Console]::Out.Write("Upstream drift: ${From}..${To}`n")
     [Console]::Out.Write(("Total: {0} unique commits`n" -f $total))
-    foreach ($c in $commits) {
-        $shaShort = ($c.sha).Substring(0, 8)
-        [Console]::Out.Write(("  {0}  {1}`n" -f $shaShort, $c.subject))
+    # Fixed category section order matches SUMMARY.md narrative order.
+    foreach ($cat in @('profile','policy','package','proxy','audit','other')) {
+        $count = $byCategory[$cat]
+        if ($count -eq 0) { continue }
+        [Console]::Out.Write(("`n## {0} ({1} commits)`n" -f $cat, $count))
+        foreach ($c in $commits) {
+            if ($c.categories -contains $cat) {
+                $shaShort = ($c.sha).Substring(0, 8)
+                [Console]::Out.Write(("  {0}  {1}`n" -f $shaShort, $c.subject))
+            }
+        }
     }
 }
 

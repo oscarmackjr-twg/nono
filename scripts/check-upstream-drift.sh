@@ -122,6 +122,31 @@ GITLOG_PATHS=(
 )
 
 # ---------------------------------------------------------------------------
+# Categorization lookup table (D-05; ORDER IS LOAD-BEARING)
+# ---------------------------------------------------------------------------
+# First-match-wins. Audit must match before any generic crates/nono/src/*
+# fallback (no such fallback exists today, but the comment locks the invariant
+# for future maintainers). No subject-line keyword scanning per D-05; path
+# prefix is the ONLY signal.
+categorize_file() {
+    local f="$1"
+    case "$f" in
+        crates/nono-cli/src/profile/*|crates/nono-cli/src/profile.rs|crates/nono-cli/data/profile-authoring-guide.md)
+            echo profile ;;
+        crates/nono-cli/src/policy.rs|crates/nono-cli/data/policy.json)
+            echo policy ;;
+        crates/nono-cli/src/package*|crates/nono-cli/src/package_cmd.rs|crates/nono/src/package*)
+            echo package ;;
+        crates/nono-proxy/*)
+            echo proxy ;;
+        crates/nono/src/audit/*|crates/nono/src/audit_attestation*|crates/nono-cli/src/audit*)
+            echo audit ;;
+        *)
+            echo other ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
 # JSON escape helper (T-24-04)
 # ---------------------------------------------------------------------------
 # Order matters: backslash MUST be substituted FIRST. Scope: covers the
@@ -140,12 +165,12 @@ emit_json_string() {
 # ---------------------------------------------------------------------------
 # Drive git log; consume per-commit blocks; build per-commit JSON.
 # Use process substitution (Pitfall 8) so accumulator state survives the loop.
-# Wave 1 emits per-commit objects without `categories`; Wave 2 (Task 2) adds
-# `by_category` + per-commit `categories: [...]`.
 # ---------------------------------------------------------------------------
 declare -a COMMITS_JSON=()
 declare -a COMMITS_SHAS=()
 declare -a COMMITS_SUBJECTS=()
+declare -a COMMITS_CATS=()
+declare -A BY_CAT=([profile]=0 [policy]=0 [package]=0 [proxy]=0 [audit]=0 [other]=0)
 
 SHA=""; AUTH=""; DATE=""; SUBJ=""
 ADDS=0; DELS=0
@@ -155,10 +180,30 @@ finalize_commit() {
     local sha="$1" auth="$2" date="$3" subj="$4"
     local adds="$5" dels="$6"
 
+    # Compute categories for this commit (deduplicated, fixed-order iteration
+    # over the 6 known categories so JSON output is deterministic across the
+    # twin). NO sort -u: that introduces a subshell; explicit fixed-order
+    # iteration is cheaper AND keeps emission deterministic.
+    local f c
+    local -A CAT_SET=()
+    for f in "${FILES[@]}"; do
+        c=$(categorize_file "$f")
+        CAT_SET[$c]=1
+    done
+    local -a CATS=()
+    for c in audit other package policy profile proxy; do
+        [[ -n "${CAT_SET[$c]:-}" ]] && CATS+=("$c")
+    done
+
+    # Update by_category aggregate. Multi-category commits double-count by
+    # design (D-06; the total_unique_commits header line disambiguates).
+    for c in "${CATS[@]}"; do
+        BY_CAT[$c]=$((BY_CAT[$c] + 1))
+    done
+
     # Build files_changed JSON array
     local files_json="["
     local i=0
-    local f
     for f in "${FILES[@]}"; do
         [[ $i -gt 0 ]] && files_json+=','
         files_json+=$(emit_json_string "$f")
@@ -166,21 +211,33 @@ finalize_commit() {
     done
     files_json+="]"
 
-    # Build per-commit object (Wave 1 shape: no `categories` field yet).
-    # Field order is locked: sha, subject, author, date, additions, deletions,
-    # files_changed.
+    # Build categories JSON array (sorted lex per the audit-first iteration
+    # order above).
+    local cats_json="["
+    i=0
+    for c in "${CATS[@]}"; do
+        [[ $i -gt 0 ]] && cats_json+=','
+        cats_json+=$(emit_json_string "$c")
+        i=$((i + 1))
+    done
+    cats_json+="]"
+
+    # Build per-commit object. Field order is locked: sha, subject, author,
+    # date, additions, deletions, files_changed, categories.
     local obj
-    obj=$(printf '{"sha":%s,"subject":%s,"author":%s,"date":%s,"additions":%d,"deletions":%d,"files_changed":%s}' \
+    obj=$(printf '{"sha":%s,"subject":%s,"author":%s,"date":%s,"additions":%d,"deletions":%d,"files_changed":%s,"categories":%s}' \
         "$(emit_json_string "$sha")" \
         "$(emit_json_string "$subj")" \
         "$(emit_json_string "$auth")" \
         "$(emit_json_string "$date")" \
         "$adds" "$dels" \
-        "$files_json")
+        "$files_json" \
+        "$cats_json")
 
     COMMITS_JSON+=("$obj")
     COMMITS_SHAS+=("$sha")
     COMMITS_SUBJECTS+=("$subj")
+    COMMITS_CATS+=("${CATS[*]}")
 }
 
 while IFS=$'\t' read -r c1 c2 c3 c4 c5; do
@@ -222,11 +279,13 @@ TOTAL=${#COMMITS_JSON[@]}
 # ---------------------------------------------------------------------------
 
 emit_json() {
-    # Wave 1 outer shape: range, from, to, total_unique_commits, commits.
-    # Wave 2 (Task 2) inserts `by_category` between total_unique_commits and
-    # commits.
-    printf '{"range":"%s..%s","from":"%s","to":"%s","total_unique_commits":%d,"commits":[' \
-        "$FROM_REF" "$TO_REF" "$FROM_REF" "$TO_REF" "$TOTAL"
+    # Outer key order locked: range, from, to, total_unique_commits,
+    # by_category, commits. by_category key order is the SUMMARY.md narrative
+    # order: profile, policy, package, proxy, audit, other.
+    printf '{"range":"%s..%s","from":"%s","to":"%s","total_unique_commits":%d,"by_category":{"profile":%d,"policy":%d,"package":%d,"proxy":%d,"audit":%d,"other":%d},"commits":[' \
+        "$FROM_REF" "$TO_REF" "$FROM_REF" "$TO_REF" "$TOTAL" \
+        "${BY_CAT[profile]}" "${BY_CAT[policy]}" "${BY_CAT[package]}" \
+        "${BY_CAT[proxy]}" "${BY_CAT[audit]}" "${BY_CAT[other]}"
     local i
     for ((i=0; i<TOTAL; i++)); do
         [[ $i -gt 0 ]] && printf ','
@@ -236,13 +295,22 @@ emit_json() {
 }
 
 emit_table() {
-    # Wave 1 table: header + total + flat commit list. Wave 2 adds per-category
-    # grouping (## profile, ## policy, ...).
+    # Header + per-category grouped output (D-06). The SAME commit appears
+    # under EACH matching category, so sum-of-rows can exceed
+    # total_unique_commits when commits span multiple categories.
     printf 'Upstream drift: %s..%s\n' "$FROM_REF" "$TO_REF"
     printf 'Total: %d unique commits\n' "$TOTAL"
-    local i
-    for ((i=0; i<TOTAL; i++)); do
-        printf '  %.8s  %s\n' "${COMMITS_SHAS[$i]}" "${COMMITS_SUBJECTS[$i]}"
+    local cat count i
+    # Fixed category section order matches SUMMARY.md narrative order.
+    for cat in profile policy package proxy audit other; do
+        count="${BY_CAT[$cat]:-0}"
+        [[ $count -eq 0 ]] && continue
+        printf '\n## %s (%d commits)\n' "$cat" "$count"
+        for ((i=0; i<TOTAL; i++)); do
+            if [[ " ${COMMITS_CATS[$i]} " == *" $cat "* ]]; then
+                printf '  %.8s  %s\n' "${COMMITS_SHAS[$i]}" "${COMMITS_SUBJECTS[$i]}"
+            fi
+        done
     done
 }
 
