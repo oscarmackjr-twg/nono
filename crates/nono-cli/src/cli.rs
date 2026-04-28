@@ -2246,6 +2246,14 @@ pub enum AuditCommands {
     List(AuditListArgs),
     /// Show audit details for a session
     Show(AuditShowArgs),
+    /// Verify the cryptographic integrity of an audit session
+    ///
+    /// Plan 22-05a Task 6 (upstream `0b1822a9`): re-reads
+    /// `audit-events.ndjson`, recomputes the per-event leaf hash, the
+    /// hash-chain head, and the Merkle root under the Alpha schema, then
+    /// fail-closes if any commitment in `SessionMetadata.audit_integrity`
+    /// does not match. AUD-02 acceptance criterion #2.
+    Verify(AuditVerifyArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -2288,6 +2296,23 @@ pub struct AuditListArgs {
 #[command(disable_help_flag = true)]
 pub struct AuditShowArgs {
     /// Session ID (e.g., 20260214-143022-12345)
+    pub session_id: String,
+
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+
+    /// Print help
+    #[arg(long, short = 'h', action = clap::ArgAction::Help, help_heading = "OPTIONS")]
+    pub help: Option<bool>,
+}
+
+/// Arguments for `nono audit verify <session-id>` (Plan 22-05a Task 6,
+/// upstream `0b1822a9`).
+#[derive(Parser, Debug)]
+#[command(disable_help_flag = true)]
+pub struct AuditVerifyArgs {
+    /// Session ID to verify (e.g., 20260214-143022-12345)
     pub session_id: String,
 
     /// Output as JSON

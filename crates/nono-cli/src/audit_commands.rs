@@ -1,8 +1,11 @@
 //! Audit subcommand implementations
 //!
-//! Handles `nono audit list|show` for viewing the audit trail of sandboxed sessions.
+//! Handles `nono audit list|show|verify` for viewing the audit trail of
+//! sandboxed sessions and verifying the cryptographic integrity of an
+//! audit-protected session.
 
-use crate::cli::{AuditArgs, AuditCommands, AuditListArgs, AuditShowArgs};
+use crate::audit_integrity::verify_audit_log;
+use crate::cli::{AuditArgs, AuditCommands, AuditListArgs, AuditShowArgs, AuditVerifyArgs};
 use crate::rollback_session::{discover_sessions, load_session, SessionInfo};
 use crate::theme;
 use colored::Colorize;
@@ -22,6 +25,7 @@ pub fn run_audit(args: AuditArgs) -> Result<()> {
     match args.command {
         AuditCommands::List(args) => cmd_list(args),
         AuditCommands::Show(args) => cmd_show(args),
+        AuditCommands::Verify(args) => cmd_verify(args),
     }
 }
 
@@ -408,6 +412,70 @@ fn print_show_json(session: &SessionInfo) -> Result<()> {
         .map_err(|e| NonoError::Snapshot(format!("JSON serialization failed: {e}")))?;
     println!("{json}");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// nono audit verify
+// ---------------------------------------------------------------------------
+
+/// Verify the cryptographic integrity of an audit session (Plan 22-05a
+/// Task 6, upstream `0b1822a9`). Returns `NonoError::Snapshot` with
+/// "verification failed" message on tamper detection so the CLI exits
+/// non-zero.
+fn cmd_verify(args: AuditVerifyArgs) -> Result<()> {
+    let session = load_session(&args.session_id)?;
+    let result = verify_audit_log(&session.dir, session.metadata.audit_integrity.as_ref())?;
+
+    if args.json {
+        let json = serde_json::to_string_pretty(&result)
+            .map_err(|e| NonoError::Snapshot(format!("JSON serialization failed: {e}")))?;
+        println!("{json}");
+    } else {
+        eprintln!(
+            "{} Audit verification for session: {}",
+            prefix(),
+            session.metadata.session_id.white().bold(),
+        );
+        eprintln!("  Algorithm:           {}", result.hash_algorithm);
+        eprintln!("  Merkle scheme:       {}", result.merkle_scheme);
+        eprintln!("  Event count:         {}", result.event_count);
+        eprintln!(
+            "  Records verified:    {}",
+            if result.records_verified {
+                "yes".green()
+            } else {
+                "no".red()
+            },
+        );
+        eprintln!(
+            "  Event count match:   {}",
+            yes_no_color(result.event_count_matches),
+        );
+        eprintln!(
+            "  Chain head match:    {}",
+            yes_no_color(result.chain_head_matches),
+        );
+        eprintln!(
+            "  Merkle root match:   {}",
+            yes_no_color(result.merkle_root_matches),
+        );
+    }
+
+    if !result.is_valid() {
+        return Err(NonoError::Snapshot(format!(
+            "audit verification failed for session {}",
+            session.metadata.session_id,
+        )));
+    }
+    Ok(())
+}
+
+fn yes_no_color(value: bool) -> colored::ColoredString {
+    if value {
+        "yes".green()
+    } else {
+        "no".red()
+    }
 }
 
 // ---------------------------------------------------------------------------

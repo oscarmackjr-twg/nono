@@ -1,11 +1,11 @@
 use nono::supervisor::{AuditEntry, UrlOpenRequest};
 use nono::undo::{AuditIntegritySummary, ContentHash, NetworkAuditEvent};
 use nono::{NonoError, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
-use std::io::Write;
-use std::path::PathBuf;
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
 
 const AUDIT_EVENTS_FILENAME: &str = "audit-events.ndjson";
 // Plan 22-05a Task 5 (upstream 7b7815f7): unified Alpha integrity schema.
@@ -25,7 +25,7 @@ const HASH_ALGORITHM: &str = "sha256";
 #[allow(dead_code)] // consumed by audit verify in Task 6
 pub(crate) const MERKLE_SCHEME_LABEL: &str = "alpha";
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[allow(dead_code)] // CapabilityDecision/UrlOpen/Network variants and their constructors land in
                     // follow-up cherry-picks 4ec61c29..9db06336 per Plan 22-05a Decision 5.
@@ -51,13 +51,50 @@ enum AuditEventPayload {
     },
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct AuditEventRecord {
     sequence: u64,
     prev_chain: Option<ContentHash>,
     leaf_hash: ContentHash,
     chain_hash: ContentHash,
     event: AuditEventPayload,
+}
+
+/// Result returned by [`verify_audit_log`] (Plan 22-05a Task 6, upstream
+/// `0b1822a9`). Reports whether the recomputed chain head and Merkle root
+/// match the values stored in `SessionMetadata.audit_integrity`.
+///
+/// Verification is fail-closed: any per-record mismatch (sequence,
+/// prev_chain, leaf_hash, or chain_hash) returns
+/// `Ok(AuditVerificationResult { records_verified: false, .. })`. Callers
+/// MUST treat that as a hard verification failure (`nono audit verify`
+/// exits non-zero).
+#[derive(Clone, Serialize)]
+pub(crate) struct AuditVerificationResult {
+    pub(crate) hash_algorithm: String,
+    pub(crate) merkle_scheme: String,
+    pub(crate) event_count: u64,
+    pub(crate) computed_chain_head: Option<ContentHash>,
+    pub(crate) computed_merkle_root: Option<ContentHash>,
+    pub(crate) stored_event_count: Option<u64>,
+    pub(crate) stored_chain_head: Option<ContentHash>,
+    pub(crate) stored_merkle_root: Option<ContentHash>,
+    pub(crate) event_count_matches: bool,
+    pub(crate) chain_head_matches: bool,
+    pub(crate) merkle_root_matches: bool,
+    pub(crate) records_verified: bool,
+}
+
+impl AuditVerificationResult {
+    /// Returns `true` only when every commitment in the stored summary
+    /// (event count, chain head, Merkle root) matches the recomputed
+    /// values AND every per-record hash check passed.
+    pub(crate) fn is_valid(&self) -> bool {
+        self.event_count_matches
+            && self.chain_head_matches
+            && self.merkle_root_matches
+            && self.records_verified
+    }
 }
 
 pub(crate) struct AuditRecorder {
@@ -216,6 +253,113 @@ fn merkle_root(leaves: &[ContentHash]) -> ContentHash {
     ContentHash::from_bytes(level[0])
 }
 
+/// Re-read `<session_dir>/audit-events.ndjson`, recompute the per-event
+/// leaf hash + chain hash, and return an [`AuditVerificationResult`]
+/// reflecting whether the recomputed values match the supplied
+/// `stored_summary`.
+///
+/// Plan 22-05a Task 6 (upstream `0b1822a9`): minimal-port replay. AUD-02
+/// acceptance criterion #2 ("nono audit verify <id> succeeds for an
+/// untampered session and rejects tampered ledgers fail-closed").
+///
+/// `stored_summary` may be `None` for sessions recorded before the
+/// integrity flag was set; in that case `event_count_matches` /
+/// `chain_head_matches` / `merkle_root_matches` are all `false` (callers
+/// surface that as "no integrity summary recorded").
+pub(crate) fn verify_audit_log(
+    session_dir: &Path,
+    stored_summary: Option<&AuditIntegritySummary>,
+) -> Result<AuditVerificationResult> {
+    let events_path = session_dir.join(AUDIT_EVENTS_FILENAME);
+    let file = File::open(&events_path).map_err(|e| {
+        NonoError::Snapshot(format!(
+            "Failed to open audit event log {}: {e}",
+            events_path.display()
+        ))
+    })?;
+    let reader = BufReader::new(file);
+
+    let mut next_sequence: u64 = 0;
+    let mut previous_chain: Option<ContentHash> = None;
+    let mut leaf_hashes: Vec<ContentHash> = Vec::new();
+    let mut records_verified = true;
+
+    for (line_idx, line_result) in reader.lines().enumerate() {
+        let line = line_result.map_err(|e| {
+            NonoError::Snapshot(format!(
+                "Failed to read line {} from {}: {e}",
+                line_idx + 1,
+                events_path.display()
+            ))
+        })?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let record: AuditEventRecord = serde_json::from_str(&line).map_err(|e| {
+            NonoError::Snapshot(format!(
+                "Failed to parse audit record at line {}: {e}",
+                line_idx + 1
+            ))
+        })?;
+
+        if record.sequence != next_sequence {
+            records_verified = false;
+        }
+        if record.prev_chain != previous_chain {
+            records_verified = false;
+        }
+
+        let event_bytes = serde_json::to_vec(&record.event).map_err(|e| {
+            NonoError::Snapshot(format!("Failed to re-serialize audit event: {e}"))
+        })?;
+        let recomputed_leaf = hash_event(&event_bytes);
+        if recomputed_leaf != record.leaf_hash {
+            records_verified = false;
+        }
+
+        let recomputed_chain = hash_chain(previous_chain.as_ref(), &record.leaf_hash);
+        if recomputed_chain != record.chain_hash {
+            records_verified = false;
+        }
+
+        previous_chain = Some(record.chain_hash);
+        leaf_hashes.push(record.leaf_hash);
+        next_sequence = next_sequence.saturating_add(1);
+    }
+
+    let event_count = leaf_hashes.len() as u64;
+    let computed_merkle_root = if leaf_hashes.is_empty() {
+        None
+    } else {
+        Some(merkle_root(&leaf_hashes))
+    };
+    let computed_chain_head = previous_chain;
+
+    let (stored_event_count, stored_chain_head, stored_merkle_root) = match stored_summary {
+        Some(s) => (Some(s.event_count), Some(s.chain_head), Some(s.merkle_root)),
+        None => (None, None, None),
+    };
+
+    let event_count_matches = stored_event_count == Some(event_count);
+    let chain_head_matches = stored_chain_head == computed_chain_head;
+    let merkle_root_matches = stored_merkle_root == computed_merkle_root;
+
+    Ok(AuditVerificationResult {
+        hash_algorithm: HASH_ALGORITHM.to_string(),
+        merkle_scheme: MERKLE_SCHEME_LABEL.to_string(),
+        event_count,
+        computed_chain_head,
+        computed_merkle_root,
+        stored_event_count,
+        stored_chain_head,
+        stored_merkle_root,
+        event_count_matches,
+        chain_head_matches,
+        merkle_root_matches,
+        records_verified,
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -246,5 +390,55 @@ mod tests {
             .unwrap();
 
         assert_eq!(recorder.event_count(), 1);
+    }
+
+    #[test]
+    fn verify_audit_log_accepts_untampered_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut recorder = AuditRecorder::new(dir.path().to_path_buf()).unwrap();
+        recorder
+            .record_session_started("2026-04-21T00:00:00Z".to_string(), vec!["pwd".to_string()])
+            .unwrap();
+        recorder
+            .record_session_ended("2026-04-21T00:00:01Z".to_string(), 0)
+            .unwrap();
+        let summary = recorder.finalize().unwrap();
+
+        let result = verify_audit_log(dir.path(), Some(&summary)).unwrap();
+        assert!(result.is_valid(), "untampered session must verify");
+        assert_eq!(result.event_count, 2);
+        assert!(result.event_count_matches);
+        assert!(result.chain_head_matches);
+        assert!(result.merkle_root_matches);
+        assert!(result.records_verified);
+        assert_eq!(result.merkle_scheme, "alpha");
+    }
+
+    #[test]
+    fn verify_audit_log_rejects_tampered_event_log_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut recorder = AuditRecorder::new(dir.path().to_path_buf()).unwrap();
+        recorder
+            .record_session_started("2026-04-21T00:00:00Z".to_string(), vec!["pwd".to_string()])
+            .unwrap();
+        recorder
+            .record_session_ended("2026-04-21T00:00:01Z".to_string(), 0)
+            .unwrap();
+        let summary = recorder.finalize().unwrap();
+
+        // Tamper with the event log: rewrite one event's exit_code without
+        // updating the cryptographic commitments. The verifier MUST detect.
+        let events_path = dir.path().join(AUDIT_EVENTS_FILENAME);
+        let original = std::fs::read_to_string(&events_path).unwrap();
+        let tampered = original.replace("\"exit_code\":0", "\"exit_code\":1");
+        assert_ne!(original, tampered, "test setup: replace must mutate bytes");
+        std::fs::write(&events_path, tampered).unwrap();
+
+        let result = verify_audit_log(dir.path(), Some(&summary)).unwrap();
+        assert!(
+            !result.is_valid(),
+            "tampered session must fail-close (records_verified=false or chain_head_matches=false)"
+        );
+        assert!(!result.records_verified || !result.chain_head_matches);
     }
 }
