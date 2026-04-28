@@ -6,7 +6,7 @@
 #   make check        Run clippy and format check
 #   make release      Build release binaries
 
-.PHONY: all build build-lib build-cli build-ffi build-arm64 test test-lib test-cli test-ffi check clippy fmt clean install audit help test-windows-harness test-windows-smoke test-windows-integration test-windows-security
+.PHONY: all build build-lib build-cli build-ffi build-arm64 test test-lib test-cli test-ffi check clippy fmt clean install audit help test-windows-harness test-windows-smoke test-windows-integration test-windows-security check-upstream-drift
 
 # Default target
 all: build
@@ -66,6 +66,27 @@ test-windows-security:
 
 test-doc:
 	cargo test --doc
+
+# Maintainer tooling
+#
+# check-upstream-drift dispatches to the platform-appropriate twin script
+# (scripts/check-upstream-drift.{sh,ps1}). Read-only over .git; reports
+# upstream commits the fork has not absorbed under the D-11 path filter.
+# Pass --from / --to / --format via ARGS:
+#   make check-upstream-drift ARGS="--from v0.40.1 --to v0.42.0 --format json"
+
+# Detect Windows. $(OS) == Windows_NT under cmd/MSYS bash.
+ifeq ($(OS),Windows_NT)
+check-upstream-drift:
+	@if command -v pwsh >/dev/null 2>&1; then \
+		pwsh -NoProfile -File scripts/check-upstream-drift.ps1 $(ARGS); \
+	else \
+		powershell.exe -NoProfile -File scripts/check-upstream-drift.ps1 $(ARGS); \
+	fi
+else
+check-upstream-drift:
+	@bash scripts/check-upstream-drift.sh $(ARGS)
+endif
 
 # Check targets (lint + format)
 check: clippy fmt-check
@@ -153,6 +174,10 @@ help:
 	@echo ""
 	@echo "Security:"
 	@echo "  make audit          Run cargo audit for vulnerabilities"
+	@echo ""
+	@echo "Maintainer:"
+	@echo "  make check-upstream-drift                                   Inventory unabsorbed upstream commits (default range, table)"
+	@echo "  make check-upstream-drift ARGS=\"--from v0.40.1 --to v0.42.0 --format json\"  Override range / format"
 	@echo ""
 	@echo "Other:"
 	@echo "  make install        Install CLI to ~/.cargo/bin"

@@ -4,7 +4,7 @@ milestone: v2.2
 milestone_name: Windows/macOS Parity Sweep
 status: executing
 stopped_at: v2.1 milestone close complete. All planning docs updated and committed. Awaiting next milestone scope.
-last_updated: "2026-04-28T02:39:06.662Z"
+last_updated: "2026-04-28T03:22:17.829Z"
 last_activity: 2026-04-28
 progress:
   total_phases: 25
@@ -22,13 +22,13 @@ See: .planning/PROJECT.md (updated 2026-04-24 at v2.2 milestone start)
 
 **Core Value:** Every nono command that works on Linux/macOS should work on Windows with equivalent security guarantees, or be explicitly documented as intentionally unsupported with a clear rationale.
 
-**Current Focus:** v2.2 Windows/macOS Parity Sweep. Ingest upstream v0.38–v0.40 cross-platform features so Windows has the same `nono` commands/flags/security guarantees as macOS. Install drift-prevention tooling so v0.42+ don't recreate the gap. Pre-milestone `windows-squash` → `main` merge is a separate quick task.
+**Current Focus:** Phase 24 — parity-drift-prevention
 
 ## Current Position
 
-Phase: Not started (roadmap complete — awaiting pre-milestone merge + `/gsd-plan-phase 22`)
-Plan: —
-Status: Ready to execute
+Phase: 24 (parity-drift-prevention) — EXECUTING
+Plan: 1 of 2
+Status: Executing Phase 24
 Milestone: v2.2 — 0/3 phases, 0/8 plans. Phase numbering continues from v2.1's Phase 21 → v2.2 starts at Phase 22.
 
   - v1.0 Windows Alpha — shipped 2026-03-31 (tag `v1.0`).
@@ -48,7 +48,7 @@ Next actions:
   - Invoke `/gsd-plan-phase 22` to decompose Phase 22 into the 5 locked plans.
   - Phase 24 may be started in parallel with Phase 22 (independent dependency chain).
 
-Last activity: 2026-04-28 -- Phase 24 planning complete
+Last activity: 2026-04-28 -- Phase 24 execution started
 
 ```
 Progress: [██████████] 100% (62/62 plans implementation-complete — Phase 21 closed 2026-04-20; supervisor-pipe debug RESOLVED via 3-commit fix chain; Phase 18.1 Plan 18.1-01 (G-02 CONIN$ prompt routing) complete 2026-04-21; Phase 18.1 Plan 18.1-02 (G-03 JobObject CreateJobObjectW + G-04 broker-failure flip) complete 2026-04-21; Phase 18.1 Plan 18.1-03 (G-06 profile widening end-to-end wiring, Plan 18-03 Deferred Issue #1 RESOLVED) complete 2026-04-21; Phase 18.1 Plan 18.1-04 (G-05 WR-01 reject-stage verification, commit 1699339) complete 2026-04-21 — all 5 HUMAN-UAT gaps G-02..G-06 closed. Remaining gate to v2.1 milestone tag: gsd-verifier phase-level sign-off on Phase 18.1)
