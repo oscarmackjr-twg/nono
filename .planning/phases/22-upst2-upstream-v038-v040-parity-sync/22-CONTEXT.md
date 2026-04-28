@@ -378,7 +378,53 @@ These came up during scope discussion or were intentionally split out of Phase 2
 
 </deferred>
 
+<revision>
+## Revision: 22-05 split into 22-05a + 22-05b (2026-04-28)
+
+**Trigger:** Plan 22-05 execution paused at predicted Rule 4 / CONTEXT STOP trigger #3 checkpoint. Cherry-pick of `4f9552ec` (the audit-cluster bulk commit) produced empirical conflict measurements that breach the documented thresholds.
+
+**Empirical conflict measurement on `git cherry-pick 4f9552ec` (HEAD = `5c8df06a`, post-22-04):**
+
+| File | Conflict markers | Conflict span (lines) |
+|------|------------------|-----------------------|
+| `crates/nono-cli/src/rollback_runtime.rs` | 12 | **358** (>50/file × 7) |
+| `crates/nono-cli/src/supervised_runtime.rs` | 2 | 68 |
+| `crates/nono/src/undo/types.rs` | 2 | 67 |
+| `crates/nono-cli/src/cli.rs` | 2 | 31 |
+| `crates/nono-cli/src/rollback_commands.rs` | 3 | 15 |
+| `crates/nono/src/undo/snapshot.rs` | 2 | 10 |
+| `README.md` | 1 | 6 |
+| `docs/cli/features/audit.mdx` | 1 | 4 |
+| `docs/cli/usage/flags.mdx` | 1 | 4 |
+| **TOTAL** | **26** | **~563** |
+
+D-02 thresholds: >50 lines/file (breached 7×), >2 forked files (9 — breached 4.5×), >400 total span (breached 1.4×). `exec_strategy.rs` auto-merged but with semantic-yellow flag (~300 fork drift overlapping audit hooks).
+
+**Decision (user-confirmed Path B, 2026-04-28):** Split Plan 22-05 into two plans:
+
+1. **Plan 22-05a — Audit core (no rename, no Authenticode).** Manual-port replay of `4f9552ec`'s audit-integrity portions ONLY — DO NOT touch the `prune` → `session cleanup` rename in this plan. The rename and the audit-integrity work are conceptually independent in upstream's commit; the diff just bundles them. Then cherry-pick `4ec61c29` + `02ee0bd1` + `7b7815f7` + `0b1822a9` + `6ecade2e` + `9db06336`. Lands AUD-01, AUD-02, AUD-03 (SHA-256 portion), and AUD-04 PARTIAL (audit cleanup peer subcommand may land here if cleanly separable; rename is OUT).
+
+2. **Plan 22-05b — Prune-rename + Authenticode + CLEAN-04 sweep.** `prune` → `session cleanup` rename (with hidden `prune` deprecation alias), Authenticode + SHA-256 fallback exec-identity (~150 LOC fork-only `audit/exec_identity_windows.rs`), full CLEAN-04 invariant regression sweep with D-04 gate after every commit. Lands AUD-04 (rename) + AUD-03 (Windows portion).
+
+**Why Path B (not A/C/D):**
+
+- Path A (full manual-replay in one plan) consolidates two independent risk surfaces into one verification pass. T-22-05-04 (sandboxed-agent file-deletion if rename regresses CLEAN-04) and T-22-05-05 (AppliedLabelsGuard lifecycle) deserve independent gates.
+- Path C (defer AUD-01 + AUD-04) cuts the bulk of Phase 22's audit value and leaves Success Criterion #5 incomplete vs ROADMAP.
+- Path D (full re-plan) is the cleanest but wastes the existing CONTEXT/RESEARCH/PATTERNS/VALIDATION work — the split is a focused planning question, not a re-spec.
+
+**Boundary discipline (LOCKED):**
+
+- **22-05a MUST NOT touch `session_commands.rs` / `session_commands_windows.rs` rename surface.** The 4f9552ec manual-port replay must explicitly skip the prune→cleanup function-name and CLI-binding changes; only port the audit-integrity hooks and `--audit-integrity` / `--audit-sign-key` flags. CLEAN-04 baseline must remain green throughout 22-05a.
+- **22-05b MUST run the D-04 invariant gate after EVERY commit.** No batched commits. Each commit re-runs `auto_prune_is_noop_when_sandboxed`, `is_prunable_all_exited_escape_hatch_matches_any_exited`, `parse_duration_*` family, and verifies `AUTO_PRUNE_STALE_THRESHOLD = 100` constant.
+- **STOP trigger #6 is ABSOLUTE in 22-05b.** Any post-rename failure of `auto_prune_is_noop_when_sandboxed` reverts the commit and stops the plan; no exceptions, no in-flight reasoning.
+- **22-05b depends on 22-05a closing first.** Sequential, not wave-parallel. Wave numbering: 22-05a stays Wave 2; 22-05b becomes Wave 3.
+- **Authenticode lands in 22-05b**, not 22-05a — the plan boundary places all Windows-specific fork-only additions in the rename plan to keep 22-05a a pure upstream port.
+
+**Reference:** `.planning/phases/22-upst2-upstream-v038-v040-parity-sync/22-05-AUD-PLAN.archive.md` preserves the original combined plan for line-by-line task reuse during planning.
+
+</revision>
+
 ---
 
 *Phase: 22-upst2-upstream-v038-v040-parity-sync*
-*Context gathered: 2026-04-27*
+*Context gathered: 2026-04-27 (revision 2026-04-28: 22-05 split)*
