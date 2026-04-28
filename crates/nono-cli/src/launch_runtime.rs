@@ -73,6 +73,11 @@ pub(crate) struct RollbackLaunchOptions {
     /// scope: capability-decision and URL-open hooks land in follow-up
     /// cherry-picks (4ec61c29..9db06336).
     pub(crate) audit_integrity: bool,
+    /// `--audit-sign-key <KEY_REF>`: when `Some`, the supervisor signs the
+    /// audit-integrity Merkle root + chain head + session id and writes
+    /// `<session_dir>/audit-attestation.bundle`. Plan 22-05a Task 7
+    /// (upstream `6ecade2e`).
+    pub(crate) audit_sign_key: Option<String>,
     pub(crate) destination: Option<PathBuf>,
     pub(crate) track_all: bool,
     pub(crate) skip_dirs: Vec<String>,
@@ -213,6 +218,7 @@ pub(crate) fn prepare_run_launch_plan(
     let no_rollback_prompt = run_args.no_rollback_prompt;
     let no_audit = run_args.no_audit;
     let audit_integrity = run_args.audit_integrity && !run_args.no_audit_integrity;
+    let audit_sign_key = run_args.audit_sign_key.clone();
     let trust_override = run_args.trust_override;
 
     let mut prepared = prepare_sandbox(&args, silent)?;
@@ -310,6 +316,7 @@ pub(crate) fn prepare_run_launch_plan(
                 prompt_disabled: no_rollback_prompt,
                 audit_disabled: no_audit,
                 audit_integrity,
+                audit_sign_key,
                 destination: run_args.rollback_dest,
                 ..rollback_options
             },

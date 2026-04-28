@@ -1271,6 +1271,7 @@ mod tests {
             network_events: vec![],
             audit_event_count: 0,
             audit_integrity: None,
+            audit_attestation: None,
             rollback_status: RollbackStatus::Available,
         };
 
@@ -1330,6 +1331,7 @@ mod tests {
             network_events: vec![],
             audit_event_count: 0,
             audit_integrity: None,
+            audit_attestation: None,
             rollback_status: RollbackStatus::Available,
         };
         manager.save_session_metadata(&meta).expect("save");

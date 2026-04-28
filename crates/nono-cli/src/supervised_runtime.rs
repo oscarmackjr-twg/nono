@@ -1,3 +1,4 @@
+use crate::audit_attestation::prepare_audit_signer;
 use crate::audit_integrity::AuditRecorder;
 use crate::launch_runtime::{
     ProxyLaunchOptions, ResourceLimits, RollbackLaunchOptions, SessionLaunchOptions,
@@ -239,6 +240,14 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
     } else {
         None
     };
+
+    // Plan 22-05a Task 7 (upstream 6ecade2e): when --audit-sign-key is set,
+    // resolve the URI through the keystore (fail-closed if missing) and
+    // hand the signer to `finalize_supervised_exit` via RollbackExitContext.
+    let audit_signer = match rollback.audit_sign_key.as_deref() {
+        Some(key_ref) if rollback.audit_integrity => Some(prepare_audit_signer(key_ref)?),
+        _ => None,
+    };
     let (rollback_state, rollback_status) =
         initialize_rollback_state(rollback, caps, audit_state.as_ref(), silent)?;
 
@@ -382,6 +391,7 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
                 audit_recorder.as_ref(),
                 audit_snapshot_state,
                 executable_identity.cloned(),
+                audit_signer.as_ref(),
                 proxy_handle,
                 command,
                 &started,
@@ -404,6 +414,7 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
                 audit_recorder.as_ref(),
                 audit_snapshot_state,
                 executable_identity.cloned(),
+                audit_signer.as_ref(),
                 proxy_handle,
                 command,
                 &started,

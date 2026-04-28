@@ -1806,6 +1806,26 @@ pub struct RunArgs {
     #[arg(long, help_heading = "OPTIONS")]
     pub audit_integrity: bool,
 
+    /// Sign the audit-integrity Merkle root with a configured trust key.
+    ///
+    /// Plan 22-05a Task 7 (upstream `6ecade2e`): when set, after the audit
+    /// recorder finalizes, the supervisor signs the (`chain_head`,
+    /// `merkle_root`, `session_id`) tuple via fork's existing
+    /// `nono::trust::signing::sign_files` and writes the resulting Sigstore
+    /// bundle to `audit-attestation.bundle` in the session directory.
+    ///
+    /// Key resolution flows through `nono::keystore::load_secret_by_ref`,
+    /// so the value can be a `keystore://<credential>` URI. If the
+    /// referenced key is missing the CLI fails fail-closed (default
+    /// provisioning model: user pre-provisions key).
+    #[arg(
+        long,
+        value_name = "KEY_REF",
+        help_heading = "OPTIONS",
+        requires = "audit_integrity"
+    )]
+    pub audit_sign_key: Option<String>,
+
     /// Disable trust verification (not recommended for production)
     #[arg(long, help_heading = "OPTIONS")]
     pub trust_override: bool,
@@ -2308,12 +2328,19 @@ pub struct AuditShowArgs {
 }
 
 /// Arguments for `nono audit verify <session-id>` (Plan 22-05a Task 6,
-/// upstream `0b1822a9`).
+/// upstream `0b1822a9`; Task 7 attestation pin per upstream `6ecade2e`).
 #[derive(Parser, Debug)]
 #[command(disable_help_flag = true)]
 pub struct AuditVerifyArgs {
     /// Session ID to verify (e.g., 20260214-143022-12345)
     pub session_id: String,
+
+    /// Optional PEM-encoded public key file used to pin attestation
+    /// verification to a specific signer (Plan 22-05a Task 7, upstream
+    /// `6ecade2e`). When omitted, the embedded public key from the
+    /// `audit-attestation.bundle` itself is used (self-verification).
+    #[arg(long, value_name = "PATH")]
+    pub public_key_file: Option<PathBuf>,
 
     /// Output as JSON
     #[arg(long)]

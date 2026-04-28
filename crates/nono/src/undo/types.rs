@@ -242,6 +242,26 @@ pub struct ExecutableIdentity {
     pub sha256: ContentHash,
 }
 
+/// Signed attestation metadata for an audit session (AUD-02).
+///
+/// Plan 22-05a Task 7 (upstream `6ecade2e`): when `--audit-sign-key` is set,
+/// the supervisor signs the audit-integrity Merkle root + chain head +
+/// session ID and writes a Sigstore bundle to
+/// `<session_dir>/audit-attestation.bundle`. This summary records the
+/// metadata needed to verify the bundle later (`key_id`, base64 DER public
+/// key, predicate type, bundle filename).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditAttestationSummary {
+    /// Predicate type embedded in the DSSE/in-toto statement.
+    pub predicate_type: String,
+    /// Signer key identifier derived from the public key.
+    pub key_id: String,
+    /// DER-encoded public key as base64, used for standalone keyed verification.
+    pub public_key: String,
+    /// Filename of the bundle written into the session directory.
+    pub bundle_filename: String,
+}
+
 /// Rollback availability status for a session.
 ///
 /// Recorded in [`SessionMetadata`] so that `nono rollback list/show/restore`
@@ -316,6 +336,11 @@ pub struct SessionMetadata {
     /// Optional integrity summary for the append-only audit log
     #[serde(default)]
     pub audit_integrity: Option<AuditIntegritySummary>,
+    /// Optional DSSE/in-toto attestation summary for the audit-integrity
+    /// commitments (`audit-attestation.bundle` written into the session
+    /// directory). AUD-02 (upstream `6ecade2e`).
+    #[serde(default)]
+    pub audit_attestation: Option<AuditAttestationSummary>,
     /// Whether rollback snapshots were captured for this session.
     ///
     /// Defaults to `Available` when deserializing older payloads that lack this
@@ -485,6 +510,7 @@ mod tests {
             network_events: vec![],
             audit_event_count: 0,
             audit_integrity: None,
+            audit_attestation: None,
             rollback_status: RollbackStatus::Skipped,
         };
         let json = serde_json::to_string(&meta).expect("serialize");
@@ -509,6 +535,7 @@ mod tests {
             network_events: vec![],
             audit_event_count: 0,
             audit_integrity: None,
+            audit_attestation: None,
             rollback_status: RollbackStatus::FailedWarningOnly {
                 reason: reason.clone(),
             },

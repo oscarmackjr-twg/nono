@@ -1432,6 +1432,7 @@ mod tests {
             network_events: vec![],
             audit_event_count: 0,
             audit_integrity: None,
+            audit_attestation: None,
             rollback_status: nono::undo::RollbackStatus::Available,
         };
 
@@ -1467,6 +1468,7 @@ mod tests {
             network_events: vec![],
             audit_event_count: 0,
             audit_integrity: None,
+            audit_attestation: None,
             rollback_status: nono::undo::RollbackStatus::Available,
         };
         let meta2 = SessionMetadata {
@@ -1482,6 +1484,7 @@ mod tests {
             network_events: vec![],
             audit_event_count: 0,
             audit_integrity: None,
+            audit_attestation: None,
             rollback_status: nono::undo::RollbackStatus::Available,
         };
 

@@ -1,3 +1,4 @@
+use crate::audit_attestation::{sign_session_attestation, AuditSigner};
 use crate::audit_integrity::AuditRecorder;
 use crate::launch_runtime::{rollback_base_exclusions, RollbackLaunchOptions};
 use crate::{config, output, rollback_preflight, rollback_session, rollback_ui};
@@ -55,6 +56,14 @@ pub(crate) struct RollbackExitContext<'a> {
     /// `SessionMetadata.executable_identity`. Authenticode addition is
     /// reserved for Plan 22-05b (sibling field; no mutation of this type).
     pub(crate) executable_identity: Option<ExecutableIdentity>,
+    /// Upstream 6ecade2e (AUD-02): when `--audit-sign-key` is set,
+    /// `finalize_supervised_exit` signs the audit-integrity Merkle root +
+    /// chain head + session id and writes
+    /// `<session_dir>/audit-attestation.bundle`. The resulting
+    /// `AuditAttestationSummary` is persisted into
+    /// `SessionMetadata.audit_attestation`. `None` when attestation was
+    /// not requested.
+    pub(crate) audit_signer: Option<&'a AuditSigner>,
     pub(crate) proxy_handle: Option<&'a nono_proxy::server::ProxyHandle>,
     pub(crate) started: &'a str,
     pub(crate) ended: &'a str,
@@ -512,6 +521,7 @@ pub(crate) fn finalize_supervised_exit(ctx: RollbackExitContext<'_>) -> Result<(
         audit_recorder,
         audit_snapshot_state,
         executable_identity,
+        audit_signer,
         proxy_handle,
         started,
         ended,
@@ -544,6 +554,20 @@ pub(crate) fn finalize_supervised_exit(ctx: RollbackExitContext<'_>) -> Result<(
         (0, None)
     };
 
+    // Upstream 6ecade2e (AUD-02): sign the integrity summary if a signer
+    // was prepared. Bundle is written to `<session_dir>/audit-attestation.bundle`
+    // BEFORE the SessionMetadata write so the metadata's
+    // `audit_attestation` field can record the resulting summary.
+    let audit_attestation_summary = match (audit_signer, audit_integrity_summary.as_ref(), audit_state) {
+        (Some(signer), Some(summary), Some(state)) => Some(sign_session_attestation(
+            signer,
+            &state.session_dir,
+            &state.session_id,
+            summary,
+        )?),
+        _ => None,
+    };
+
     let mut audit_saved = false;
 
     if let Some((mut manager, baseline, tracked_paths, atomic_temp_before)) = rollback_state {
@@ -565,6 +589,7 @@ pub(crate) fn finalize_supervised_exit(ctx: RollbackExitContext<'_>) -> Result<(
             network_events: std::mem::take(&mut network_events),
             audit_event_count,
             audit_integrity: audit_integrity_summary.clone(),
+            audit_attestation: audit_attestation_summary.clone(),
             rollback_status: RollbackStatus::Available,
         };
         manager.save_session_metadata(&meta)?;
@@ -607,6 +632,7 @@ pub(crate) fn finalize_supervised_exit(ctx: RollbackExitContext<'_>) -> Result<(
                 network_events,
                 audit_event_count,
                 audit_integrity: audit_integrity_summary,
+                audit_attestation: audit_attestation_summary,
                 rollback_status,
             };
             nono::undo::SnapshotManager::write_session_metadata(&audit_state.session_dir, &meta)?;

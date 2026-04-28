@@ -4,6 +4,7 @@
 //! sandboxed sessions and verifying the cryptographic integrity of an
 //! audit-protected session.
 
+use crate::audit_attestation::verify_audit_attestation;
 use crate::audit_integrity::verify_audit_log;
 use crate::cli::{AuditArgs, AuditCommands, AuditListArgs, AuditShowArgs, AuditVerifyArgs};
 use crate::rollback_session::{discover_sessions, load_session, SessionInfo};
@@ -426,8 +427,26 @@ fn cmd_verify(args: AuditVerifyArgs) -> Result<()> {
     let session = load_session(&args.session_id)?;
     let result = verify_audit_log(&session.dir, session.metadata.audit_integrity.as_ref())?;
 
+    // Plan 22-05a Task 7 (upstream 6ecade2e): if the session was signed,
+    // verify the attestation bundle. Optional --public-key-file pins
+    // verification to a specific signer.
+    let attestation_status = if let Some(att) = session.metadata.audit_attestation.as_ref() {
+        Some(verify_audit_attestation(
+            &session.dir,
+            att,
+            args.public_key_file.as_deref(),
+        )?)
+    } else {
+        None
+    };
+
     if args.json {
-        let json = serde_json::to_string_pretty(&result)
+        let output = serde_json::json!({
+            "integrity": &result,
+            "attestation_present": session.metadata.audit_attestation.is_some(),
+            "attestation_valid": attestation_status,
+        });
+        let json = serde_json::to_string_pretty(&output)
             .map_err(|e| NonoError::Snapshot(format!("JSON serialization failed: {e}")))?;
         println!("{json}");
     } else {
@@ -459,9 +478,13 @@ fn cmd_verify(args: AuditVerifyArgs) -> Result<()> {
             "  Merkle root match:   {}",
             yes_no_color(result.merkle_root_matches),
         );
+        if let Some(att_ok) = attestation_status {
+            eprintln!("  Attestation:         {}", yes_no_color(att_ok));
+        }
     }
 
-    if !result.is_valid() {
+    let attestation_failed = matches!(attestation_status, Some(false));
+    if !result.is_valid() || attestation_failed {
         return Err(NonoError::Snapshot(format!(
             "audit verification failed for session {}",
             session.metadata.session_id,
