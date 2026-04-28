@@ -372,18 +372,14 @@ fn print_show_json(session: &SessionInfo) -> Result<()> {
     // Plan 22-05a Decision 5 minimal scope: include audit-integrity summary
     // in JSON output when present. Absent for sessions recorded before this
     // commit landed; null is the canonical absence marker.
-    let audit_integrity_json = session
-        .metadata
-        .audit_integrity
-        .as_ref()
-        .map(|s| {
-            serde_json::json!({
-                "hash_algorithm": s.hash_algorithm,
-                "event_count": s.event_count,
-                "chain_head": s.chain_head.to_string(),
-                "merkle_root": s.merkle_root.to_string(),
-            })
-        });
+    let audit_integrity_json = session.metadata.audit_integrity.as_ref().map(|s| {
+        serde_json::json!({
+            "hash_algorithm": s.hash_algorithm,
+            "event_count": s.event_count,
+            "chain_head": s.chain_head.to_string(),
+            "merkle_root": s.merkle_root.to_string(),
+        })
+    });
 
     // AUD-03 SHA-256 portion (upstream 02ee0bd1): include executable
     // identity in JSON output when present.

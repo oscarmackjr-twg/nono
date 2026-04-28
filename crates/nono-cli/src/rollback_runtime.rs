@@ -575,15 +575,16 @@ pub(crate) fn finalize_supervised_exit(ctx: RollbackExitContext<'_>) -> Result<(
     // was prepared. Bundle is written to `<session_dir>/audit-attestation.bundle`
     // BEFORE the SessionMetadata write so the metadata's
     // `audit_attestation` field can record the resulting summary.
-    let audit_attestation_summary = match (audit_signer, audit_integrity_summary.as_ref(), audit_state) {
-        (Some(signer), Some(summary), Some(state)) => Some(sign_session_attestation(
-            signer,
-            &state.session_dir,
-            &state.session_id,
-            summary,
-        )?),
-        _ => None,
-    };
+    let audit_attestation_summary =
+        match (audit_signer, audit_integrity_summary.as_ref(), audit_state) {
+            (Some(signer), Some(summary), Some(state)) => Some(sign_session_attestation(
+                signer,
+                &state.session_dir,
+                &state.session_id,
+                summary,
+            )?),
+            _ => None,
+        };
 
     let mut audit_saved = false;
 

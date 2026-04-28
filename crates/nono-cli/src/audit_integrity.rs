@@ -309,9 +309,8 @@ pub(crate) fn verify_audit_log(
             records_verified = false;
         }
 
-        let event_bytes = serde_json::to_vec(&record.event).map_err(|e| {
-            NonoError::Snapshot(format!("Failed to re-serialize audit event: {e}"))
-        })?;
+        let event_bytes = serde_json::to_vec(&record.event)
+            .map_err(|e| NonoError::Snapshot(format!("Failed to re-serialize audit event: {e}")))?;
         let recomputed_leaf = hash_event(&event_bytes);
         if recomputed_leaf != record.leaf_hash {
             records_verified = false;

@@ -194,12 +194,11 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
     // Hash failure is non-fatal for the launch path: `crate::exec_identity::compute`
     // bubbles `NonoError::CommandExecution`; we propagate that so the user
     // sees a concrete diagnostic rather than running with no audit identity.
-    let executable_identity =
-        if matches!(strategy, exec_strategy::ExecStrategy::Supervised) {
-            Some(crate::exec_identity::compute(&resolved_program)?)
-        } else {
-            None
-        };
+    let executable_identity = if matches!(strategy, exec_strategy::ExecStrategy::Supervised) {
+        Some(crate::exec_identity::compute(&resolved_program)?)
+    } else {
+        None
+    };
 
     apply_pre_fork_sandbox(strategy, &caps, flags.silent)?;
 

@@ -256,13 +256,9 @@ mod tests {
             public_key_b64,
         };
 
-        let summary = sign_session_attestation(
-            &signer,
-            tmp.path(),
-            "20260421-100000-1234",
-            &fake_summary(),
-        )
-        .unwrap();
+        let summary =
+            sign_session_attestation(&signer, tmp.path(), "20260421-100000-1234", &fake_summary())
+                .unwrap();
 
         assert_eq!(summary.bundle_filename, "audit-attestation.bundle");
         assert_eq!(summary.key_id, key_id);
