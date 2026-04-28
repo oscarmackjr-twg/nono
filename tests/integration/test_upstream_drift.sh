@@ -196,6 +196,247 @@ fi
 rm -f "/tmp/nono-drift-pwn-$$" 2>/dev/null || true
 
 # ===========================================================================
+# Test 8: Template file presence + D-19 trailer block (DRIFT-02)
+# ===========================================================================
+echo ""
+echo "Template file presence + D-19 trailer block:"
+TEMPLATE=".planning/templates/upstream-sync-quick.md"
+TEMPLATE_PATH="$REPO_ROOT/$TEMPLATE"
+
+if [[ -f "$TEMPLATE_PATH" ]]; then
+    pass "template file exists at $TEMPLATE"
+else
+    fail "template file missing at $TEMPLATE"
+fi
+
+# 6-line D-19 trailer block, verified per-line.
+if grep -qE '^Upstream-commit: \{[a-z_]+\}' "$TEMPLATE_PATH"; then
+    pass "trailer line 1 (Upstream-commit) present"
+else
+    fail "trailer line 1 (Upstream-commit) missing or wrong placeholder shape"
+fi
+
+if grep -qE '^Upstream-tag: \{[a-z_]+\}' "$TEMPLATE_PATH"; then
+    pass "trailer line 2 (Upstream-tag) present"
+else
+    fail "trailer line 2 (Upstream-tag) missing"
+fi
+
+# Lowercase 'a' in Upstream-author — D-19 LOCKED
+if grep -qE '^Upstream-author: \{[a-z_]+\}' "$TEMPLATE_PATH"; then
+    pass "trailer line 3 (Upstream-author, lowercase 'a') present"
+else
+    fail "trailer line 3 (Upstream-author) missing or capitalized 'Upstream-Author' (D-19 violation)"
+fi
+
+if grep -qE '^Upstream-Author' "$TEMPLATE_PATH"; then
+    fail "FORBIDDEN capitalized 'Upstream-Author' present (D-19: must be lowercase 'a')"
+else
+    pass "no FORBIDDEN 'Upstream-Author' (capital A) present"
+fi
+
+if grep -qE '^Co-Authored-By: \{[a-z_]+\}' "$TEMPLATE_PATH"; then
+    pass "trailer line 4 (Co-Authored-By) present"
+else
+    fail "trailer line 4 (Co-Authored-By) missing"
+fi
+
+# TWO Signed-off-by lines (DCO + GitHub attribution)
+sob_count=$(grep -c '^Signed-off-by: ' "$TEMPLATE_PATH" || true)
+if [[ "$sob_count" -eq 2 ]]; then
+    pass "exactly 2 Signed-off-by lines (DCO + GitHub attribution)"
+else
+    fail "expected 2 Signed-off-by lines, got $sob_count (D-19 violation)"
+fi
+
+# ===========================================================================
+# Test 9: Fork-divergence catalog explicit entries (DRIFT-02)
+# ===========================================================================
+echo ""
+echo "Fork-divergence catalog explicit entries:"
+for entry in 'validate_path_within' 'load_production_trusted_root' 'hooks.rs' '#[cfg(target_os = "windows")]'; do
+    if grep -qF "$entry" "$TEMPLATE_PATH"; then
+        pass "fork-divergence catalog mentions: $entry"
+    else
+        fail "fork-divergence catalog missing: $entry"
+    fi
+done
+
+# Deferred enum variants — accept either ArtifactType::Plugin OR generic phrase
+if grep -qE '(ArtifactType::Plugin|deferred enum variants?)' "$TEMPLATE_PATH"; then
+    pass "fork-divergence catalog mentions deferred enum variants"
+else
+    fail "fork-divergence catalog missing deferred-enum-variants entry"
+fi
+
+# ===========================================================================
+# Test 10: Placeholder smoke test (T-24-05 mitigation)
+# ===========================================================================
+echo ""
+echo "Placeholder smoke test (T-24-05):"
+SMOKE_TMPDIR=$(mktemp -d)
+cleanup_smoke_tmpdir() {
+    if [[ -n "${SMOKE_TMPDIR:-}" && -d "$SMOKE_TMPDIR" ]]; then
+        rm -rf "$SMOKE_TMPDIR"
+    fi
+}
+# Chain to existing EXIT trap for tmp_repo cleanup; both must run.
+trap 'cleanup_tmp_repo; cleanup_smoke_tmpdir' EXIT
+
+# Substitute every {name} placeholder with sample values for a hypothetical v0.41.0 sync.
+# Use a stable file rewrite via temp file rather than `sed -i` to avoid macOS BSD vs GNU
+# divergence.
+sed \
+    -e 's|{quick_slug}|260501-upr-sync-v041|g' \
+    -e 's|{date}|2026-05-01|g' \
+    -e 's|{from_tag}|v0.40.1|g' \
+    -e 's|{to_tag}|v0.41.0|g' \
+    -e 's|{commit_count}|18|g' \
+    -e 's|{insertions}|3|g' \
+    -e 's|{deletions}|0|g' \
+    -e 's|{n_profile}|3|g' \
+    -e 's|{n_policy}|2|g' \
+    -e 's|{n_package}|4|g' \
+    -e 's|{n_proxy}|1|g' \
+    -e 's|{n_audit}|6|g' \
+    -e 's|{n_other}|2|g' \
+    -e 's|{upstream_sha_abbrev}|abc12345|g' \
+    -e 's|{upstream_sha_full}|abc12345abc12345abc12345abc12345abc12345|g' \
+    -e 's|{upstream_tag}|v0.41.0|g' \
+    -e 's|{upstream_author_name}|Upstream Author|g' \
+    -e 's|{upstream_author_email}|upstream@example.com|g' \
+    -e 's|{fork_author_name}|Fork Author|g' \
+    -e 's|{fork_author_email}|fork@example.com|g' \
+    -e 's|{fork_author_handle}|fork-handle|g' \
+    -e 's|{fork_branch}|windows-squash|g' \
+    "$TEMPLATE_PATH" > "$SMOKE_TMPDIR/PLAN.md"
+
+# Assert no remaining {placeholder} markers.
+# Strip HTML comment blocks before scanning. The template's leading and section
+# comments contain illustrative placeholder syntax (e.g., `{placeholder}` in the
+# smoke-check instruction and `{sha} {subject} ({adds}/{dels})` in the example
+# commit-list format) — these are maintainer guidance, not unfilled fields, and
+# they survive sed substitution by design. The maintainer's own smoke-check
+# (per the leading comment block) operates on the user-visible content with the
+# same comment-stripping semantics, so the test mirrors that contract.
+stripped=$(awk '
+    /<!--/{in_comment=1}
+    !in_comment{print}
+    /-->/{in_comment=0}
+' "$SMOKE_TMPDIR/PLAN.md")
+remaining=$(echo "$stripped" | grep -oE '\{[a-z_]+\}' || true)
+remaining_count=0
+if [[ -n "$remaining" ]]; then
+    remaining_count=$(echo "$remaining" | grep -c '^' || true)
+fi
+if [[ "$remaining_count" -eq 0 ]]; then
+    pass "all {placeholder} markers substituted cleanly (HTML comments excluded)"
+else
+    fail "unfilled placeholders remain in rendered template (outside HTML comments): $remaining"
+fi
+
+# Assert frontmatter delimiter is present.
+# The template has a leading HTML comment block, so the first --- frontmatter line is
+# not literally line 1. Use grep to assert it appears in the file.
+if grep -qE '^---$' "$SMOKE_TMPDIR/PLAN.md"; then
+    pass "rendered PLAN.md has frontmatter delimiter"
+else
+    fail "rendered PLAN.md missing frontmatter ---"
+fi
+
+if grep -qE '^slug: 260501-upr-sync-v041$' "$SMOKE_TMPDIR/PLAN.md"; then
+    pass "rendered slug field substituted correctly"
+else
+    fail "rendered slug field missing or incorrect"
+fi
+
+if grep -qE '^range: v0\.40\.1\.\.v0\.41\.0$' "$SMOKE_TMPDIR/PLAN.md"; then
+    pass "rendered range field substituted correctly"
+else
+    fail "rendered range field missing or incorrect"
+fi
+
+# Assert D-19 trailer block has expected structure post-substitution
+if grep -qE '^Upstream-commit: abc12345$' "$SMOKE_TMPDIR/PLAN.md"; then
+    pass "rendered D-19 trailer Upstream-commit substituted"
+else
+    fail "rendered D-19 trailer Upstream-commit missing"
+fi
+
+rendered_sob=$(grep -c '^Signed-off-by: ' "$SMOKE_TMPDIR/PLAN.md" || true)
+if [[ "$rendered_sob" -eq 2 ]]; then
+    pass "rendered D-19 trailer has 2 Signed-off-by lines"
+else
+    fail "rendered D-19 trailer Signed-off-by count wrong (got $rendered_sob)"
+fi
+
+# ===========================================================================
+# Test 11: Documentation cross-links (DRIFT-02)
+# ===========================================================================
+echo ""
+echo "Documentation cross-links:"
+PROJECT_MD="$REPO_ROOT/.planning/PROJECT.md"
+DOCS_MDX="$REPO_ROOT/docs/cli/development/upstream-drift.mdx"
+
+# .mdx file exists (D-16: NOT .md)
+if [[ -f "$DOCS_MDX" ]]; then
+    pass "docs file exists at docs/cli/development/upstream-drift.mdx (D-16 .mdx convention)"
+else
+    fail "docs file missing at docs/cli/development/upstream-drift.mdx"
+fi
+
+# .md form does NOT exist (D-16 acceptance: enforces .mdx convention)
+if [[ ! -f "$REPO_ROOT/docs/cli/development/upstream-drift.md" ]]; then
+    pass "no stray .md form (D-16 .mdx convention upheld)"
+else
+    fail "FORBIDDEN docs/cli/development/upstream-drift.md exists (must be .mdx per D-16)"
+fi
+
+# .mdx Mintlify frontmatter present
+if grep -qE '^title: Upstream Drift Check$' "$DOCS_MDX"; then
+    pass "docs has Mintlify title frontmatter"
+else
+    fail "docs missing Mintlify title frontmatter"
+fi
+
+if grep -qE '^description: ' "$DOCS_MDX"; then
+    pass "docs has Mintlify description frontmatter"
+else
+    fail "docs missing Mintlify description frontmatter"
+fi
+
+# .mdx cross-references to script + template + Upstream-author shape
+for ref in 'make check-upstream-drift' 'upstream-sync-quick.md' 'Upstream-author'; do
+    if grep -qF "$ref" "$DOCS_MDX"; then
+        pass "docs references: $ref"
+    else
+        fail "docs missing reference to: $ref"
+    fi
+done
+
+# PROJECT.md has new section + cross-links
+if grep -qE '^## Upstream Parity Process$' "$PROJECT_MD"; then
+    pass "PROJECT.md has '## Upstream Parity Process' H2 section"
+else
+    fail "PROJECT.md missing '## Upstream Parity Process' H2 section"
+fi
+
+for ref in '.planning/templates/upstream-sync-quick.md' 'docs/cli/development/upstream-drift' 'make check-upstream-drift'; do
+    if grep -qF "$ref" "$PROJECT_MD"; then
+        pass "PROJECT.md references: $ref"
+    else
+        fail "PROJECT.md missing reference to: $ref"
+    fi
+done
+
+# PROJECT.md ordering: Upstream Parity Process must come BEFORE Evolution
+if awk '/^## Upstream Parity Process$/{p=NR} /^## Evolution$/{e=NR} END{exit !(p && e && p < e)}' "$PROJECT_MD"; then
+    pass "PROJECT.md section ordering: Upstream Parity Process precedes Evolution"
+else
+    fail "PROJECT.md section ordering wrong"
+fi
+
+# ===========================================================================
 # Summary
 # ===========================================================================
 echo ""
