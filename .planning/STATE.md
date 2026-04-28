@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.2
 milestone_name: Windows/macOS Parity Sweep
 status: executing
-stopped_at: Phase 24 (parity-drift-prevention) complete — 2/2 plans, verification passed (16/16 must-haves), code review found 2M/5L issues (none blocking).
-last_updated: "2026-04-28T04:30:00.000Z"
+stopped_at: Plan 22-04 OAUTH complete; ready to spawn Plan 22-05 AUD
+last_updated: "2026-04-28T13:55:00.000Z"
 last_activity: 2026-04-28
 progress:
   total_phases: 25
   completed_phases: 21
   total_plans: 69
-  completed_plans: 66
-  percent: 96
+  completed_plans: 68
+  percent: 99
 ---
 
 # Project State: nono — v2.2 Windows/macOS Parity Sweep
