@@ -8,9 +8,22 @@ use std::io::Write;
 use std::path::PathBuf;
 
 const AUDIT_EVENTS_FILENAME: &str = "audit-events.ndjson";
-const EVENT_DOMAIN: &[u8] = b"nono.audit.event.v1\n";
-const CHAIN_DOMAIN: &[u8] = b"nono.audit.chain.v1\n";
+// Plan 22-05a Task 5 (upstream 7b7815f7): unified Alpha integrity schema.
+// All audit-integrity hashing now flows through a single "alpha" domain
+// separator across event leaf, hash-chain, and Merkle root computation.
+// This is the schema downstream cherry-picks (`0b1822a9` audit verify,
+// `6ecade2e` attestation) verify against, and the schema Plan 22-05b's
+// fork-only Windows signature-trust addition extends as a SIBLING field
+// on the audit envelope (per RESEARCH Contradiction #2 — no mutation of
+// upstream's `ExecutableIdentity`).
+const EVENT_DOMAIN: &[u8] = b"nono.audit.event.alpha\n";
+const CHAIN_DOMAIN: &[u8] = b"nono.audit.chain.alpha\n";
+const MERKLE_NODE_DOMAIN_ALPHA: &[u8] = b"nono.audit.merkle.alpha\n";
 const HASH_ALGORITHM: &str = "sha256";
+/// Schema label persisted in `AuditIntegritySummary.hash_algorithm` /
+/// downstream verification fixtures. "alpha" is the post-22-05a label.
+#[allow(dead_code)] // consumed by audit verify in Task 6
+pub(crate) const MERKLE_SCHEME_LABEL: &str = "alpha";
 
 #[derive(Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -176,8 +189,14 @@ fn hash_chain(previous: Option<&ContentHash>, leaf_hash: &ContentHash) -> Conten
 }
 
 fn merkle_root(leaves: &[ContentHash]) -> ContentHash {
+    // Alpha integrity schema (upstream 7b7815f7): every Merkle node is
+    // domain-separated with `MERKLE_NODE_DOMAIN_ALPHA` so verifiers can
+    // tell apart Alpha-schema digests from any future scheme version.
+    // Empty leaf set hashes the empty string under the same domain prefix.
     if leaves.is_empty() {
-        return ContentHash::from_bytes(Sha256::digest(b"").into());
+        let mut hasher = Sha256::new();
+        hasher.update(MERKLE_NODE_DOMAIN_ALPHA);
+        return ContentHash::from_bytes(hasher.finalize().into());
     }
 
     let mut level: Vec<[u8; 32]> = leaves.iter().map(|leaf| *leaf.as_bytes()).collect();
@@ -187,6 +206,7 @@ fn merkle_root(leaves: &[ContentHash]) -> ContentHash {
             let left = pair[0];
             let right = pair.get(1).copied().unwrap_or(left);
             let mut hasher = Sha256::new();
+            hasher.update(MERKLE_NODE_DOMAIN_ALPHA);
             hasher.update(left);
             hasher.update(right);
             next.push(hasher.finalize().into());
