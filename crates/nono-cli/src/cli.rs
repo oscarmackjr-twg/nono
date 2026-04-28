@@ -4187,9 +4187,15 @@ mod tests {
 
     /// All subcommand names that must appear in the root help template.
     /// If you add a new command to the `Commands` enum, add it here too.
+    ///
+    /// Plan 22-05b Task 3 (upstream `4f9552ec`): `prune` was removed from
+    /// this list and replaced by `session` because `Cmd::Prune` is now
+    /// `#[command(hide = true)]` — the hidden alias surfaces a stderr
+    /// deprecation note on every invocation but no longer appears in
+    /// `nono --help`. AUD-04 acceptance #3.
     const ALL_SUBCOMMANDS: &[&str] = &[
         "setup", "run", "shell", "wrap", "learn", "why", "ps", "stop", "detach", "attach", "logs",
-        "inspect", "prune", "rollback", "audit", "trust", "policy", "profile", "pull", "remove",
+        "inspect", "session", "rollback", "audit", "trust", "policy", "profile", "pull", "remove",
         "update", "search", "list",
     ];
 

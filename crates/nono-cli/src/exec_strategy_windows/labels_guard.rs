@@ -543,10 +543,7 @@ mod tests {
         // present (T-22-05-05 mitigation).
         let pre_drop_ledger = std::fs::read_to_string(&ledger_path)
             .expect("ledger file must exist after AuditRecorder lifecycle");
-        let pre_drop_lines: Vec<&str> = pre_drop_ledger
-            .lines()
-            .filter(|l| !l.is_empty())
-            .collect();
+        let pre_drop_lines: Vec<&str> = pre_drop_ledger.lines().filter(|l| !l.is_empty()).collect();
         assert_eq!(
             pre_drop_lines.len(),
             2,
