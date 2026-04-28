@@ -214,7 +214,7 @@ const ROOT_HELP_TEMPLATE: &str = "\
   attach     Re-attach to a running session
   logs       View runtime session event logs
   inspect    Show detailed runtime session state
-  prune      Clean up old runtime session files
+  session    Manage runtime session storage (cleanup)
   rollback   Manage rollback sessions (browse, restore, cleanup)
   audit      View audit trail of sandboxed commands
   trust      Manage file trust and attestation
@@ -407,7 +407,13 @@ const INSPECT_USAGE: &str = "\
 {after-help}";
 
 #[cfg(target_os = "windows")]
-const PRUNE_AFTER_HELP: &str = "\x1b[1mEXAMPLES\x1b[0m
+const PRUNE_AFTER_HELP: &str = "\x1b[1mDEPRECATED\x1b[0m
+  `nono prune` is deprecated; use `nono session cleanup` instead.
+  This alias is hidden from `nono --help` and will emit a deprecation
+  note to stderr on every invocation. Survival horizon: v2.3-milestone
+  scoping decision (Plan 22-05b Task 3, AUD-04 acceptance #3).
+
+\x1b[1mEXAMPLES\x1b[0m
   nono prune --dry-run                         # Preview what would be cleaned
   nono prune --older-than 7d                   # Remove exited sessions older than 7 days
   nono prune --older-than 12h                  # Remove exited sessions older than 12 hours
@@ -416,7 +422,13 @@ const PRUNE_AFTER_HELP: &str = "\x1b[1mEXAMPLES\x1b[0m
 ";
 
 #[cfg(not(target_os = "windows"))]
-const PRUNE_AFTER_HELP: &str = "EXAMPLES:
+const PRUNE_AFTER_HELP: &str = "DEPRECATED:
+    `nono prune` is deprecated; use `nono session cleanup` instead.
+    This alias is hidden from `nono --help` and will emit a deprecation
+    note to stderr on every invocation. Survival horizon: v2.3-milestone
+    scoping decision (Plan 22-05b Task 3, AUD-04 acceptance #3).
+
+EXAMPLES:
     # Preview what would be cleaned
     nono prune --dry-run
 
@@ -475,7 +487,7 @@ const ROOT_HELP_TEMPLATE: &str = "\
   attach     Attach to a detached runtime session
   logs       View runtime session event logs
   inspect    Show detailed runtime session state
-  prune      Clean up old runtime session files
+  session    Manage runtime session storage (cleanup)
   rollback   Manage rollback sessions (browse, restore, cleanup)
   audit      View audit trail of sandboxed commands
   trust      Manage file trust and attestation
@@ -779,7 +791,13 @@ pub enum Commands {
     #[command(after_help = INSPECT_AFTER_HELP)]
     Inspect(InspectArgs),
 
-    /// Clean up old session files
+    /// [DEPRECATED — use `nono session cleanup`] Clean up old session files
+    ///
+    /// Plan 22-05b Task 3 (upstream `4f9552ec`): hidden compatibility alias
+    /// for `nono session cleanup`. Surfaces a stderr deprecation note on
+    /// every invocation; alias survival horizon is a v2.3-milestone
+    /// scoping decision (CONTEXT Claude's Discretion). AUD-04 acceptance #3.
+    #[command(hide = true)]
     #[command(help_template = PRUNE_USAGE)]
     #[command(after_help = PRUNE_AFTER_HELP)]
     Prune(PruneArgs),

@@ -84,9 +84,21 @@ fn dispatch_command(
         Commands::Inspect(args) => run_command_with_update(update_handle, silent, || {
             session_commands::run_inspect(&args)
         }),
-        Commands::Prune(args) => {
-            run_command_with_update(update_handle, silent, || session_commands::run_prune(&args))
-        }
+        Commands::Prune(args) => run_command_with_update(update_handle, silent, || {
+            // Plan 22-05b Task 3 (upstream `4f9552ec`): emit a stderr
+            // deprecation note on every `nono prune` invocation. The
+            // hidden alias delegates to the unchanged `run_prune` worker
+            // so CLEAN-04 invariants stay byte-identical (Decision 2
+            // LOCKED reframe). AUD-04 acceptance #3.
+            //
+            // Silent-mode preserves the deprecation note: AUD-04
+            // acceptance #3 says "still works AND surfaces a deprecation
+            // note" — silencing it would defeat the migration prompt.
+            eprintln!(
+                "warning: `nono prune` is deprecated; use `nono session cleanup` instead"
+            );
+            session_commands::run_prune(&args)
+        }),
         Commands::Session(args) => run_command_with_update(update_handle, silent, || {
             // Plan 22-05b Task 2 (upstream `4f9552ec`): `nono session cleanup`
             // is the renamed entry point. It routes to the unchanged
