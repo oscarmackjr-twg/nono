@@ -65,7 +65,7 @@ Full details: `.planning/milestones/v2.1-ROADMAP.md`.
 
 **Requirement coverage:** 21 requirements across 6 categories (PROF, POLY, PKG, OAUTH, AUD, DRIFT). All mapped; zero orphans.
 
-- [ ] **Phase 22: UPST2 — Upstream v0.38–v0.40 Parity Sync** (2/5 plans) — ingest cross-platform feature clusters (profile struct, policy tightening, package manager, OAuth2 proxy, audit integrity) with Windows parity in lockstep — Plan 22-01 (PROF) complete (12 commits, origin/main = d7fc4ed8); Plan 22-02 (POLY) complete (7 commits, HEAD = 490a8a5c, ready to push)
+- [ ] **Phase 22: UPST2 — Upstream v0.38–v0.40 Parity Sync** (3/5 plans) — ingest cross-platform feature clusters (profile struct, policy tightening, package manager, OAuth2 proxy, audit integrity) with Windows parity in lockstep — Plan 22-01 (PROF) complete (12 commits, origin/main = d7fc4ed8); Plan 22-02 (POLY) complete (7 commits, HEAD = 490a8a5c, ready to push); Plan 22-03 (PKG) **partial close** (6/8 cherry-picks, 2 deferred to v2.3 carry-forward — see backlog below)
 - [ ] **Phase 23: Windows Audit-Event Retrofit** (0/1 plan) — wire Windows supervisor's 5 AIPC broker paths (File, Socket, Pipe, JobObject, Event, Mutex) into the Phase 22-05 ledger
 - [x] **Phase 24: Parity-Drift Prevention** (2/2 plans, 2026-04-27) — `scripts/check-upstream-drift` tooling + GSD quick-task template for upstream-sync cadence
 
@@ -175,6 +175,16 @@ Full details: `.planning/milestones/v2.1-ROADMAP.md`.
 | 19. Cleanup (CLEAN) | v2.1 | 4/4 | Complete | 2026-04-19 |
 | 20. Upstream Parity Sync (UPST) | v2.1 | 4/4 | Complete | 2026-04-19 |
 | 21. Windows Single-File Grants (WSFG) | v2.1 | 5/5 | Complete-with-issues (supervisor-pipe regression resolved in-flight; HUMAN-UAT folded into Phase 18.1) | 2026-04-20 |
-| 22. UPST2 — Upstream v0.38–v0.40 Parity Sync | v2.2 | 0/5 | Pending | — |
+| 22. UPST2 — Upstream v0.38–v0.40 Parity Sync | v2.2 | 3/5 | In progress (22-01, 22-02 complete; 22-03 partial close — 6/8 cherry-picks; 2 deferred to v2.3 backlog) | — |
 | 23. Windows Audit-Event Retrofit | v2.2 | 0/1 | Pending | — |
 | 24. Parity-Drift Prevention | v2.2 | 2/2 | Complete | 2026-04-27 |
+
+## Backlog (v2.3 carry-forward)
+
+- **PKG-streaming follow-up** (deferred from Plan 22-03, 2026-04-28). Land the two PKG cherry-picks held back from 22-03's chain: upstream `58b5a24e` (`validate_relative_path` input-string check) and `9ebad89a` (streaming `bytes`→`PathBuf` refactor + `tempfile::TempDir` + size limits + HTTP timeouts + `semver` dep). Prerequisites the follow-up plan must own:
+  1. Introduce `ArtifactType::Plugin` enum variant + plumbing (closes the deferred-divergence comment at `crates/nono-cli/src/package_cmd.rs:631-643`).
+  2. Decide explicitly whether the fork keeps `validate_path_within` (canonicalize-and-component-compare) as defense-in-depth alongside upstream's `validate_relative_path` input-string pre-check, or adopts upstream's pattern verbatim. **Recommendation: keep both** — fork's stance is stricter and matches CLAUDE.md § Path Handling.
+  3. Cherry-pick `58b5a24e` with `validate_path_within` retained as belt-and-suspenders.
+  4. Cherry-pick `9ebad89a` with the streaming + tempdir + semver machinery, plus the `bundle_json` field on `DownloadedArtifact` that 22-03's `73e1e3b8` skipped.
+  5. Cherry-pick `115b5cfa` (`load_registry_profile` auto-pull) which Plan 22-01's empty provenance commit `3bde347c` deferred until package machinery landed.
+  Rationale: each prerequisite is a Rule-4 architectural decision that exceeds cherry-pick scope. Hand-merging 9ebad89a (~+267/-109 LOC across 5 files) under cherry-pick pressure is the highest-risk option in the chain and is the wrong place to make those decisions. See `.planning/phases/22-upst2-upstream-v038-v040-parity-sync/22-03-PKG-SUMMARY.md` § Deviations and `22-03-PKG-PROGRESS.md` for full context.
