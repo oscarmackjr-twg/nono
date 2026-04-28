@@ -53,8 +53,9 @@ pub(crate) struct RollbackExitContext<'a> {
     /// Upstream 02ee0bd1 AUD-03 SHA-256 portion: canonical path + SHA-256
     /// of the launched binary, captured by `exec_identity::compute()`
     /// before sandbox apply for supervised sessions only. Persisted into
-    /// `SessionMetadata.executable_identity`. Authenticode addition is
-    /// reserved for Plan 22-05b (sibling field; no mutation of this type).
+    /// `SessionMetadata.executable_identity`. The Windows signature-trust
+    /// addition is reserved for Plan 22-05b (sibling field; no mutation
+    /// of this type).
     pub(crate) executable_identity: Option<ExecutableIdentity>,
     /// Upstream 6ecade2e (AUD-02): when `--audit-sign-key` is set,
     /// `finalize_supervised_exit` signs the audit-integrity Merkle root +
