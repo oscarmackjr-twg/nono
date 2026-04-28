@@ -994,7 +994,9 @@ grep -F 'upstream-sync-quick.md' docs/cli/development/upstream-drift.mdx
 
 **Calibration:** A2 and A8 are the two assumptions most worth raising during plan-bounce; both touch acceptance #1.
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+> All questions below were resolved during planning (2026-04-27) via user decision (Q1) or by the planner adopting the recommended interpretation (Q2/Q4/Q5/Q6). Resolutions are baked into 24-01-PLAN.md / 24-02-PLAN.md.
 
 1. **Path-filter vs SUMMARY ground truth (HIGH PRIORITY)**
 
@@ -1004,11 +1006,15 @@ grep -F 'upstream-sync-quick.md' docs/cli/development/upstream-drift.mdx
 
    **Recommendation:** Option (a) is unworkable — the SUMMARY's 78-commit number includes commits the script must by design exclude (D-11 says exclude `*_windows.rs` etc., though none of the 22 excluded commits actually match that pattern, so the issue is purely about which paths to INCLUDE). Recommend option (b) with a fixture-companion `README.md` that documents the 22-commit delta as informational. Planner: confirm with user before locking acceptance #1's exact diff command.
 
+   **RESOLVED (2026-04-27):** Option (b) — D-11 path filter is canonical. User confirmed during /gsd-plan-phase 24 interactive question. Acceptance #1 satisfied by per-category breakdown match between script JSON output and SUMMARY's per-release narrative; the 22-commit delta is documented in `tests/integration/fixtures/upstream-drift/README.md` as informational. Path filter NOT widened. (Plans 24-01 acceptance lock; CONTEXT.md D-11 stays as-is.)
+
 2. **Should the filter include `Cargo.lock`?**
 
    **What we know:** `bf2e0969` (clap), `5c4e2aea` (tokio), `4a7a5a7c` (semver) are dep-bump commits explicitly listed in SUMMARY. They modify only `Cargo.lock`. D-11 omits `Cargo.lock`.
 
    **Recommendation:** Either (a) add `Cargo.lock` and all three workspace `Cargo.toml`s to the filter (catches dep bumps; matches SUMMARY narrative), or (b) document the omission and tell maintainers to additionally check `git log --no-merges <range> -- Cargo.lock` manually. Recommend (a) — the filter widens by 4 paths total and the categorization can put them in `other`.
+
+   **RESOLVED (2026-04-27):** Option (b) — `Cargo.lock` and additional crate `Cargo.toml`s NOT added. Subsumed by Q1's resolution: D-11 filter stays as-is, dep-bump commits live in the documented informational delta in fixtures README.
 
 3. **Should excluded paths cover more than `*_windows.rs` + `exec_strategy_windows/`?**
 
@@ -1022,17 +1028,23 @@ grep -F 'upstream-sync-quick.md' docs/cli/development/upstream-drift.mdx
 
    **Recommendation:** Single combined plan with 3 waves: (W1) twin-script skeleton + tag resolution + path filter + JSON emission + 3 fixtures; (W2) categorization + table format + parity check; (W3) template + Makefile target + PROJECT.md + docs + smoke tests. Reasoning: the template (DRIFT-02) references `make check-upstream-drift` (D-14) which is only meaningful after the script (DRIFT-01) exists. Coupling them in one plan keeps Wave 3's smoke tests honest.
 
+   **RESOLVED (2026-04-27):** 2-plan split chosen by planner (24-01 DRIFT-01 in Wave 1, 24-02 DRIFT-02 in Wave 2 with `depends_on: ["24-01"]`). Coupling preserved at the wave/dependency level — Plan 24-02 Task 3 extends Plan 24-01's `tests/integration/test_upstream_drift.sh` in place so the smoke test in 24-02 references live `make check-upstream-drift`.
+
 5. **PROJECT.md "Upstream Parity Process" section length.**
 
    **What we know:** D-15 says "short (workflow only)"; long-form lives in `docs/cli/development/upstream-drift.mdx`.
 
    **Recommendation:** ~10 lines in PROJECT.md, ~150-300 lines in the `.mdx`. PROJECT.md gets: 1-paragraph what, 5-bullet workflow, 1 cross-link.
 
+   **RESOLVED (2026-04-27):** Recommendation adopted — Plan 24-02 Task 2 spec'd PROJECT.md section as ~10 lines with 5-bullet workflow + cross-link to `.mdx`; long-form lives in `docs/cli/development/upstream-drift.mdx`.
+
 6. **Header trailer's exact field name: `Upstream-author` or `Upstream-Author`?**
 
    **What we know:** All three reference commits use `Upstream-author:` (lowercase `a`). Verified verbatim.
 
    **Recommendation:** Match exactly. Single-source-of-truth: the most recent of the three reference commits.
+
+   **RESOLVED (2026-04-27):** Lowercase `a` confirmed and locked in Plan 24-02 Task 1 acceptance criteria via `grep -E '^Upstream-author: \{' .planning/templates/upstream-sync-quick.md` (case-sensitive).
 
 ## Sources
 
@@ -1100,12 +1112,18 @@ grep -F 'upstream-sync-quick.md' docs/cli/development/upstream-drift.mdx
 | Acceptance #1 reproduction | MEDIUM | Count discrepancy (56 vs 78) needs planner/user reconciliation |
 | Test strategy | MEDIUM | Pattern matches existing convention; fixture-regen workflow is recommendation, not run yet |
 
-### Open Questions for the planner
+### Open Questions for the planner (RESOLVED)
+
+> Resolved during planning (2026-04-27). Detailed resolutions in `## Open Questions (RESOLVED)` section above.
 
 1. **Acceptance #1 reconciliation (HIGH PRIORITY)**: should the script's filter expand to include `Cargo.lock` + all crate `Cargo.toml`s + `data/policy.json` to chase the SUMMARY's 78-commit headline, or is the path-filter canonical and the headline informational? Recommendation: canonical filter + informational delta. Confirm before locking acceptance.
+   **RESOLVED (2026-04-27):** Path-filter canonical, 22-commit delta documented as informational in `tests/integration/fixtures/upstream-drift/README.md` (user decision).
 2. **Should the filter include `Cargo.lock`?** Independent of (1), the dep-bump commits (clap/tokio/semver) live entirely in `Cargo.lock`. Recommend including it.
+   **RESOLVED (2026-04-27):** No — `Cargo.lock` NOT added; subsumed by Q1 resolution.
 3. **Plan split**: single combined plan (recommended) vs 24-01 + 24-02 split? D-17 leaves this to the planner.
+   **RESOLVED (2026-04-27):** 2-plan split chosen by planner — 24-01 (DRIFT-01) Wave 1, 24-02 (DRIFT-02) Wave 2 with `depends_on: ["24-01"]`. Coupling preserved at the wave/dependency level.
 4. **Tag auto-detect under partial-sync state**: the algorithm is reasoned but not tested for the case where the fork has cherry-picked SOME v0.41 commits but not all. Add a fixture for this case during execution if the corner is judged in-scope.
+   **RESOLVED (2026-04-27):** Deferred — out of scope for v1; the 3 fixtures cover the in-scope sampling space (Nyquist Dim 8). Partial-sync fixture is captured as a future-improvement note in `tests/integration/fixtures/upstream-drift/README.md`.
 
 ### Ready for Planning
 Research complete. Planner can now create PLAN.md files with high confidence on every locked decision and clear flagging on the one MEDIUM-confidence reconciliation question (acceptance #1).
