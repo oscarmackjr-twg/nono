@@ -327,8 +327,8 @@ Mapped by gsd-roadmapper 2026-04-24 at v2.2 milestone scope-lock.
 | AUD-03 | Phase 22 (Plan 22-05) | Pending |
 | AUD-04 | Phase 22 (Plan 22-05) | Pending |
 | AUD-05 | Phase 23 | Pending |
-| DRIFT-01 | Phase 24 | Pending |
-| DRIFT-02 | Phase 24 | Pending |
+| DRIFT-01 | Phase 24 | Complete (2026-04-27) |
+| DRIFT-02 | Phase 24 | Complete (2026-04-27) |
 
 **Coverage target:**
 - v2.2 requirements: 21 total

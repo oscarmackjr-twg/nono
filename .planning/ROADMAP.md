@@ -67,7 +67,7 @@ Full details: `.planning/milestones/v2.1-ROADMAP.md`.
 
 - [ ] **Phase 22: UPST2 — Upstream v0.38–v0.40 Parity Sync** (2/5 plans) — ingest cross-platform feature clusters (profile struct, policy tightening, package manager, OAuth2 proxy, audit integrity) with Windows parity in lockstep — Plan 22-01 (PROF) complete (12 commits, origin/main = d7fc4ed8); Plan 22-02 (POLY) complete (7 commits, HEAD = 490a8a5c, ready to push)
 - [ ] **Phase 23: Windows Audit-Event Retrofit** (0/1 plan) — wire Windows supervisor's 5 AIPC broker paths (File, Socket, Pipe, JobObject, Event, Mutex) into the Phase 22-05 ledger
-- [ ] **Phase 24: Parity-Drift Prevention** (2/2 plans) — `scripts/check-upstream-drift` tooling + GSD quick-task template for upstream-sync cadence
+- [x] **Phase 24: Parity-Drift Prevention** (2/2 plans, 2026-04-27) — `scripts/check-upstream-drift` tooling + GSD quick-task template for upstream-sync cadence
 
 ## Phase Details
 
@@ -177,4 +177,4 @@ Full details: `.planning/milestones/v2.1-ROADMAP.md`.
 | 21. Windows Single-File Grants (WSFG) | v2.1 | 5/5 | Complete-with-issues (supervisor-pipe regression resolved in-flight; HUMAN-UAT folded into Phase 18.1) | 2026-04-20 |
 | 22. UPST2 — Upstream v0.38–v0.40 Parity Sync | v2.2 | 0/5 | Pending | — |
 | 23. Windows Audit-Event Retrofit | v2.2 | 0/1 | Pending | — |
-| 24. Parity-Drift Prevention | v2.2 | 0/2 | Pending | — |
+| 24. Parity-Drift Prevention | v2.2 | 2/2 | Complete | 2026-04-27 |
