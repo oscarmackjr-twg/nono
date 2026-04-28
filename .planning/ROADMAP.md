@@ -65,7 +65,7 @@ Full details: `.planning/milestones/v2.1-ROADMAP.md`.
 
 **Requirement coverage:** 21 requirements across 6 categories (PROF, POLY, PKG, OAUTH, AUD, DRIFT). All mapped; zero orphans.
 
-- [ ] **Phase 22: UPST2 — Upstream v0.38–v0.40 Parity Sync** (3/5 plans) — ingest cross-platform feature clusters (profile struct, policy tightening, package manager, OAuth2 proxy, audit integrity) with Windows parity in lockstep — Plan 22-01 (PROF) complete (12 commits, origin/main = d7fc4ed8); Plan 22-02 (POLY) complete (7 commits, HEAD = 490a8a5c, ready to push); Plan 22-03 (PKG) **partial close** (6/8 cherry-picks, 2 deferred to v2.3 carry-forward — see backlog below)
+- [ ] **Phase 22: UPST2 — Upstream v0.38–v0.40 Parity Sync** (4/6 plans) — ingest cross-platform feature clusters (profile struct, policy tightening, package manager, OAuth2 proxy, audit integrity) with Windows parity in lockstep — Plan 22-01 PROF complete (12 commits, origin = d7fc4ed8); Plan 22-02 POLY complete (7 commits, origin = 490a8a5c); Plan 22-03 PKG **partial close** (6/8 cherry-picks, 2 deferred to v2.3 carry-forward — see backlog below); Plan 22-04 OAUTH complete (14 commits, origin = 5c8df06a); Plan 22-05 **split** into 22-05a (Wave 2 audit core no rename) + 22-05b (Wave 3 prune→cleanup rename + Authenticode) after CONTEXT STOP trigger #3 hit on 4f9552ec cherry-pick (563 conflict lines, 9 files); both replacement plans authored and plan-checked, ready to execute
 - [ ] **Phase 23: Windows Audit-Event Retrofit** (0/1 plan) — wire Windows supervisor's 5 AIPC broker paths (File, Socket, Pipe, JobObject, Event, Mutex) into the Phase 22-05 ledger
 - [x] **Phase 24: Parity-Drift Prevention** (2/2 plans, 2026-04-27) — `scripts/check-upstream-drift` tooling + GSD quick-task template for upstream-sync cadence
 
@@ -175,7 +175,7 @@ Full details: `.planning/milestones/v2.1-ROADMAP.md`.
 | 19. Cleanup (CLEAN) | v2.1 | 4/4 | Complete | 2026-04-19 |
 | 20. Upstream Parity Sync (UPST) | v2.1 | 4/4 | Complete | 2026-04-19 |
 | 21. Windows Single-File Grants (WSFG) | v2.1 | 5/5 | Complete-with-issues (supervisor-pipe regression resolved in-flight; HUMAN-UAT folded into Phase 18.1) | 2026-04-20 |
-| 22. UPST2 — Upstream v0.38–v0.40 Parity Sync | v2.2 | 3/5 | In progress (22-01, 22-02 complete; 22-03 partial close — 6/8 cherry-picks; 2 deferred to v2.3 backlog) | — |
+| 22. UPST2 — Upstream v0.38–v0.40 Parity Sync | v2.2 | 4/6 | In progress (22-01, 22-02, 22-04 complete; 22-03 partial close — 6/8 cherry-picks, 2 deferred to v2.3; 22-05 split into 22-05a + 22-05b after CONTEXT STOP trigger #3, both planned and ready to execute) | — |
 | 23. Windows Audit-Event Retrofit | v2.2 | 0/1 | Pending | — |
 | 24. Parity-Drift Prevention | v2.2 | 2/2 | Complete | 2026-04-27 |
 
