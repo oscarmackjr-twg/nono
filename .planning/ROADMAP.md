@@ -144,7 +144,10 @@ Full details: `.planning/milestones/v2.1-ROADMAP.md`.
 
 **Rationale:** Without this phase, v0.41+ will recreate the Windows-vs-macOS gap v2.2 just closed. The drift-check script + template make upstream absorption a weeks-scale quick task instead of a milestone-scale effort.
 
-**Plans:** TBD (drafted during `/gsd-plan-phase 24`)
+**Plans:** 2 plans (locked 2026-04-27 by /gsd-plan-phase 24)
+
+- [ ] 24-01-PLAN.md — Upstream drift-check tooling: twin .sh+.ps1 scripts, Makefile target, integration test, 3 fixtures (DRIFT-01)
+- [ ] 24-02-PLAN.md — GSD upstream-sync template + PROJECT.md cross-link + docs/cli/development/upstream-drift.mdx runbook (DRIFT-02)
 
 ## Progress Table
 
