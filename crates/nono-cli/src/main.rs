@@ -4,6 +4,7 @@
 
 mod app_runtime;
 mod audit_commands;
+mod audit_integrity;
 mod capability_ext;
 mod cli;
 mod cli_bootstrap;

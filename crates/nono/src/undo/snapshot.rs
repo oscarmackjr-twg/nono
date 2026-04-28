@@ -1222,6 +1222,8 @@ mod tests {
             exit_code: Some(0),
             merkle_roots: vec![baseline.merkle_root],
             network_events: vec![],
+            audit_event_count: 0,
+            audit_integrity: None,
             rollback_status: RollbackStatus::Available,
         };
 
@@ -1278,6 +1280,8 @@ mod tests {
             exit_code: None,
             merkle_roots: vec![baseline.merkle_root],
             network_events: vec![],
+            audit_event_count: 0,
+            audit_integrity: None,
             rollback_status: RollbackStatus::Available,
         };
         manager.save_session_metadata(&meta).expect("save");

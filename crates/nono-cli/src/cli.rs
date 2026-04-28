@@ -1791,8 +1791,20 @@ pub struct RunArgs {
     pub no_diagnostics: bool,
 
     /// Disable the audit trail for this session
-    #[arg(long, conflicts_with = "rollback", help_heading = "OPTIONS")]
+    #[arg(
+        long,
+        conflicts_with_all = ["audit_integrity", "no_audit_integrity", "rollback"],
+        help_heading = "OPTIONS"
+    )]
     pub no_audit: bool,
+
+    /// Disable the default Merkleized append-only audit log
+    #[arg(long, conflicts_with_all = ["audit_integrity", "rollback"], help_heading = "OPTIONS")]
+    pub no_audit_integrity: bool,
+
+    /// Add filesystem-state hashing over in-scope writable paths
+    #[arg(long, help_heading = "OPTIONS")]
+    pub audit_integrity: bool,
 
     /// Disable trust verification (not recommended for production)
     #[arg(long, help_heading = "OPTIONS")]
@@ -4174,5 +4186,25 @@ mod tests {
     fn test_log_file_flag_absent() {
         let cli = Cli::parse_from(["nono", "run", "--allow", ".", "echo", "hi"]);
         assert!(cli.log_file.is_none());
+    }
+
+    #[test]
+    fn test_no_audit_integrity_flag_parses() {
+        let cli = Cli::parse_from([
+            "nono",
+            "run",
+            "--allow",
+            ".",
+            "--no-audit-integrity",
+            "echo",
+            "hello",
+        ]);
+        match cli.command {
+            Commands::Run(args) => {
+                assert!(args.no_audit_integrity);
+                assert!(!args.audit_integrity);
+            }
+            _ => panic!("Expected Run command"),
+        }
     }
 }

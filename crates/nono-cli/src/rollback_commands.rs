@@ -1429,6 +1429,8 @@ mod tests {
             exit_code: None,
             merkle_roots: vec![],
             network_events: vec![],
+            audit_event_count: 0,
+            audit_integrity: None,
             rollback_status: nono::undo::RollbackStatus::Available,
         };
 
@@ -1461,6 +1463,8 @@ mod tests {
             exit_code: None,
             merkle_roots: vec![],
             network_events: vec![],
+            audit_event_count: 0,
+            audit_integrity: None,
             rollback_status: nono::undo::RollbackStatus::Available,
         };
         let meta2 = SessionMetadata {
@@ -1473,6 +1477,8 @@ mod tests {
             exit_code: None,
             merkle_roots: vec![],
             network_events: vec![],
+            audit_event_count: 0,
+            audit_integrity: None,
             rollback_status: nono::undo::RollbackStatus::Available,
         };
 

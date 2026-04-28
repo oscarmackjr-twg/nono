@@ -214,6 +214,19 @@ pub struct NetworkAuditEvent {
     pub reason: Option<String>,
 }
 
+/// Summary of append-only integrity metadata for an audit log.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditIntegritySummary {
+    /// Hash algorithm used for event leaves and chain/root derivation
+    pub hash_algorithm: String,
+    /// Number of audit events written for the session
+    pub event_count: u64,
+    /// Hash-chain head over the append-only audit log
+    pub chain_head: ContentHash,
+    /// Merkle root over ordered audit event leaves
+    pub merkle_root: ContentHash,
+}
+
 /// Rollback availability status for a session.
 ///
 /// Recorded in [`SessionMetadata`] so that `nono rollback list/show/restore`
@@ -278,6 +291,12 @@ pub struct SessionMetadata {
     /// Network events captured by the proxy during this session
     #[serde(default)]
     pub network_events: Vec<NetworkAuditEvent>,
+    /// Number of audit events captured for this session
+    #[serde(default)]
+    pub audit_event_count: u64,
+    /// Optional integrity summary for the append-only audit log
+    #[serde(default)]
+    pub audit_integrity: Option<AuditIntegritySummary>,
     /// Whether rollback snapshots were captured for this session.
     ///
     /// Defaults to `Available` when deserializing older payloads that lack this
@@ -444,6 +463,8 @@ mod tests {
             exit_code: None,
             merkle_roots: vec![],
             network_events: vec![],
+            audit_event_count: 0,
+            audit_integrity: None,
             rollback_status: RollbackStatus::Skipped,
         };
         let json = serde_json::to_string(&meta).expect("serialize");
@@ -465,6 +486,8 @@ mod tests {
             exit_code: None,
             merkle_roots: vec![],
             network_events: vec![],
+            audit_event_count: 0,
+            audit_integrity: None,
             rollback_status: RollbackStatus::FailedWarningOnly {
                 reason: reason.clone(),
             },

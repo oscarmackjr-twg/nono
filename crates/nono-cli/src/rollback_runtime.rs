@@ -442,6 +442,8 @@ pub(crate) fn finalize_supervised_exit(ctx: RollbackExitContext<'_>) -> Result<(
             exit_code: Some(exit_code),
             merkle_roots,
             network_events: std::mem::take(&mut network_events),
+            audit_event_count: 0,
+            audit_integrity: None,
             rollback_status: RollbackStatus::Available,
         };
         manager.save_session_metadata(&meta)?;
@@ -470,6 +472,8 @@ pub(crate) fn finalize_supervised_exit(ctx: RollbackExitContext<'_>) -> Result<(
                 exit_code: Some(exit_code),
                 merkle_roots: Vec::new(),
                 network_events,
+                audit_event_count: 0,
+                audit_integrity: None,
                 rollback_status,
             };
             nono::undo::SnapshotManager::write_session_metadata(&audit_state.session_dir, &meta)?;
