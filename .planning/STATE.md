@@ -2,9 +2,9 @@
 gsd_state_version: 1.0
 milestone: v2.2
 milestone_name: Windows/macOS Parity Sweep
-status: executing
-stopped_at: Plan 22-04 OAUTH complete; ready to spawn Plan 22-05 AUD
-last_updated: "2026-04-28T13:55:00.000Z"
+status: re-planning
+stopped_at: Plan 22-05 hit Rule 4 / CONTEXT STOP trigger #3 — `4f9552ec` cherry-pick produces 563 conflict lines across 9 forked files (rollback_runtime.rs alone = 358; 7× per-file threshold). User chose Path B — split 22-05 into 22-05a (audit core, no rename) + 22-05b (prune→cleanup rename + Authenticode). Working tree clean at 5c8df06a (== origin/main). Awaiting /gsd-plan-phase 22 (re-plan) to author the two replacement plans.
+last_updated: "2026-04-28T14:30:00.000Z"
 last_activity: 2026-04-28
 progress:
   total_phases: 25
