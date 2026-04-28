@@ -67,7 +67,7 @@ Full details: `.planning/milestones/v2.1-ROADMAP.md`.
 
 - [ ] **Phase 22: UPST2 — Upstream v0.38–v0.40 Parity Sync** (2/5 plans) — ingest cross-platform feature clusters (profile struct, policy tightening, package manager, OAuth2 proxy, audit integrity) with Windows parity in lockstep — Plan 22-01 (PROF) complete (12 commits, origin/main = d7fc4ed8); Plan 22-02 (POLY) complete (7 commits, HEAD = 490a8a5c, ready to push)
 - [ ] **Phase 23: Windows Audit-Event Retrofit** (0/1 plan) — wire Windows supervisor's 5 AIPC broker paths (File, Socket, Pipe, JobObject, Event, Mutex) into the Phase 22-05 ledger
-- [ ] **Phase 24: Parity-Drift Prevention** (0/2 plans) — `scripts/check-upstream-drift` tooling + GSD quick-task template for upstream-sync cadence
+- [ ] **Phase 24: Parity-Drift Prevention** (1/2 plans) — `scripts/check-upstream-drift` tooling + GSD quick-task template for upstream-sync cadence
 
 ## Phase Details
 
@@ -146,7 +146,7 @@ Full details: `.planning/milestones/v2.1-ROADMAP.md`.
 
 **Plans:** 2 plans (locked 2026-04-27 by /gsd-plan-phase 24)
 
-- [ ] 24-01-PLAN.md — Upstream drift-check tooling: twin .sh+.ps1 scripts, Makefile target, integration test, 3 fixtures (DRIFT-01)
+- [x] 24-01-PLAN.md — Upstream drift-check tooling: twin .sh+.ps1 scripts, Makefile target, integration test, 3 fixtures (DRIFT-01)
 - [ ] 24-02-PLAN.md — GSD upstream-sync template + PROJECT.md cross-link + docs/cli/development/upstream-drift.mdx runbook (DRIFT-02)
 
 ## Progress Table
