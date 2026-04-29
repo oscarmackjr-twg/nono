@@ -171,53 +171,163 @@ pub(crate) fn sign_session_attestation(
     })
 }
 
-/// Re-read `<session_dir>/audit-attestation.bundle` and verify the
-/// signature covers the (chain_head, merkle_root, session_id) of the
-/// supplied summary.
+/// Re-read `<session_dir>/audit-attestation.bundle` and cryptographically
+/// verify that the DSSE signature covers the synthetic subjects
+/// `(audit/session_id, audit/chain_head, audit/merkle_root)` recomputed
+/// from the supplied `AuditIntegritySummary` and `session_id`.
 ///
 /// `public_key_pem` (optional `--public-key-file` from `nono audit
 /// verify`) pins verification to a specific signer. When `None`, the
-/// bundle's embedded public key is used (self-verification).
+/// bundle's embedded `summary.public_key` is used (self-verification:
+/// the bundle vouches for itself, but tampered bundles still fail because
+/// the embedded subjects must match the supplied integrity summary).
 ///
-/// Plan 22-05a Decision 5 minimal scope: the verifier checks (a) the
-/// bundle file exists, (b) the recorded `AuditAttestationSummary.key_id`
-/// matches the session metadata's stored summary, and (c) the recorded
-/// public key parses. Cryptographic re-verification of the DSSE signature
-/// over the synthetic subjects is deferred to Plan 22-05b alongside the
-/// audit_ledger.rs port (which already exposes the necessary `verify_*`
-/// helpers in upstream `6ecade2e`). The fail-closed semantics are still
-/// preserved: any mismatch returns `Ok(false)`.
+/// Verification flow (HG-01-H, fixing the structural-only check that
+/// previously returned `Ok(true)` for any non-empty bundle):
+///
+/// 1. Read and parse the bundle JSON via [`nono::trust::load_bundle_from_str`].
+/// 2. Decode the embedded SPKI public key (hex from `summary.public_key`,
+///    or PEM/DER from `--public-key-file` when pinned).
+/// 3. Run [`nono::trust::verify_keyed_signature`] to verify the DSSE
+///    envelope's ECDSA P-256 signature against the public key.
+/// 4. Extract the bundle's subjects via
+///    [`nono::trust::extract_all_subjects`] and assert they match the
+///    recomputed synthetic subjects. This binds the signed bundle to the
+///    session metadata: a forged bundle that doesn't cover the recorded
+///    `(session_id, chain_head, merkle_root)` triple is rejected.
+///
+/// Returns `Ok(false)` on any mismatch (fail-closed). Returns `Err` only
+/// for I/O or deeper structural failures the caller may want to surface
+/// distinctly.
 pub(crate) fn verify_audit_attestation(
     session_dir: &Path,
     summary: &AuditAttestationSummary,
-    _public_key_pem: Option<&Path>,
+    session_id: &str,
+    integrity: &AuditIntegritySummary,
+    public_key_file: Option<&Path>,
 ) -> Result<bool> {
     let bundle_path = session_dir.join(&summary.bundle_filename);
     if !bundle_path.exists() {
         return Ok(false);
     }
-    let bundle = std::fs::read_to_string(&bundle_path).map_err(|e| NonoError::TrustSigning {
-        path: bundle_path.display().to_string(),
-        reason: format!("failed to read attestation bundle: {e}"),
-    })?;
-    if bundle.trim().is_empty() {
-        return Ok(false);
-    }
-    // Decode the embedded public key (hex-encoded; see `hex_encode`).
-    if summary.public_key.is_empty() || summary.public_key.len() % 2 != 0 {
-        return Ok(false);
-    }
-    for chunk in summary.public_key.as_bytes().chunks(2) {
-        let hex_str = std::str::from_utf8(chunk).map_err(|e| NonoError::TrustSigning {
+    let bundle_json =
+        std::fs::read_to_string(&bundle_path).map_err(|e| NonoError::TrustSigning {
             path: bundle_path.display().to_string(),
-            reason: format!("public key contains non-utf8 hex: {e}"),
+            reason: format!("failed to read attestation bundle: {e}"),
         })?;
-        if u8::from_str_radix(hex_str, 16).is_err() {
-            return Ok(false);
+    if bundle_json.trim().is_empty() {
+        return Ok(false);
+    }
+
+    // Resolve the SPKI public key bytes. When --public-key-file is given,
+    // pin verification to that key; otherwise self-verify against the
+    // bundle's embedded public key (decoded from `summary.public_key`).
+    let public_key_der = match public_key_file {
+        Some(path) => match read_public_key_file(path) {
+            Ok(bytes) => bytes,
+            Err(_) => return Ok(false),
+        },
+        None => {
+            if summary.public_key.is_empty() || summary.public_key.len() % 2 != 0 {
+                return Ok(false);
+            }
+            match hex_decode(&summary.public_key) {
+                Some(bytes) => bytes,
+                None => return Ok(false),
+            }
         }
+    };
+
+    // Parse the bundle JSON.
+    let bundle = match nono::trust::load_bundle_from_str(&bundle_json, &bundle_path) {
+        Ok(b) => b,
+        Err(_) => return Ok(false),
+    };
+
+    // Verify the DSSE envelope's ECDSA signature against the public key.
+    // Any signature failure (forged bundle, wrong key, tampered payload)
+    // surfaces here as an `Err` from `verify_keyed_signature`; we map it
+    // to `Ok(false)` for fail-closed CLI semantics.
+    if nono::trust::verify_keyed_signature(&bundle, &public_key_der, &bundle_path).is_err() {
+        return Ok(false);
+    }
+
+    // Recompute synthetic subjects from the supplied summary + session_id
+    // and require them to match the bundle's subjects. This binds the
+    // signed envelope to *this session's* recorded integrity tuple — a
+    // bundle signed for a different session is rejected even if the
+    // signature itself is valid.
+    let actual_subjects = match nono::trust::extract_all_subjects(&bundle, &bundle_path) {
+        Ok(s) => s,
+        Err(_) => return Ok(false),
+    };
+    let expected_subjects = synthetic_subjects(session_id, integrity);
+    if actual_subjects != expected_subjects {
+        return Ok(false);
     }
 
     Ok(true)
+}
+
+/// Build the canonical (name, sha256_hex) subject list for an audit
+/// attestation. Mirrors the order used by [`sign_session_attestation`]
+/// so verification recomputes the exact same vector.
+fn synthetic_subjects(
+    session_id: &str,
+    integrity: &AuditIntegritySummary,
+) -> Vec<(String, String)> {
+    vec![
+        (
+            "audit/session_id".to_string(),
+            sha256_hex(session_id.as_bytes()),
+        ),
+        ("audit/chain_head".to_string(), integrity.chain_head.to_string()),
+        (
+            "audit/merkle_root".to_string(),
+            integrity.merkle_root.to_string(),
+        ),
+    ]
+}
+
+/// Decode a lowercase hex string into bytes. Returns `None` on any
+/// non-hex character.
+fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(s.len() / 2);
+    for chunk in s.as_bytes().chunks(2) {
+        let hex_str = std::str::from_utf8(chunk).ok()?;
+        out.push(u8::from_str_radix(hex_str, 16).ok()?);
+    }
+    Some(out)
+}
+
+/// Read a public key file. Accepts either a raw DER/SPKI byte file or
+/// a PEM file (PKCS8 PUBLIC KEY block); returns DER bytes suitable for
+/// [`nono::trust::verify_keyed_signature`].
+fn read_public_key_file(path: &Path) -> Result<Vec<u8>> {
+    let bytes = std::fs::read(path).map_err(|e| NonoError::TrustSigning {
+        path: path.display().to_string(),
+        reason: format!("failed to read public key file: {e}"),
+    })?;
+    // Heuristic: if the file looks like PEM (starts with `-----BEGIN`),
+    // strip the armor; otherwise treat as raw DER.
+    let trimmed = std::str::from_utf8(&bytes).unwrap_or("");
+    if trimmed.contains("-----BEGIN") {
+        let cleaned: String = trimmed
+            .lines()
+            .filter(|line| !line.starts_with("-----"))
+            .collect::<Vec<_>>()
+            .join("");
+        // Use the existing base64 decoder from nono::trust.
+        nono::trust::base64::base64_decode(&cleaned).map_err(|e| NonoError::TrustSigning {
+            path: path.display().to_string(),
+            reason: format!("failed to decode PEM body: {e}"),
+        })
+    } else {
+        Ok(bytes)
+    }
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -265,6 +375,18 @@ mod tests {
         assert!(tmp.path().join("audit-attestation.bundle").exists());
     }
 
+    fn make_signer() -> AuditSigner {
+        let key_pair = generate_signing_key().unwrap();
+        let key_id = key_id_hex(&key_pair).unwrap();
+        let der = nono::trust::signing::export_public_key(&key_pair).unwrap();
+        let public_key_b64 = hex_encode(der.as_ref());
+        AuditSigner {
+            key_pair,
+            key_id,
+            public_key_b64,
+        }
+    }
+
     #[test]
     fn verify_returns_false_when_bundle_missing() {
         let tmp = tempfile::tempdir().unwrap();
@@ -274,7 +396,127 @@ mod tests {
             public_key: "00".to_string(),
             bundle_filename: "audit-attestation.bundle".to_string(),
         };
-        let ok = verify_audit_attestation(tmp.path(), &summary, None).unwrap();
+        let integrity = fake_summary();
+        let ok = verify_audit_attestation(
+            tmp.path(),
+            &summary,
+            "20260421-100000-1234",
+            &integrity,
+            None,
+        )
+        .unwrap();
         assert!(!ok, "missing bundle must fail-close");
+    }
+
+    #[test]
+    fn verify_returns_true_for_well_formed_bundle() {
+        // HG-01-H positive case: a freshly signed bundle whose subjects
+        // match the supplied integrity summary verifies successfully.
+        let tmp = tempfile::tempdir().unwrap();
+        let signer = make_signer();
+        let session_id = "20260421-100000-1234";
+        let integrity = fake_summary();
+        let attestation =
+            sign_session_attestation(&signer, tmp.path(), session_id, &integrity).unwrap();
+        let ok = verify_audit_attestation(
+            tmp.path(),
+            &attestation,
+            session_id,
+            &integrity,
+            None,
+        )
+        .unwrap();
+        assert!(ok, "freshly signed bundle must verify");
+    }
+
+    #[test]
+    fn verify_returns_false_for_tampered_bundle_bytes() {
+        // HG-01-H regression: the previous structural-only verifier
+        // returned Ok(true) for ANY non-empty file. Now a corrupted
+        // bundle must fail-close because verify_keyed_signature rejects
+        // it (the DSSE envelope is no longer parseable / signature no
+        // longer covers the payload).
+        let tmp = tempfile::tempdir().unwrap();
+        let signer = make_signer();
+        let session_id = "20260421-100000-1234";
+        let integrity = fake_summary();
+        let attestation =
+            sign_session_attestation(&signer, tmp.path(), session_id, &integrity).unwrap();
+
+        // Overwrite the bundle with junk.
+        let bundle_path = tmp.path().join(&attestation.bundle_filename);
+        std::fs::write(&bundle_path, b"this is not a valid bundle").unwrap();
+
+        let ok = verify_audit_attestation(
+            tmp.path(),
+            &attestation,
+            session_id,
+            &integrity,
+            None,
+        )
+        .unwrap();
+        assert!(!ok, "tampered bundle bytes must fail-close (HG-01-H fix)");
+    }
+
+    #[test]
+    fn verify_returns_false_when_subjects_do_not_match() {
+        // A signed bundle for session A does not vouch for session B,
+        // even though its signature is cryptographically valid.
+        let tmp = tempfile::tempdir().unwrap();
+        let signer = make_signer();
+        let integrity = fake_summary();
+        let attestation =
+            sign_session_attestation(&signer, tmp.path(), "session-A", &integrity).unwrap();
+
+        // Attempt to verify against a different session_id — the
+        // synthetic subjects will differ, so the (recomputed) subject
+        // list won't match the bundle's embedded subjects.
+        let ok = verify_audit_attestation(
+            tmp.path(),
+            &attestation,
+            "session-B",
+            &integrity,
+            None,
+        )
+        .unwrap();
+        assert!(
+            !ok,
+            "bundle signed for one session must not verify against another (HG-01-H fix)"
+        );
+    }
+
+    #[test]
+    fn verify_returns_false_when_integrity_summary_does_not_match() {
+        // Substituting a forged integrity summary into the verify call
+        // must fail-close: the bundle's recorded chain_head/merkle_root
+        // no longer match the supplied summary.
+        let tmp = tempfile::tempdir().unwrap();
+        let signer = make_signer();
+        let session_id = "20260421-100000-1234";
+        let real_integrity = fake_summary();
+        let attestation =
+            sign_session_attestation(&signer, tmp.path(), session_id, &real_integrity).unwrap();
+
+        // Different chain_head/merkle_root than what the bundle was
+        // signed over.
+        let forged_integrity = AuditIntegritySummary {
+            hash_algorithm: "sha256".to_string(),
+            event_count: 99,
+            chain_head: ContentHash::from_bytes([0x99u8; 32]),
+            merkle_root: ContentHash::from_bytes([0x88u8; 32]),
+        };
+
+        let ok = verify_audit_attestation(
+            tmp.path(),
+            &attestation,
+            session_id,
+            &forged_integrity,
+            None,
+        )
+        .unwrap();
+        assert!(
+            !ok,
+            "forged integrity summary must fail-close (HG-01-H fix)"
+        );
     }
 }

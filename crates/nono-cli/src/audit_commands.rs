@@ -532,16 +532,26 @@ fn cmd_verify(args: AuditVerifyArgs) -> Result<()> {
     let result = verify_audit_log(&session.dir, session.metadata.audit_integrity.as_ref())?;
 
     // Plan 22-05a Task 7 (upstream 6ecade2e): if the session was signed,
-    // verify the attestation bundle. Optional --public-key-file pins
-    // verification to a specific signer.
-    let attestation_status = if let Some(att) = session.metadata.audit_attestation.as_ref() {
-        Some(verify_audit_attestation(
+    // verify the attestation bundle. HG-01-H fix (Phase 22 review): the
+    // verifier now cryptographically checks the DSSE signature AND that
+    // the bundle's subjects match the recorded `(session_id, chain_head,
+    // merkle_root)` tuple. Verification requires the integrity summary,
+    // which must be present whenever an attestation is present.
+    let attestation_status = match (
+        session.metadata.audit_attestation.as_ref(),
+        session.metadata.audit_integrity.as_ref(),
+    ) {
+        (Some(att), Some(integrity)) => Some(verify_audit_attestation(
             &session.dir,
             att,
+            &session.metadata.session_id,
+            integrity,
             args.public_key_file.as_deref(),
-        )?)
-    } else {
-        None
+        )?),
+        // Attestation present but no integrity summary recorded —
+        // fail-closed: there is nothing to bind the signature to.
+        (Some(_), None) => Some(false),
+        (None, _) => None,
     };
 
     if args.json {
