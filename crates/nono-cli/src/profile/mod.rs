@@ -559,6 +559,20 @@ fn validate_oauth2_auth(name: &str, auth: &OAuth2Config) -> Result<()> {
         )));
     }
 
+    // CL-03-M (Phase 22 review): warn (don't fail) when client_secret looks
+    // like a literal value rather than a credential URI. The schema documents
+    // `keyring://`, `env://`, `file://`, and `op://` as the recommended
+    // patterns; a plain literal is accepted but is a leak vector if the
+    // profile JSON is committed or shared. Emit a soft warning so the user
+    // sees it without breaking valid (but inadvisable) configurations.
+    if !auth.client_secret.contains("://") {
+        tracing::warn!(
+            "custom credential '{}' has a literal auth.client_secret value (no URI scheme). \
+             Prefer keyring://, env://, file://, or op:// URIs to avoid committing secrets to disk.",
+            name
+        );
+    }
+
     Ok(())
 }
 
