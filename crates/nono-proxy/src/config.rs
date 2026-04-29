@@ -321,7 +321,7 @@ fn default_auth_scheme() -> String {
 /// Plan 22-04 (OAUTH). PROF-03 fail-secure semantics (https-only token_url,
 /// keyring:// resolution for client_secret) are validated in profile/mod.rs
 /// at deserialize time per Plan 22-01 Task 6.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct OAuth2Config {
     /// Token endpoint URL (e.g., "https://auth.example.com/oauth/token").
     /// MUST be HTTPS — http:// schemes are rejected fail-closed at profile
@@ -335,6 +335,25 @@ pub struct OAuth2Config {
     /// OAuth2 scopes (space-separated). Empty = no scope parameter sent.
     #[serde(default)]
     pub scope: String,
+}
+
+/// Custom Debug that redacts secrets — mirrors the proxy-side
+/// `OAuth2ExchangeConfig::fmt` redaction pattern. HG-01-M (Phase 22
+/// review): users may put a literal secret in profile JSON despite the
+/// recommended `keyring://` / `env://` / `file://` / `op://` URI
+/// patterns; deriving `Debug` automatically would surface that literal
+/// in any `tracing::debug!("config: {config:?}")` callsite at the
+/// profile-load boundary. T-22-04-01 mitigation extends from the proxy
+/// boundary to the profile-load boundary.
+impl std::fmt::Debug for OAuth2Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuth2Config")
+            .field("token_url", &self.token_url)
+            .field("client_id", &"[REDACTED]")
+            .field("client_secret", &"[REDACTED]")
+            .field("scope", &self.scope)
+            .finish()
+    }
 }
 
 #[cfg(test)]
@@ -387,6 +406,42 @@ mod tests {
         let json = r#"{"address": "proxy:3128", "auth": null}"#;
         let ext: ExternalProxyConfig = serde_json::from_str(json).unwrap();
         assert!(ext.bypass_hosts.is_empty());
+    }
+
+    #[test]
+    fn oauth2_config_debug_redacts_client_id_and_secret() {
+        // HG-01-M (Phase 22 review): the auto-derived Debug for
+        // OAuth2Config used to leak `client_secret` to any callsite that
+        // formatted the config with `{:?}`. The custom Debug impl
+        // redacts both `client_id` and `client_secret` while leaving
+        // `token_url` and `scope` visible for diagnostics.
+        let config = OAuth2Config {
+            token_url: "https://auth.example.com/oauth/token".to_string(),
+            client_id: "literal-client-id".to_string(),
+            client_secret: "very-secret-value".to_string(),
+            scope: "read write".to_string(),
+        };
+        let debug_output = format!("{config:?}");
+        assert!(
+            !debug_output.contains("very-secret-value"),
+            "client_secret must not appear in Debug output: {debug_output}"
+        );
+        assert!(
+            !debug_output.contains("literal-client-id"),
+            "client_id must not appear in Debug output: {debug_output}"
+        );
+        assert!(
+            debug_output.contains("[REDACTED]"),
+            "Debug output must contain [REDACTED] markers: {debug_output}"
+        );
+        assert!(
+            debug_output.contains("https://auth.example.com/oauth/token"),
+            "token_url should be visible for diagnostics: {debug_output}"
+        );
+        assert!(
+            debug_output.contains("read write"),
+            "scope should be visible for diagnostics: {debug_output}"
+        );
     }
 
     // ========================================================================
