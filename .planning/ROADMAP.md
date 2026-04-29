@@ -8,6 +8,7 @@ This roadmap tracks the path to full Windows/Unix parity and ongoing quality-of-
 - ✅ **v2.0 Windows Gap Closure** — Phases 5–15 (shipped 2026-04-18; tag `v2.0`)
 - ✅ **v2.1 Resource Limits, Extended IPC, Attach-Streaming & Cleanup** — Phases 16–21 + 18.1 (shipped 2026-04-21; tag `v2.1`)
 - ✅ **v2.2 Windows/macOS Parity Sweep** — Phases 22–24 (shipped 2026-04-29; tag `v2.2`)
+- 🏗️ **v2.3 Linux POC Unblock + Deferreds Closure** — Phases 25–29 (started 2026-04-29)
 
 ## Phases
 
@@ -68,6 +69,109 @@ Full details: `.planning/milestones/v2.2-ROADMAP.md`.
 
 </details>
 
+### 🏗️ v2.3 Linux POC Unblock + Deferreds Closure (Phases 25–29) — IN PROGRESS
+
+**Goal:** A Linux user running fork-Linux-build sees real enforcement (not silent no-ops) for `--memory` / `--cpu-percent` / `--timeout` / `--max-processes`, and v2.2's deferred items (PKG streaming, audit-attestation hardening, Authenticode chain-walker) ship as production-ready surfaces.
+
+**Trigger:** Linux POC gap analysis (2026-04-29, `.planning/quick/260429-gap-v039-linux-poc-vs-windows-fork-tip/PLAN.md`) showed RESL flags emit "not enforced on linux" warnings — credibility issue for the demo. v2.3 closes those + lands the WR-01 product decision deferred since v2.1.
+
+**Requirement coverage:** 14 requirements across 6 categories (RESL-NIX, AIPC-NIX, PKGS, AAH, AUDC, WRU). All mapped; zero orphans.
+
+- [ ] **Phase 25: Cross-Platform RESL + AIPC Unix Design** (2 plans, candidate from gap-analysis quick task) — REQ-RESL-NIX-01..03 + REQ-AIPC-NIX-01. Plan 25-01 lands cgroup v2 (Linux) + setrlimit (macOS) backends; Plan 25-02 ships an AIPC Unix futures ADR documenting which 5 HandleKinds admit Unix backends. Subsumes v2.3 backlog row "Cross-platform RESL Unix backends" verbatim.
+- [ ] **Phase 26: PKG Streaming Follow-Up** (1–2 plans TBD) — REQ-PKGS-01..04. Lands the 2 deferred upstream cherry-picks (`58b5a24e` `validate_relative_path`, `9ebad89a` streaming refactor) plus the architectural decisions skipped in v2.2 Plan 22-03 (`ArtifactType::Plugin` variant, `bundle_json` field, `validate_path_within` belt-and-suspenders, `load_registry_profile` auto-pull from `115b5cfa`).
+- [ ] **Phase 27: Audit-Attestation Hardening** (1 plan) — REQ-AAH-01. Re-enables 2 `#[ignore]`'d fixture-driven tests via Rule-4 architectural decision: sigstore-rs upgrade vs fork-internal pkcs8 parser. Required before publishing v2.2 attestation as production-ready.
+- [ ] **Phase 28: Authenticode Chain-Walker Subject Extraction** (1 plan) — REQ-AUDC-01..03. Adds `Win32_Security_Cryptography_Catalog` + `Win32_Security_Cryptography_Sip` features to `windows-sys`; implements `parse_signer_subject` + `parse_thumbprint`; re-enables `authenticode_signed_records_subject` test; upgrades AUD-03 acceptance to require populated subject + thumbprint on Valid signature.
+- [ ] **Phase 29: WR-01 Reject-Stage Unification** (1 plan) — REQ-WRU-01..02. Product decision: align all 5 AIPC HandleKinds on a single reject stage *or* lock the asymmetry as permanent design property with explicit rationale. Updates `wr01_*` regression tests + Phase 23 `RejectStage` ledger emission per the chosen verdict matrix.
+
+## Phase Details (v2.3)
+
+### Phase 25: Cross-Platform RESL + AIPC Unix Design
+
+**Goal:** Convert silent-no-op RESL flags on Linux/macOS into kernel-level enforcement (cgroup v2 / `setrlimit`), and ship an ADR documenting which AIPC HandleKinds admit Unix backends.
+
+**Depends on:** None structurally. v2.1 Phase 16 (Windows RESL) provides the reference acceptance shape.
+
+**Requirements:** REQ-RESL-NIX-01, REQ-RESL-NIX-02, REQ-RESL-NIX-03, REQ-AIPC-NIX-01 (4 reqs).
+
+**Plans (planned):** 2
+
+1. **Plan 25-01 — Cross-platform RESL Unix backends.** Linux cgroup v2 (`memory.max` / `cpu.max` / `pids.max` / `cgroup.kill`); macOS `setrlimit` (`RLIMIT_AS` / `RLIMIT_NPROC`; `RLIMIT_CPU` documented gap; `--cpu-percent` fail-closed unsupported on macOS). Removes 4 "not enforced on linux" stderr warnings. Reuses v2.1 Phase 16 acceptance shape.
+2. **Plan 25-02 — AIPC Unix futures ADR.** Design-only document at `docs/architecture/aipc-unix-futures.md` (or equivalent). Decision per-HandleKind: Socket/Pipe admit Unix backends via Unix-domain socket + `SCM_RIGHTS`; JobObject/Event/Mutex are Windows-only by design. Cross-linked from PROJECT.md.
+
+**Success Criteria** (what must be TRUE when Phase 25 completes):
+
+1. A Linux user running `nono run --memory 256m -- bash -c "tail -c 1G </dev/urandom"` sees the child OOM-killed by cgroup v2 `memory.max`; `nono inspect <id>` shows `memory_kill: true`.
+2. A Linux user running `nono run --max-processes 10 -- ...` sees fork failures after 10 processes (`pids.max`).
+3. A macOS user running `nono run --memory 256m -- ...` sees the child aborted via `RLIMIT_AS` mmap failure.
+4. None of the four "not enforced on linux" / "not enforced on macos" warnings emit on the supported flag set after this phase lands.
+5. `docs/architecture/aipc-unix-futures.md` (or equivalent ADR) committed; PROJECT.md cross-links it; each of 5 HandleKinds has a yes/no verdict with rationale.
+
+### Phase 26: PKG Streaming Follow-Up
+
+**Goal:** Land the 2 PKG cherry-picks deferred from v2.2 Plan 22-03 plus the architectural decisions that blocked them.
+
+**Depends on:** v2.2 Phase 22 Plan 22-03 (provides the 6/8 cherry-picks already landed).
+
+**Requirements:** REQ-PKGS-01..04 (4 reqs).
+
+**Plans:** TBD (1–2 plans; final count locked at `/gsd-plan-phase 26`).
+
+**Success Criteria** (what must be TRUE when Phase 26 completes):
+
+1. `nono pull <large-artifact>` of 200MB succeeds via streaming (memory profile peaks at ~10MB).
+2. Pack manifest with `..` traversal rejected by both `validate_relative_path` (input-string) and `validate_path_within` (canonicalize-and-compare); deferred-divergence comment at `package_cmd.rs:631-643` resolved.
+3. Profile extending `registry://vendor/pack@1.2.3` auto-pulls absent packs idempotently.
+4. `ArtifactType::Plugin` variant deserializes; round-trips through `serde_json`.
+
+### Phase 27: Audit-Attestation Hardening
+
+**Goal:** Re-enable 2 `#[ignore]`'d fixture-driven tests in `crates/nono-cli/tests/audit_attestation.rs`; resolve the Rule-4 architectural decision (sigstore-rs upgrade vs fork-internal pkcs8 parser).
+
+**Depends on:** v2.2 Plan 22-05a (provides the cryptographic DSSE bundle verification; the deferred tests sit on top).
+
+**Requirements:** REQ-AAH-01 (1 req).
+
+**Plans:** 1 (locked at `/gsd-plan-phase 27`).
+
+**Success Criteria:**
+
+1. Both `#[ignore]`'d tests run and pass.
+2. Architectural decision documented in CONTEXT.md with cascade impact for future readers.
+3. `cargo test -p nono-cli --test audit_attestation` exits 0 with no ignored tests.
+
+### Phase 28: Authenticode Chain-Walker Subject Extraction
+
+**Goal:** Light up `parse_signer_subject` + `parse_thumbprint` on Windows; upgrade AUD-03 acceptance to require populated subject + non-empty thumbprint on `Valid` Authenticode signatures.
+
+**Depends on:** v2.2 Plan 22-05b (provides the discriminant-only Authenticode integration; chain walker sits on top).
+
+**Requirements:** REQ-AUDC-01, REQ-AUDC-02, REQ-AUDC-03 (3 reqs).
+
+**Plans:** 1 (locked at `/gsd-plan-phase 28`).
+
+**Success Criteria:**
+
+1. `nono audit show <id>` on Windows for a signed binary shows populated `signer_subject` (CN substring) + non-empty 40-char hex SHA-1 thumbprint.
+2. Chain-walk failure on `Valid` signature → audit-recording fail-closed (no silent `<unknown>` substitution).
+3. `authenticode_signed_records_subject` test re-enabled and passing.
+
+### Phase 29: WR-01 Reject-Stage Unification
+
+**Goal:** Ship the product decision on AIPC HandleKind reject-stage (BEFORE vs AFTER prompt asymmetry deferred since v2.1) and update `wr01_*` regression tests + Phase 23 `RejectStage` ledger emission per the chosen verdict matrix.
+
+**Depends on:** v2.1 Phase 18.1 (locks asymmetry in `wr01_*` tests); v2.2 Phase 23 (mirrors asymmetry on the audit-ledger wire via `RejectStage`).
+
+**Requirements:** REQ-WRU-01, REQ-WRU-02 (2 reqs).
+
+**Plans:** 1 (locked at `/gsd-plan-phase 29`).
+
+**Success Criteria:**
+
+1. CONTEXT D-14 (or equivalent ADR) updated with chosen option + rationale.
+2. All 5 `wr01_*` tests pass with assertions matching the chosen matrix.
+3. `audit_integrity_records_5_handle_kinds_in_ledger` (Phase 23 multi-kind E2E) passes; ledger reflects the chosen matrix.
+4. PROJECT.md key-decisions table updated.
+
 ## Progress Table
 
 | Phase | Milestone | Plans Complete | Status | Completed |
@@ -97,25 +201,24 @@ Full details: `.planning/milestones/v2.2-ROADMAP.md`.
 | 22. UPST2 — Upstream v0.38–v0.40 Parity Sync | v2.2 | 6/6 | Complete (SECURED + REVIEW-FIX 7/7 + UAT 10/10 + 1 spec-error skipped; 22-03 partial close — 6/8 cherry-picks, 2 deferred to v2.3; Authenticode chain-walker deferred to v2.3) | 2026-04-28 |
 | 23. Windows Audit-Event Retrofit | v2.2 | 1/1 | Complete | 2026-04-29 |
 | 24. Parity-Drift Prevention | v2.2 | 2/2 | Complete | 2026-04-27 |
+| 25. Cross-Platform RESL + AIPC Unix Design | v2.3 | 0/2 | Not started | — |
+| 26. PKG Streaming Follow-Up | v2.3 | 0/TBD | Not started | — |
+| 27. Audit-Attestation Hardening | v2.3 | 0/1 | Not started | — |
+| 28. Authenticode Chain-Walker Subject Extraction | v2.3 | 0/1 | Not started | — |
+| 29. WR-01 Reject-Stage Unification | v2.3 | 0/1 | Not started | — |
 
-## Backlog (v2.3 carry-forward)
+## Backlog (v2.4 carry-forward)
 
-- **PKG-streaming follow-up** (deferred from Plan 22-03, 2026-04-28). Land the two PKG cherry-picks held back from 22-03's chain: upstream `58b5a24e` (`validate_relative_path` input-string check) and `9ebad89a` (streaming `bytes`→`PathBuf` refactor + `tempfile::TempDir` + size limits + HTTP timeouts + `semver` dep). Prerequisites the follow-up plan must own:
-  1. Introduce `ArtifactType::Plugin` enum variant + plumbing (closes the deferred-divergence comment at `crates/nono-cli/src/package_cmd.rs:631-643`).
-  2. Decide explicitly whether the fork keeps `validate_path_within` (canonicalize-and-component-compare) as defense-in-depth alongside upstream's `validate_relative_path` input-string pre-check, or adopts upstream's pattern verbatim. **Recommendation: keep both** — fork's stance is stricter and matches CLAUDE.md § Path Handling.
-  3. Cherry-pick `58b5a24e` with `validate_path_within` retained as belt-and-suspenders.
-  4. Cherry-pick `9ebad89a` with the streaming + tempdir + semver machinery, plus the `bundle_json` field on `DownloadedArtifact` that 22-03's `73e1e3b8` skipped.
-  5. Cherry-pick `115b5cfa` (`load_registry_profile` auto-pull) which Plan 22-01's empty provenance commit `3bde347c` deferred until package machinery landed.
-  Rationale: each prerequisite is a Rule-4 architectural decision that exceeds cherry-pick scope. Hand-merging 9ebad89a (~+267/-109 LOC across 5 files) under cherry-pick pressure is the highest-risk option in the chain and is the wrong place to make those decisions. See `.planning/milestones/v2.2-phases/22-upst2-upstream-v038-v040-parity-sync/22-03-PKG-SUMMARY.md` § Deviations and `22-03-PKG-PROGRESS.md` for full context.
+The four major v2.2-deferred items (PKG streaming, audit-attestation hardening, Authenticode chain-walker, WR-01 reject-stage unification, cross-platform RESL Unix backends) have been pulled into v2.3 as Phases 25–29. The backlog below is what remains for v2.4+.
 
-- **Audit-attestation D-13 fixtures re-enablement** (deferred from Plan 22-05b, 2026-04-28). The 2 `#[ignore]`'d tests in `crates/nono-cli/tests/audit_attestation.rs` blocked by KeyPair `from_pkcs8` re-enablement (sigstore-rs 0.6.4 doesn't expose it). Two viable paths: (a) sigstore-rs upgrade (architectural Rule 4 — may cascade through other crates); (b) fork-internal pkcs8 parser (architectural Rule 4 — adds parsing surface). Either approach should land before publishing v2.2 attestation as production-ready. Document as part of v2.3 audit-attestation hardening sweep.
+- **Upstream v0.41–v0.43 ingestion** (deferred from v2.3 scope-lock 2026-04-29). Use the DRIFT-01/02 tooling shipped in v2.2 Phase 24 (`make check-upstream-drift`) for first real load. Skipped in v2.3 to keep the milestone shippable in 2 weeks; the tooling stays warm regardless.
 
-  Companion deferral on the SAME backlog row: Plan 22-05b's `crates/nono-cli/src/exec_identity_windows.rs::parse_signer_subject` + `parse_thumbprint` chain walkers are similarly deferred — `windows-sys 0.59` does not expose `WTHelperProvDataFromStateData` / `WTHelperGetProvSignerFromChain` without the `Win32_Security_Cryptography_Catalog` + `Win32_Security_Cryptography_Sip` features (`CRYPT_PROVIDER_DATA` shape gated). Plan 22-05b records the `WinVerifyTrust` discriminant alone (Valid/Unsigned/InvalidSignature{hresult}) and sets `signer_subject = "<unknown>"` + empty thumbprint on Valid, plus marks the `authenticode_signed_records_subject` substring assertion test `#[ignore]`. Re-enable the chain walkers (either via Catalog/Sip features OR an in-tree pkcs8 parser providing equivalent walking) alongside the D-13 fixture re-enablement above.
+- **AIPC G-04 wire-protocol compile-time tightening** (deferred from v2.1 Plan 18.1-02; reaffirmed at v2.3 scope-lock). `Approved(ResourceGrant)` inline at the wire type so `(Approved, grant=None)` becomes a compile-time error. Cascades into `aipc_sdk.rs` child SDK demultiplexer + 23 pre-existing tests. Out of v2.3 scope due to test-cascade size.
 
-- **WR-01 reject-stage unification** (deferred from v2.1 18.1-04). Align all 5 AIPC HandleKinds on the same reject stage. Currently Event/Mutex/JobObject reject BEFORE prompt; Pipe/Socket reject AFTER prompt. Locked by `wr01_*` regression tests AND now also locked on the wire by Plan 23-01's `RejectStage` discriminator.
+- **`windows-squash` → `main` merge** (re-deferred 2026-04-29 per quick-260428-rsu). Gated on PR-583 maintainer response; cannot be pulled into v2.3 until that gate moves. Tracked separately as a quick task; not a milestone phase.
 
-- **AIPC G-04 wire-protocol compile-time tightening** (deferred from v2.1 Plan 18.1-02). `Approved(ResourceGrant)` inline at the wire type so `(Approved, grant=None)` becomes a compile-time error. Cascades into `aipc_sdk.rs` child SDK demultiplexer + 23 pre-existing tests.
+- **Cross-platform drift QA** (new, deferred from v2.3 scope-lock). After Phase 25 RESL Unix backends land, validate full Linux/macOS test-suite passes against fork tip. Bundle with v2.4 upstream-ingestion work.
 
-- **Cross-platform RESL Unix backends** (deferred from v2.1). cgroup v2 / rlimit ports of Windows Job Object caps. Reverse-direction drift (Windows shipped first).
+- **Docs pass for v2.2 + v2.3 surfaces** (deferred from v2.3 scope-lock). Bring `docs/cli/*` Mintlify content current with audit-integrity, package management, OAuth2 proxy, RESL Unix backends. Bundle with v2.4 upstream-ingestion work.
 
 - **WR-02 EDR HUMAN-UAT item** (v3.0). Requires EDR-instrumented runner; no host available.

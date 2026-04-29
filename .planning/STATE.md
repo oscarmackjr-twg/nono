@@ -1,28 +1,28 @@
 ---
 gsd_state_version: 1.0
-milestone: (unscoped)
-milestone_name: ""
-status: v2.2 — Windows/macOS Parity Sweep — shipped 2026-04-29 (tag `v2.2`). All 3 phases (22, 23, 24) and 9 plans complete. Awaiting `/gsd-new-milestone` to scope v2.3.
-stopped_at: v2.2 milestone close complete. ROADMAP.md collapsed; REQUIREMENTS.md archived; PROJECT.md evolved; MILESTONES.md + RETROSPECTIVE.md appended.
+milestone: v2.3
+milestone_name: Linux POC Unblock + Deferreds Closure
+status: v2.3 scope-locked 2026-04-29. 5 phases (25–29) defined; 14 requirements across RESL-NIX / AIPC-NIX / PKGS / AAH / AUDC / WRU. Phase 25 ready for `/gsd-plan-phase 25`.
+stopped_at: v2.3 scope-lock complete. PROJECT.md evolved with v2.3 goal + target features; REQUIREMENTS.md created with 14 reqs + traceability; ROADMAP.md adds Phases 25–29 with success criteria; backlog refreshed for v2.4.
 last_updated: "2026-04-29T00:00:00.000Z"
 last_activity: 2026-04-29
 progress:
-  total_phases: 29
+  total_phases: 34
   completed_phases: 26
-  total_plans: 82
+  total_plans: 88
   completed_plans: 82
-  percent: 100
+  percent: 76
 ---
 
-# Project State: nono — between milestones (v2.2 shipped, v2.3 unscoped)
+# Project State: nono — v2.3 Linux POC Unblock + Deferreds Closure
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-04-29 after v2.2 milestone close)
+See: .planning/PROJECT.md (updated 2026-04-29 at v2.3 milestone scope-lock)
 
 **Core Value:** Every nono command that works on Linux/macOS should work on Windows with equivalent security guarantees, or be explicitly documented as intentionally unsupported with a clear rationale.
 
-**Current Focus:** v2.2 shipped. Run `/gsd-new-milestone` to scope v2.3. Candidate focus areas in PROJECT.md § Next Milestone.
+**Current Focus:** Phase 25 (Cross-Platform RESL + AIPC Unix Design) is the recommended starting point — Plan 25-01 RESL Unix backends directly addresses the Linux POC credibility issue surfaced in `.planning/quick/260429-gap-v039-linux-poc-vs-windows-fork-tip/PLAN.md`.
 
 ## Current Position
 
@@ -192,17 +192,17 @@ Known deferred items at close: 20 (6 UAT bookkeeping gaps, 4 verification human_
 
 ## Session Continuity
 
-**Current Milestone:** (unscoped) — v2.2 shipped 2026-04-29 (tag `v2.2`).
+**Current Milestone:** v2.3 — Linux POC Unblock + Deferreds Closure (scope-locked 2026-04-29).
 **Last Activity:** 2026-04-29
-**Stopped At:** v2.2 milestone close complete. ROADMAP.md collapsed with v2.2 phases archived; REQUIREMENTS.md archived to `milestones/v2.2-REQUIREMENTS.md` and removed via `git rm`; PROJECT.md evolved (v2.2 → Validated + v2.3 backlog surfaced); MILESTONES.md + RETROSPECTIVE.md appended; STATE.md Deferred Items refreshed (20 items acknowledged).
-**Next Steps:** Run `/gsd-new-milestone` to scope v2.3. Candidate focus areas documented in PROJECT.md § Next Milestone:
-- PKG streaming follow-up (`58b5a24e` + `9ebad89a` + `115b5cfa` + `ArtifactType::Plugin` + `bundle_json` field)
-- Audit-attestation hardening sweep (sigstore-rs `KeyPair::from_pkcs8` re-enablement)
-- Authenticode chain-walker subject extraction (`Win32_Security_Cryptography_Catalog` + `Win32_Security_Cryptography_Sip` features)
-- WR-01 reject-stage unification
-- AIPC G-04 wire-protocol compile-time tightening
-- Cross-platform RESL Unix backends
-- `windows-squash` → `main` merge (re-deferred per quick-260428-rsu pending PR-583 maintainer response)
+**Stopped At:** v2.3 scope-lock complete via `/gsd-new-milestone`. 5 phases (25–29) defined with success criteria; 14 requirements + traceability in REQUIREMENTS.md; PROJECT.md Current Milestone section evolved; ROADMAP.md Phase Details (v2.3) section added; backlog refreshed for v2.4.
+**Next Steps:** Run `/gsd-plan-phase 25` to plan Cross-Platform RESL + AIPC Unix Design. Phase 25 is the recommended starting point because Plan 25-01 (RESL Unix backends) directly addresses the Linux POC credibility issue from the gap analysis. Phases 26–29 can be planned in any order relative to Phase 25 (no structural dependencies between them).
+
+**v2.3 phase order recommendation:**
+1. Phase 25 (RESL Unix + AIPC ADR) — directly unblocks the Linux POC, biggest demo win.
+2. Phase 27 (audit-attestation hardening) — small, single-plan; closes the production-readiness gap on v2.2 attestation.
+3. Phase 26 (PKG streaming follow-up) — medium scope; closes v2.2's PKG-01 partial.
+4. Phase 28 (Authenticode chain-walker) — small; lights up v2.2's AUD-03 partial.
+5. Phase 29 (WR-01 unification) — last; product decision builds on whatever the audit-ledger surface looks like after Phases 25–28 land.
 
 **Status of Phase 19 CLEAN items:**
 
