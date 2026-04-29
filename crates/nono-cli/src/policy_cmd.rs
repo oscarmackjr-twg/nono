@@ -2164,8 +2164,30 @@ fn resolve_to_manifest(
     // Credentials (custom_credentials from profile → manifest credentials)
     // OAuth2 credentials (auth field) are not yet representable in the manifest
     // schema, so only static-key credentials are exported.
+    //
+    // CL-04-M (Phase 22 review): the previous fork implementation emitted a
+    // sentinel `oauth2://` string as `source` when only `auth` was set. That
+    // produced manifest output that round-tripped to a value no downstream
+    // consumer (`nono run --config <manifest>`, `nono-proxy`) understands as
+    // a valid source URI scheme — `is_*_uri` returns false for `oauth2://`,
+    // so it falls through to "literal secret" treatment, which is wrong.
+    // Match upstream `19a0731f`: skip OAuth2-only credentials with a
+    // `tracing::warn!` so users see the gap explicitly. Static-key
+    // credentials still export normally.
     let mut credentials = Vec::new();
     for (name, cred) in &prof.network.custom_credentials {
+        // Skip credentials that have no static `credential_key` — the
+        // OAuth2 `auth` config has no manifest representation.
+        let Some(source_str) = cred.credential_key.as_deref() else {
+            tracing::warn!(
+                "custom credential '{}' uses OAuth2 auth and cannot be represented in the \
+                 capability manifest format; skipping. Re-issue the manifest after migrating \
+                 to a static credential key, or read the source profile directly.",
+                name
+            );
+            continue;
+        };
+
         let inject_mode = match cred.inject_mode {
             profile::InjectMode::Header => manifest::InjectMode::Header,
             profile::InjectMode::UrlPath => manifest::InjectMode::UrlPath,
@@ -2198,16 +2220,7 @@ fn resolve_to_manifest(
                 .upstream
                 .parse()
                 .map_err(|e| NonoError::ConfigParse(format!("invalid credential upstream: {e}")))?,
-            // PROF-03 (Phase 22): credential_key is now Optional. The manifest
-            // representation requires a source — when only OAuth2 `auth` is
-            // configured, surface a sentinel `oauth2://` source string so the
-            // manifest stays well-formed without leaking credential material.
-            // (Upstream 19a0731f used `continue` to skip the entry; fork retains
-            // the sentinel-source path for manifest visibility.)
-            source: cred
-                .credential_key
-                .as_deref()
-                .unwrap_or("oauth2://")
+            source: source_str
                 .parse()
                 .map_err(|e| NonoError::ConfigParse(format!("invalid credential source: {e}")))?,
             inject: Some(manifest::CredentialInject {
