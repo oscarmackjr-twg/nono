@@ -1841,8 +1841,16 @@ pub struct RunArgs {
     )]
     pub no_audit: bool,
 
-    /// Disable the default Merkleized append-only audit log
-    #[arg(long, conflicts_with_all = ["audit_integrity", "rollback"], help_heading = "OPTIONS")]
+    /// Disable the default Merkleized append-only audit log.
+    ///
+    /// CL-01-M (Phase 22 review): `--rollback` was previously listed as a
+    /// conflict, but rollback (filesystem snapshot) and audit-integrity
+    /// (Merkleized append-only ledger) are orthogonal concerns. POLY-02
+    /// only requires `--rollback` to conflict with `--no-audit` (the entire
+    /// audit trail), not with `--no-audit-integrity` (just the cryptographic
+    /// ledger). Pairing `--rollback --no-audit-integrity` is now allowed:
+    /// users get rollback without the audit-integrity overhead.
+    #[arg(long, conflicts_with_all = ["audit_integrity"], help_heading = "OPTIONS")]
     pub no_audit_integrity: bool,
 
     /// Add filesystem-state hashing over in-scope writable paths
