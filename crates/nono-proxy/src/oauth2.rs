@@ -100,14 +100,50 @@ impl TokenCache {
     /// which is synchronous. We bridge into async via
     /// [`tokio::runtime::Handle::current().block_on()`].
     ///
+    /// # Runtime requirements
+    ///
+    /// MN-01-M (Phase 22 review): this constructor MUST be invoked from a
+    /// thread that has an active tokio runtime in its TLS slot but is NOT
+    /// itself executing inside a tokio runtime worker. Specifically:
+    ///
+    /// - The inner [`Handle::current`] previously panicked if no runtime
+    ///   context was available; we now detect that case via
+    ///   [`Handle::try_current`] and return a structured
+    ///   [`ProxyError::Config`] error instead — callers can degrade
+    ///   gracefully rather than crash.
+    /// - The inner [`Handle::block_on`] will still deadlock or panic if
+    ///   invoked from inside an async task on a single-threaded scheduler.
+    ///   Do NOT call this from inside `async fn` bodies on a current-thread
+    ///   runtime; call from synchronous startup code or from a
+    ///   [`tokio::task::spawn_blocking`] task.
+    ///
+    /// In short: call this from synchronous startup code that runs inside
+    /// a `Runtime::block_on(async { ... })` or `Runtime::enter()` guard,
+    /// not from inside an `async fn` itself. The proxy's startup flow
+    /// (`CredentialStore::load` → `TokenCache::new`) satisfies this.
+    ///
     /// # Errors
     ///
-    /// Returns [`ProxyError::OAuth2Exchange`] if the initial exchange fails
-    /// (DNS, TCP, TLS, non-200, malformed JSON). The calling code skips the
-    /// route so the proxy can still start for other routes.
+    /// Returns [`ProxyError::Config`] if no tokio runtime context is
+    /// available (caller invoked outside `Runtime::block_on` /
+    /// `Runtime::enter` scope). Returns [`ProxyError::OAuth2Exchange`] if
+    /// the initial exchange fails (DNS, TCP, TLS, non-200, malformed JSON).
+    /// The calling code skips the route so the proxy can still start for
+    /// other routes.
     pub fn new(config: OAuth2ExchangeConfig, tls_connector: TlsConnector) -> Result<Self> {
+        // Convert the previously-implicit panic on missing runtime context
+        // into a structured error. The original `Handle::current()` panic
+        // message ("there is no reactor running") is opaque; this surfaces
+        // a contributor-friendly diagnostic that points at the runtime
+        // contract documented above.
+        let runtime_handle = tokio::runtime::Handle::try_current().map_err(|e| {
+            ProxyError::Config(format!(
+                "TokenCache::new requires an active tokio runtime context \
+                 (call from Runtime::block_on/enter or tokio::task::spawn_blocking): {e}"
+            ))
+        })?;
         let (access_token, expires_in) =
-            tokio::runtime::Handle::current().block_on(exchange_token(&config, &tls_connector))?;
+            runtime_handle.block_on(exchange_token(&config, &tls_connector))?;
 
         let expires_at = Instant::now() + expires_in;
         debug!(
