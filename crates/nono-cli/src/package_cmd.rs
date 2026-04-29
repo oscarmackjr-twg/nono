@@ -241,26 +241,46 @@ fn remove_hook_command_from_settings(settings: &mut serde_json::Value, hook_comm
 
 /// Find all profile symlinks in the global profiles dir that point into
 /// the given package install directory and remove them.
+///
+/// PT-01-M (Phase 22 review): canonicalize the resolved symlink target
+/// AND the install_dir before component-comparison via `Path::starts_with`.
+/// A target containing `..` segments (e.g.
+/// `../packages/acme/foo/../../../../sensitive`) could otherwise pass the
+/// prefix check while pointing outside `install_dir`. CLAUDE.md § Path
+/// Handling requires component-comparison on canonicalized paths.
+///
+/// Broken symlinks and missing entries are skipped (defensive: we should
+/// never panic during package removal). If `install_dir` itself is gone
+/// there is nothing to clean and we return early.
 fn remove_all_profile_symlinks_for_package(install_dir: &Path) -> Result<()> {
     let profiles_dir = package::profiles_dir()?;
     if !profiles_dir.exists() {
         return Ok(());
     }
 
+    // Canonicalize the install_dir once. If it's missing the package was
+    // already removed and there are no symlinks to compare against.
+    let canonical_install = match fs::canonicalize(install_dir) {
+        Ok(c) => c,
+        Err(_) => return Ok(()),
+    };
+
     let entries = fs::read_dir(&profiles_dir).map_err(NonoError::Io)?;
     for entry in entries {
         let entry = entry.map_err(NonoError::Io)?;
         let path = entry.path();
-        if let Ok(target) = fs::read_link(&path) {
-            // Resolve to absolute for comparison.
-            let resolved = if target.is_absolute() {
-                target
-            } else {
-                profiles_dir.join(&target)
-            };
-            if resolved.starts_with(install_dir) {
-                let _ = fs::remove_file(&path);
-            }
+        if fs::read_link(&path).is_err() {
+            continue;
+        }
+        // Canonicalize the symlink path itself; this resolves the link
+        // target AND any `..` segments, eliminating the lexical-prefix
+        // bypass. Skip broken symlinks (target missing on disk).
+        let resolved = match fs::canonicalize(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        if resolved.starts_with(&canonical_install) {
+            let _ = fs::remove_file(&path);
         }
     }
 
