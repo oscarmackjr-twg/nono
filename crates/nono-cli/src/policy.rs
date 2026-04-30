@@ -3066,4 +3066,66 @@ mod tests {
             "nix_runtime group must include /nix/store for NixOS compatibility"
         );
     }
+
+    #[test]
+    fn test_find_denied_user_grants_detects_overlap() {
+        let path = PathBuf::from("/nonexistent/test/secret");
+        let policy = load_policy(
+            r#"{"meta":{"version":2,"schema_version":"2.0"},"groups":{
+                "deny_creds":{"description":"creds","deny":{"access":["/nonexistent/test/secret"]}}
+            }}"#,
+        )
+        .expect("parse policy");
+
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability {
+            original: path.clone(),
+            resolved: path.clone(),
+            access: AccessMode::ReadWrite,
+            is_file: false,
+            source: CapabilitySource::User,
+        });
+
+        let conflicts = find_denied_user_grants(&[path], &caps, &policy);
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].1.as_deref(), Some("deny_creds"));
+    }
+
+    #[test]
+    fn test_find_denied_user_grants_ignores_non_user_grants() {
+        let path = PathBuf::from("/nonexistent/test/secret");
+        let policy = load_policy(sample_policy_json()).expect("parse policy");
+
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability {
+            original: path.clone(),
+            resolved: path.clone(),
+            access: AccessMode::ReadWrite,
+            is_file: false,
+            source: CapabilitySource::Group("system".to_string()),
+        });
+
+        let conflicts = find_denied_user_grants(&[path], &caps, &policy);
+        assert!(conflicts.is_empty());
+    }
+
+    #[test]
+    fn test_find_denied_user_grants_profile_deny_without_group() {
+        let path = PathBuf::from("/nonexistent/test/profile_denied");
+        let policy = load_policy(r#"{"meta":{"version":2,"schema_version":"2.0"},"groups":{}}"#)
+            .expect("parse policy");
+
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability {
+            original: path.clone(),
+            resolved: path.clone(),
+            access: AccessMode::ReadWrite,
+            is_file: false,
+            source: CapabilitySource::User,
+        });
+
+        let conflicts = find_denied_user_grants(&[path], &caps, &policy);
+        assert_eq!(conflicts.len(), 1);
+        assert!(conflicts[0].1.is_none());
+    }
 }
