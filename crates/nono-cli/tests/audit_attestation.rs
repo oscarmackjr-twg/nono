@@ -13,32 +13,16 @@ fn run_nono(args: &[&str], home: &Path, cwd: &Path) -> Output {
     let mut cmd = nono_bin();
     cmd.args(args)
         .env("HOME", home)
-        .env("XDG_CONFIG_HOME", home.join(".config"));
-    // Phase 27 Path B fix: on Windows, `dirs::home_dir()` resolves through
-    // `USERPROFILE` (or `HOMEDRIVE`+`HOMEPATH`), NOT `HOME`. Without this
-    // override the supervisor writes audit data to the real user profile
-    // (`%USERPROFILE%\.nono\audit\...`), defeating test isolation. Setting
-    // `USERPROFILE` to the test home redirects `dirs::home_dir()` to the
-    // temp dir on Windows. No-op on Unix where the helper already covers
-    // this via `HOME`.
-    #[cfg(target_os = "windows")]
-    {
-        // Phase 27 Path B: on Windows, `dirs::home_dir()` resolves through
-        // Windows API (`SHGetKnownFolderPath(FOLDERID_Profile)`) and IGNORES
-        // any `USERPROFILE` env override (dirs 6.0.0 + dirs-sys 0.5.0). Audit
-        // sessions are therefore unconditionally written under the real user's
-        // `%USERPROFILE%\.nono\audit\`. Overriding `LOCALAPPDATA`/`APPDATA`
-        // would create a path-mismatch: the supervisor would write the audit
-        // session under real %USERPROFILE% but read rollback/config dirs from
-        // the test temp dir, causing "Session not found" during shutdown.
-        //
-        // The redesigned tests instead identify their session via a
-        // set-difference snapshot of the real audit root (see
-        // `audit_root_for_supervisor` + `new_session_id_after_run`). This
-        // matches the established Windows-test convention (e.g.
-        // env_vars.rs::windows_run_read_only_allowlist_blocks_runtime_write_attempt).
-        let _ = home;
-    }
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        // Phase 27.1 (REQ-NTH-03): NONO_TEST_HOME is the production-code seam
+        // added in Plans 27.1-01 and 27.1-02. The supervisor calls
+        // `crate::config::nono_home_dir()` instead of `dirs::home_dir()` and
+        // honors this env var on all platforms (including Windows, which
+        // ignores `USERPROFILE` overrides via `SHGetKnownFolderPath`). This
+        // closes Phase 27 Blocker 1 (audit_root not env-overridable on
+        // Windows) and Blocker 2 (audit/rollback path mismatch under
+        // partial env redirection).
+        .env("NONO_TEST_HOME", home);
     cmd.current_dir(cwd).output().expect("failed to run nono")
 }
 
@@ -161,6 +145,13 @@ fn hex_decode_test(s: &str) -> Option<Vec<u8>> {
 /// snapshot of session-ids in that dir, run the supervisor, and identify
 /// the new session as the set difference. This mirrors the pattern already
 /// used by the Windows env_vars.rs tests (e.g. `windows_run_read_only_allowlist_blocks_runtime_write_attempt`).
+///
+/// Phase 27.1: Now unused — the NONO_TEST_HOME seam routes the supervisor's
+/// `audit_root()` to `<NONO_TEST_HOME>/.nono/audit` on all platforms, so
+/// the simpler `only_audit_session_id` helper suffices. Kept for potential
+/// future use (e.g., a test that intentionally coexists with parent-process
+/// audit sessions).
+#[allow(dead_code)]
 fn audit_root_for_supervisor(home: &Path) -> PathBuf {
     #[cfg(target_os = "windows")]
     {
@@ -181,6 +172,9 @@ fn audit_root_for_supervisor(home: &Path) -> PathBuf {
 /// Used to identify the test's newly-created session as a set-difference
 /// between a pre-run snapshot and a post-run scan. Robust to other audit
 /// sessions that exist in the user's real profile on Windows.
+///
+/// Phase 27.1: Now unused — see `audit_root_for_supervisor` rationale.
+#[allow(dead_code)]
 fn audit_session_ids_snapshot(audit_root: &Path) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
     let entries = match fs::read_dir(audit_root) {
@@ -200,6 +194,9 @@ fn audit_session_ids_snapshot(audit_root: &Path) -> std::collections::HashSet<St
 /// Resolve the test's session id by computing the set-difference between
 /// a pre-run snapshot and the current state of the audit root. Asserts
 /// exactly one new directory was created.
+///
+/// Phase 27.1: Now unused — see `audit_root_for_supervisor` rationale.
+#[allow(dead_code)]
 fn new_session_id_after_run(
     audit_root: &Path,
     before: &std::collections::HashSet<String>,
@@ -219,7 +216,6 @@ fn new_session_id_after_run(
     new_ids.remove(0)
 }
 
-#[allow(dead_code)]
 fn only_audit_session_id(home: &Path) -> String {
     let audit_root = home.join(".nono").join("audit");
     let mut session_ids: Vec<String> = fs::read_dir(&audit_root)
@@ -253,41 +249,26 @@ fn only_audit_session_id(home: &Path) -> String {
 // `crates/nono-cli/src/audit_attestation.rs` uses generate_signing_key
 // per-session instead.
 //
-// The fixtures are kept verbatim under #[ignore] so the file ports cleanly
-// (D-13 satisfied) and they can be unignored in 22-05b after the trust
-// signing refactor (RESEARCH Contradiction #2 deferred-cleanly path).
+// Phase 27 Plan 01 (REQ-AAH-01) — Path B fixture redesign attempted on
+// Windows host on 2026-04-29; surfaced 3 platform blockers (dirs::home_dir
+// not env-overridable on Windows, audit/rollback path mismatch under
+// partial env redirection, audit-integrity exit-cleanup "Session not found").
+// Tests re-#[ignore]'d with v2.4-deferral note; production code preserved
+// byte-identical. See `.planning/phases/27-audit-attestation-hardening/
+// 27-01-SUMMARY.md` for full Phase 27 surfaced report.
 //
-// Phase 27 Plan 01 (REQ-AAH-01) — Path B fixture redesign was attempted
-// on a Windows host. The redesign (random KeyPair + env:// keystore URI +
-// structural assertions + fail-closed pubkey verification + key_id_hex
-// round-trip) is correct and is preserved in the test bodies below.
-// However, three Windows-specific platform blockers prevent the tests
-// from running under the locked scope (no production-code changes):
-//
-//   1. `dirs::home_dir()` on Windows ignores USERPROFILE env override
-//      (dirs 6.0.0 + dirs-sys 0.5.0 use SHGetKnownFolderPath directly).
-//      Audit sessions are unconditionally written to the real user
-//      profile.
-//   2. Mixing LOCALAPPDATA redirection with the un-redirectable
-//      audit_root() causes path-mismatch "Session not found" errors.
-//   3. Even using the real user profile entirely, the audit-integrity
-//      exit-cleanup path on Windows surfaces "Session not found: <id>"
-//      AFTER successfully writing session.json + audit-events.ndjson +
-//      audit-attestation.bundle. This is an independent Windows
-//      cleanup-path issue, not the test's correctness.
-//
-// Resolution path (deferred to v2.4 milestone):
-//   - Verify the Path B test bodies pass on a Linux/macOS host.
-//   - Investigate the Windows audit-integrity exit-cleanup
-//     "Session not found" issue separately.
-//   - Optionally add a `NONO_TEST_HOME` env-var seam in production code
-//     that overrides `dirs::home_dir()` for Windows test isolation.
-//
-// Until then, both tests stay #[ignore]'d on all platforms with this
-// updated Phase 27 deferral note. The redesigned bodies are preserved
-// and ready for the v2.4 follow-up.
+// Phase 27.1 (REQ-NTH-01..03, 2026-05-04) — Production-code NONO_TEST_HOME
+// seam landed in `crates/nono-cli/src/config/mod.rs::nono_home_dir()`. The
+// helper honors NONO_TEST_HOME on all platforms (including Windows, where
+// `dirs::home_dir()` ignores `USERPROFILE` via `SHGetKnownFolderPath`).
+// 15 callsites in `crates/nono-cli/src/` migrated. The seam closes
+// Blockers 1 and 2; this plan re-enables both deferred tests below using
+// the seam. Blocker 3 (audit-integrity exit-cleanup `Session not found`)
+// is handled per D-27.1-14: small fixes in-scope, larger investigation
+// surfaces as a v2.4 follow-up. See
+// `.planning/phases/27.1-nono-test-home-seam/27.1-CONTEXT.md` for the
+// full Phase 27.1 decision set.
 #[test]
-#[ignore = "Phase 27 Plan 01 deferred to v2.4: Windows audit-integrity exit-cleanup issue + dirs::home_dir() not env-overridable on Windows; Path B redesign preserved in body for Linux/macOS verification"]
 fn audit_verify_reports_signed_attestation_with_pinned_public_key() {
     let (_tmp, home, workspace) = setup_isolated_home();
 
@@ -307,15 +288,17 @@ fn audit_verify_reports_signed_attestation_with_pinned_public_key() {
     );
     let env_var = format!("NONO_TEST_AUDIT_KEY_VERIFY_{suffix}");
     let secret = format!("phase-27-path-b-test-secret-{suffix}");
-    std::env::set_var(&env_var, &secret);
+    // Per-invocation env-var name (PID + nanos suffix above) avoids
+    // collisions across parallel test runs. ENV_LOCK from
+    // `crates/nono-cli/src/test_env.rs` is unit-test-only (the module is
+    // `#[cfg(test)]`-gated to the unit-test compilation unit), so this
+    // integration test relies on per-invocation env-var names instead.
+    // Disallowed-methods lint is locally allowed for the same reason.
+    #[allow(clippy::disallowed_methods)]
+    {
+        std::env::set_var(&env_var, &secret);
+    }
     let keyref = format!("env://{env_var}");
-
-    // Snapshot existing audit sessions BEFORE running so we can identify
-    // the new session as a set-difference. Required on Windows where the
-    // supervisor writes to %USERPROFILE%\.nono\audit\ and other sessions
-    // may already exist.
-    let audit_root = audit_root_for_supervisor(&home);
-    let before = audit_session_ids_snapshot(&audit_root);
 
     let cmd_args = run_command_args();
     let mut args = vec![
@@ -327,11 +310,18 @@ fn audit_verify_reports_signed_attestation_with_pinned_public_key() {
     ];
     args.extend(cmd_args.iter().copied());
     let run_output = run_nono(&args, &home, &workspace);
-    std::env::remove_var(&env_var);
+    #[allow(clippy::disallowed_methods)]
+    {
+        std::env::remove_var(&env_var);
+    }
     assert_success(&run_output);
 
-    let session_id = new_session_id_after_run(&audit_root, &before);
-    let session_dir = audit_root.join(&session_id);
+    // Phase 27.1: NONO_TEST_HOME isolates the test's audit_root to <home>/.nono/audit
+    // so the simple single-session lookup is unambiguous. The Windows
+    // set-difference workaround (audit_root_for_supervisor +
+    // new_session_id_after_run) is no longer needed.
+    let session_id = only_audit_session_id(&home);
+    let session_dir = home.join(".nono").join("audit").join(&session_id);
 
     // STRUCTURAL ASSERTION 1: bundle file exists at canonical path.
     let bundle_path = session_dir.join("audit-attestation.bundle");
