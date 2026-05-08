@@ -68,7 +68,7 @@ Windows security must be as structurally impossible and feature-complete as Unix
 - ✔ MSI packaging and code signing automation — v1.0 Phase 4
 - ✔ **WRAP-01** — `nono wrap` on Windows (Direct strategy + Job Object + WFP + canonical help text) — v2.0 Phases 07, 14-02
 - ✔ **SESS-01/02/03** — `nono logs`, `nono inspect`, `nono prune` on Windows session records — v2.0 Phase 07 (SESS-03 live UAT waived as v2.0-known-issue)
-- ⚠ **SHELL-01** — `nono shell` interactive ConPTY on Windows 10 17763+ — v2.0 Phase 08 claim invalidated by 2026-05-07 debug session `nono-shell-status-dll-init-failed` (WRITE_RESTRICTED + ConPTY = 0xC0000142); needs-rework pending Phase 30 outcome
+- ⚠ **SHELL-01** — `nono shell` interactive ConPTY on Windows: Phase 30 Wave 1 field smoke surfaced Acceptance #1 failure (silent launch — supervisor exits without spawning Low-IL child; same shape as 2026-05-07 `nono-shell-status-dll-init-failed`); Wave 2 ProcMon investigation in flight (Plan 30-05, 3-5 working day timebox per CONTEXT D-04)
 - ✔ **PORT-01** — port-level WFP allowlists (`--allow-port`, bind/connect) — v2.0 Phase 09
 - ✔ **PROXY-01** — proxy credential injection via `--network-profile` / `--credential` / `--upstream-proxy` (runbook corrected in Phase 14-03) — v2.0 Phase 09; live UAT waived as `no-test-fixture`
 - ✔ **LEARN-01** — `nono learn` on Windows via ETW — v2.0 Phase 10

@@ -1,17 +1,10 @@
 ---
 slug: nono-shell-status-dll-init-failed
-status: architecture-decided-pending-implementation
+status: architecture-decided-wave-2-investigating
 resolution_doc: .planning/phases/30-windows-nono-shell-architecture/30-CONTEXT.md
-checkpoint_outcome: |
-  H1 refuted (cmd.exe also fails); H7 narrowed to "PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE
-  + WRITE_RESTRICTED + session-SID = 0xC0000142". Two field fixes attempted on disk
-  (Option A: null token; Option D: Low-IL primary token); both reverted. Working tree
-  is clean. User-directed pause to bring this to a planning checkpoint rather than
-  continue iterating on token shapes — the iterations were producing either a
-  non-launching shell or a non-enforcing shell, neither of which is shippable.
 trigger: "nono shell --profile claude-code --allow-cwd silently exits on Windows test box with STATUS_DLL_INIT_FAILED (0xC0000142, decimal -1073741502). Field validation per HANDOFF.json after today's apply_unlink_overrides fix (commit 48a2abcb)."
 created: 2026-05-07T19:30:00Z
-updated: 2026-05-07T19:55:00Z
+updated: 2026-05-08T02:40:00Z
 host: windows-test-box
 binary: target/x86_64-pc-windows-msvc/release/nono.exe
 binary_built: 2026-05-07T15:06
@@ -394,3 +387,35 @@ User ran `.\nono.exe shell --profile claude-code --allow-cwd --shell C:\Windows\
 - Different proc-attribute list
 
 **Action:** request `-vv` tracing output to localize the last-good supervisor stage before child death. Avoid spinning more code analysis without that data — static analysis already produced one wrong answer (H1).
+
+## Wave 1 Field Smoke Outcome
+
+**Date:** 2026-05-07 (Phase 30 Plan 30-04, Wave 2 trigger path)
+
+**Outcome:** Acceptance #1 FAIL (silent launch). Wave 1 cascade arm landed but does NOT produce a runnable Low-IL child on this test box.
+
+**Diagnostic evidence** (manual override of harness — see "Harness collateral" below):
+
+| Probe | Outer (before `nono shell`) | "Inner" (after `nono shell`) |
+|---|---|---|
+| `whoami /groups` mandatory label | Medium S-1-16-8192 | **Medium S-1-16-8192** (unchanged) |
+| `$PID` | 4708 | **4708** (same process — never left outer) |
+| `Get-Process nono` | — | **(empty)** (supervisor exited silently) |
+
+The supervisor printed the capability banner, applied filesystem capabilities (label-guard warnings visible — D-09 leaked-Low-IL noise expected), then the child never materialized and control returned to the outer Medium-IL PowerShell. Same shape as the pre-Phase-30 baseline this debug session was opened to fix; Wave 1's `WindowsTokenArm::LowIlPrimary` cascade-arm landing did not change observable behavior.
+
+**Acceptance verdicts:**
+- #1 (shell launches at Low-IL): **FAIL** (silent exit; no Low-IL child)
+- #2 (TUI renders inside sandbox): **RETROACTIVELY UNTESTED** — Checkpoint 1's `tui-pass` was a false positive; `claude` ran in the OUTER shell (RESEARCH Pitfall 2 silent-failure mode realized in practice — exactly the failure mode the runbook warned about, and that visual TUI quality alone cannot detect)
+- #3 (write-deny outside grant set): **UNTESTED** (couldn't enter sandbox)
+- #4 (read-still-works on granted path): **UNTESTED** (couldn't enter sandbox)
+
+**Harness collateral** (must be addressed in Plan 30-05 OR a separate harness-rework plan before Wave 2 ProcMon is meaningful):
+
+1. `scripts/test-windows-shell-write-deny.ps1:113` — PowerShell `$p:` parser ambiguity (drive-qualifier collision). Fixed inline to `${p}:`.
+2. The harness invokes `nono shell --shell powershell.exe -- -NoLogo -NoProfile -Command <injected>`, but `nono shell` is purely interactive — no positional/trailing-args surface, no `-c`-style command injection. Result: `error: unexpected argument '-NoLogo' found`. Plan 30-05 (or a sibling) must decide between (a) adding `nono shell --command` flag, (b) rewriting harness to use stdin / `nono wrap`, or (c) converting Acceptance #3/#4 to fully manual diagnostics like the IL/PID assertions used to detect the silent launch above.
+3. The harness's `Out-File '$path' 'content'` syntax is invalid PowerShell (positional arg interpreted as `-Encoding`). Plan 30-05 should normalize all harness write attempts to `Set-Content -Path -Value` or pipeline-style `'content' | Out-File -FilePath`.
+
+**Log files:** `ci-logs-local/test-windows-shell-write-deny-20260507-214336.log` (harness's INDETERMINATE first attempt, before manual override).
+
+**Plan 30-05 input:** ProcMon trace `nono shell --profile claude-code --allow-cwd` against the current binary (commit `a496734b`). Watch for `\Device\ConDrv` ALPC + ImageLoad chain in conhost.exe; cross-check whether the Low-IL primary token's CreateProcess succeeds at all (process create event with the supervisor as parent and conhost/powershell as child) versus failing pre-create. The diagnostic that the supervisor itself exits — not just the child — narrows the hypothesis to a parent-side failure after capability application: pipe-server bring-up, ConPTY allocation, or the cascade-arm decision producing a token shape that fails downstream.
