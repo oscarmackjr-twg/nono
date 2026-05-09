@@ -46,8 +46,8 @@ created: 2026-05-09
 | 27-01-T4 | 01 | 1 | REQ-AAH-01 (AC2) | — | Documentation pass — Phase 27 Path B rationale recorded above redesigned tests; substrings `"Phase 27"` + `"Path B"` + `"v2.4"` present | grep gate | `grep -c "Phase 27" crates/nono-cli/tests/audit_attestation.rs` → ≥1 (24); `grep -c "Path B"` → ≥1 (4); `grep -c "v2.4"` → ≥1 (1) | ✅ | ✅ green |
 | 27-01-T5 | 01 | 1 | REQ-AAH-01 (AC3) | — | Verification gate — full audit suite green | integration (full file) | `cargo test -p nono-cli --test audit_attestation` → `4 passed; 0 failed; 0 ignored` | ✅ | ✅ green |
 | 27-01 (must-have 3) | 01 | 1 | REQ-AAH-01 | T-27-01 (Tampering) | No `from_pkcs8` parsing surface introduced (Path B locked invariant) | grep gate (workspace) | `grep -rc 'from_pkcs8' crates/nono-cli/tests/` → 0 across all 10 test files | ✅ | ✅ green |
-| 27-01 (must-have 4) | 01 | 1 | REQ-AAH-01 | T-27-01 (Tampering) | Tests use `env://` URI (D-AAH-01 deviation), not new `--audit-sign-key file://` callsites | grep gate | `grep -c 'env://NONO_TEST_KEY\|env://AUDIT_KEY' crates/nono-cli/tests/audit_attestation.rs` → ≥1 | ✅ | ✅ green |
-| 27-01 (must-have 5) | 01 | 1 | REQ-AAH-01 | T-27-01 (Tampering) | Bundle structural correctness — `audit-attestation.bundle` AND `signatures` AND (`payloadType`/`payload_type`) all referenced in test source | grep gate | `grep -c 'audit-attestation.bundle'` → 5; `grep -c 'signatures'` → 5; `grep -c 'payloadType'` → 5 | ✅ | ✅ green |
+| 27-01 (must-have 4) | 01 | 1 | REQ-AAH-01 | T-27-01 (Tampering) | Tests use `env://` URI (D-AAH-01 deviation), not new `--audit-sign-key file://` callsites. Env-var name is constructed dynamically via `format!("NONO_TEST_AUDIT_KEY_VERIFY_{suffix}")` (PID+nanos collision-mitigation). | grep gate | `grep -c 'env://' crates/nono-cli/tests/audit_attestation.rs` → ≥1 (2 at HEAD: lines 297, 319) | ✅ | ✅ green |
+| 27-01 (must-have 5) | 01 | 1 | REQ-AAH-01 | T-27-01 (Tampering) | Bundle structural correctness — `audit-attestation.bundle` AND `signatures` AND (`payloadType`/`payload_type`) all referenced in test source | grep gate | `grep -c 'audit-attestation.bundle'` → ≥1 (5 at HEAD); `grep -c 'signatures'` → ≥1 (5 at HEAD); `grep -c 'payloadType'` → ≥1 (4 at HEAD; bundle path is `dsseEnvelope.payloadType` per sigstore-rs Bundle v0.3) | ✅ | ✅ green |
 | 27-01 (must-have 6) | 01 | 1 | REQ-AAH-01 | T-27-01 (Tampering) | Fail-closed verification — wrong-pubkey path returns non-zero exit | grep gate | `grep -c '!verify_output.status.success\|wrong_verify_output' crates/nono-cli/tests/audit_attestation.rs` → ≥2 (4) | ✅ | ✅ green |
 | 27-01 (must-have 7) | 01 | 1 | REQ-AAH-01 | T-27-02 (Spoofing) | `key_id_hex` round-trip — KeyPair-extracted hex matches `attestation.key_id_hex` in `audit show --json` | grep gate + assertion | `grep -c 'key_id_hex\|key_id'` → 6 | ✅ | ✅ green |
 
@@ -111,3 +111,24 @@ Net effect at HEAD: REQ-AAH-01 acceptance criteria 1, 2, 3, 4 are all MET; both 
 | Escalated | 3 (clippy debt → deferred-items.md; byte-identity → superseded by 27.1+27.2 charter; `byte-equality` docstring → cosmetic; stress validation → future phase) |
 | New tests written | 0 |
 | Existing tests verified | 4 (all green) |
+
+---
+
+## Validation Audit 2026-05-09 (re-audit)
+
+Re-confirmed compliance at HEAD via fresh `cargo test -p nono-cli --test audit_attestation` run: **4 passed; 0 failed; 0 ignored** (~7.5 s). All Per-Task Map runtime rows remain green.
+
+Documentation drift corrected in two grep-gate cells of the Per-Task Map (cosmetic only — runtime behavior was always satisfied):
+
+| Row | Drift | Fix |
+|-----|-------|-----|
+| must-have 4 | Documented grep pattern (`env://NONO_TEST_KEY\|env://AUDIT_KEY`) returned 0 because the actual env-var name is constructed dynamically via `format!("NONO_TEST_AUDIT_KEY_VERIFY_{suffix}")` (PID+nanos collision-mitigation). | Generalized grep to `env://` (returns 2 at HEAD: lines 297, 319). Behavior unchanged. |
+| must-have 5 | Documented `payloadType` count = 5; actual = 4 (bundle path is `dsseEnvelope.payloadType` per sigstore-rs Bundle v0.3, referenced 4× in source). Gate (≥1) was always satisfied. | Updated counts to reflect HEAD; clarified DSSE Bundle v0.3 path. |
+
+| Metric | Count |
+|--------|-------|
+| Gaps found | 0 (runtime); 2 (cosmetic doc drift in grep-gate cells) |
+| Resolved | 2 (grep gates corrected in-place) |
+| Escalated | 0 |
+| New tests written | 0 |
+| Existing tests verified | 4 (all green at HEAD) |
