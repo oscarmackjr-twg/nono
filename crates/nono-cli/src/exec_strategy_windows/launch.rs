@@ -1016,9 +1016,10 @@ pub(super) fn should_use_low_integrity_windows_launch(caps: &CapabilitySet) -> b
 ///
 /// Branch ordering matters and is enforced here:
 ///   1. Detached launch (NONO_DETACHED_LAUNCH=1) → Null token (Phase 15 waiver)
-///   2. PTY allocated (`pty.is_some()`) → Low-IL primary (Phase 30 D-01)
+///   2. PTY allocated (`pty.is_some()`) → BrokerLaunch (Phase 31 D-15;
+///      replaces Phase 30's direct LowIlPrimary spawn)
 ///   3. Per-session SID present → WRITE_RESTRICTED (existing non-PTY supervised)
-///   4. Caps demand Low-IL (legacy Direct path) → Low-IL primary
+///   4. Caps demand Low-IL (legacy Direct path) → LowIlPrimary (D-15 fallback)
 ///   5. Fallback → Null (caller's identity)
 ///
 /// (2) precedes (3) because `config.session_sid` is unconditionally `Some(...)`
@@ -1032,11 +1033,27 @@ pub(super) enum WindowsTokenArm {
     /// WRITE_RESTRICTED + per-session restricting SID. Existing non-PTY
     /// supervised path. Triggers STATUS_DLL_INIT_FAILED (0xC0000142) under
     /// PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE — hence Phase 30 D-01 routes
-    /// PTY-allocating launches to LowIlPrimary instead.
+    /// PTY-allocating launches to BrokerLaunch instead.
     WriteRestricted,
     /// Low-IL primary token. Phase 30 D-01 supervised+PTY path; mandatory
     /// label NO_WRITE_UP enforces write-deny via MIC pre-DACL kernel check.
+    ///
+    /// Phase 31 D-15: This arm is RETAINED as a structurally-unreachable
+    /// fallback for the legacy Direct path (`config.session_sid.is_none()
+    /// && caps_demand_low_il`) and as the carrier for the only direct
+    /// runtime exercise of `nono::create_low_integrity_primary_token`
+    /// (the `low_integrity_primary_token_tests` module). The PTY+supervised
+    /// path now routes through `BrokerLaunch`.
     LowIlPrimary,
+    /// Phase 31 D-01/D-15: spawn `nono-shell-broker.exe` (Medium IL) as the
+    /// caller's identity; broker self-degrades to Low IL via
+    /// `nono::create_low_integrity_primary_token` and spawns the actual
+    /// shell child. Replaces the Phase 30 LowIlPrimary direct-Low-IL spawn
+    /// for the PTY+supervised path because the direct path triggered
+    /// STATUS_DLL_INIT_FAILED (0xC0000142) at CSRSS console-attach time
+    /// (RESEARCH §1b — broker pattern is the validated path; PoC PASS
+    /// 2026-05-08).
+    BrokerLaunch,
 }
 
 /// Pure decision function for the `spawn_windows_child` cascade. Returns the
@@ -1051,10 +1068,24 @@ pub(super) fn select_windows_token_arm(
     if is_detached {
         WindowsTokenArm::Null
     } else if has_pty {
-        WindowsTokenArm::LowIlPrimary
+        // Phase 31 D-15: was LowIlPrimary; PTY-allocating launches now route
+        // through nono-shell-broker.exe (broker spawn at Medium IL → broker
+        // self-degrades to Low IL via nono::create_low_integrity_primary_token
+        // and spawns the actual sandboxed child). Rationale: the direct
+        // CreateProcessAsUserW(low_il_token, ...) + PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE
+        // shape from Phase 30 triggered STATUS_DLL_INIT_FAILED (0xC0000142)
+        // at CSRSS console-attach time during KernelBase.dll DllMain on
+        // freshly-attached consoles. The broker pattern was empirically
+        // validated by the PoC at .planning/quick/260508-m99-... on 2026-05-08.
+        WindowsTokenArm::BrokerLaunch
     } else if has_session_sid {
         WindowsTokenArm::WriteRestricted
     } else if caps_demand_low_il {
+        // Phase 31 D-15: kept as Direct-path fallback (structurally unreachable
+        // today because Windows supervised launches have session_sid=Some(...)
+        // unconditionally per execution_runtime.rs:334, but pinned by the
+        // pty_none_caps_demand_low_il_selects_low_il test for future readers
+        // and as the only direct runtime exercise of the lifted FFI primitive).
         WindowsTokenArm::LowIlPrimary
     } else {
         WindowsTokenArm::Null
@@ -1117,12 +1148,11 @@ pub(super) fn spawn_windows_child(
         WindowsTokenArm::WriteRestricted => {
             // Safe: the cascade reaches this arm only when config.session_sid.is_some(),
             // verified by select_windows_token_arm's has_session_sid input above.
-            let sid = config
-                .session_sid
-                .as_ref()
-                .ok_or_else(|| NonoError::SandboxInit(
+            let sid = config.session_sid.as_ref().ok_or_else(|| {
+                NonoError::SandboxInit(
                     "session_sid disappeared between gate decision and use".into(),
-                ))?;
+                )
+            })?;
             let holder = restricted_token::create_restricted_token_with_sid(sid)?;
             let raw = holder.h_token;
             _restricted_holder = Some(holder);
@@ -1136,6 +1166,19 @@ pub(super) fn spawn_windows_child(
             _low_integrity_holder = Some(holder);
             _restricted_holder = None;
             raw
+        }
+        WindowsTokenArm::BrokerLaunch => {
+            // Phase 31 D-15: Broker spawns at caller's identity (Medium IL =
+            // nono.exe's token), so h_token must be null on the downstream
+            // CreateProcess* call. The broker self-degrades to Low IL inside
+            // its own process via `nono::create_low_integrity_primary_token`
+            // and spawns the actual sandboxed shell child. The actual
+            // CreateProcessW(broker, ...) + PROC_THREAD_ATTRIBUTE_HANDLE_LIST
+            // dispatch lives in the `if let Some(pty_pair) = pty` PTY branch
+            // below — this match arm only owns the token (none) selection.
+            _restricted_holder = None;
+            _low_integrity_holder = None;
+            std::ptr::null_mut()
         }
     };
     // NOTE: do NOT re-wrap h_token in a fresh OwnedHandle — the holder above
@@ -1420,18 +1463,35 @@ mod detached_token_gate_tests {
 mod pty_token_gate_tests {
     use super::{select_windows_token_arm, WindowsTokenArm};
 
-    /// Wave 1 NEW path: PTY allocation triggers Low-IL primary token, even
-    /// when session_sid is also Some (which it always is on Windows supervised).
-    /// This test pins the branch-ordering rule documented in 30-CONTEXT D-01.
+    /// Phase 31 D-15 / D-01 NEW path: PTY allocation triggers the broker spawn,
+    /// even when session_sid is also Some (which it always is on Windows supervised).
+    /// This test pins the branch-ordering rule documented in 31-CONTEXT D-01.
+    /// Replaces Phase 30's pty-some-no-detach LowIlPrimary assertion (commit 9c226dcf)
+    /// which asserted `LowIlPrimary` — that path triggered STATUS_DLL_INIT_FAILED
+    /// (0xC0000142) on the supervised+ConPTY shape per Phase 30 30-WAVE-2-PROCMON.md.
     #[test]
-    fn pty_some_no_detach_selects_low_il() {
+    fn pty_some_no_detach_selects_broker_launch() {
         let arm = select_windows_token_arm(
-            /* is_detached */ false,
-            /* has_pty */ true,
+            /* is_detached */ false, /* has_pty */ true,
             /* has_session_sid */ true, // always true on Windows supervised
             /* caps_demand_low_il */ false,
         );
-        assert_eq!(arm, WindowsTokenArm::LowIlPrimary);
+        assert_eq!(arm, WindowsTokenArm::BrokerLaunch);
+    }
+
+    /// Phase 31 D-15: explicit guard that has_pty=true OVERRIDES has_session_sid=true
+    /// AND caps_demand_low_il=true in the cascade, ensuring the BrokerLaunch arm
+    /// fires for the PTY+supervised path rather than falling through to
+    /// WriteRestricted or the LowIlPrimary fallback. Defense-in-depth for the
+    /// rule that the PTY signal precedes both other supervised-path signals.
+    #[test]
+    fn broker_launch_takes_precedence_over_session_sid_on_pty_path() {
+        let arm = select_windows_token_arm(
+            /* is_detached */ false, /* has_pty */ true, /* has_session_sid */ true,
+            /* caps_demand_low_il */
+            true, // even if caps_demand_low_il, BrokerLaunch wins
+        );
+        assert_eq!(arm, WindowsTokenArm::BrokerLaunch);
     }
 
     /// Detached path short-circuits BEFORE the PTY arm. Phase 15 waiver:
@@ -1439,9 +1499,7 @@ mod pty_token_gate_tests {
     #[test]
     fn pty_some_with_detach_selects_null() {
         let arm = select_windows_token_arm(
-            /* is_detached */ true,
-            /* has_pty */ true,
-            /* has_session_sid */ true,
+            /* is_detached */ true, /* has_pty */ true, /* has_session_sid */ true,
             /* caps_demand_low_il */ false,
         );
         assert_eq!(arm, WindowsTokenArm::Null);
@@ -1452,10 +1510,8 @@ mod pty_token_gate_tests {
     #[test]
     fn pty_none_with_session_sid_selects_write_restricted() {
         let arm = select_windows_token_arm(
-            /* is_detached */ false,
-            /* has_pty */ false,
-            /* has_session_sid */ true,
-            /* caps_demand_low_il */ false,
+            /* is_detached */ false, /* has_pty */ false,
+            /* has_session_sid */ true, /* caps_demand_low_il */ false,
         );
         assert_eq!(arm, WindowsTokenArm::WriteRestricted);
     }
@@ -1466,10 +1522,8 @@ mod pty_token_gate_tests {
     #[test]
     fn pty_none_no_session_sid_selects_null_fallback() {
         let arm = select_windows_token_arm(
-            /* is_detached */ false,
-            /* has_pty */ false,
-            /* has_session_sid */ false,
-            /* caps_demand_low_il */ false,
+            /* is_detached */ false, /* has_pty */ false,
+            /* has_session_sid */ false, /* caps_demand_low_il */ false,
         );
         assert_eq!(arm, WindowsTokenArm::Null);
     }
@@ -1481,10 +1535,8 @@ mod pty_token_gate_tests {
     #[test]
     fn pty_none_caps_demand_low_il_selects_low_il() {
         let arm = select_windows_token_arm(
-            /* is_detached */ false,
-            /* has_pty */ false,
-            /* has_session_sid */ false,
-            /* caps_demand_low_il */ true,
+            /* is_detached */ false, /* has_pty */ false,
+            /* has_session_sid */ false, /* caps_demand_low_il */ true,
         );
         assert_eq!(arm, WindowsTokenArm::LowIlPrimary);
     }
@@ -1494,9 +1546,7 @@ mod pty_token_gate_tests {
     #[test]
     fn detach_dominates_other_signals() {
         let arm = select_windows_token_arm(
-            /* is_detached */ true,
-            /* has_pty */ false,
-            /* has_session_sid */ true,
+            /* is_detached */ true, /* has_pty */ false, /* has_session_sid */ true,
             /* caps_demand_low_il */ true,
         );
         assert_eq!(arm, WindowsTokenArm::Null);
@@ -1526,8 +1576,9 @@ mod low_integrity_primary_token_tests {
     #[test]
     #[allow(clippy::unwrap_used)]
     fn low_integrity_primary_token_sets_low_il() {
-        let token = create_low_integrity_primary_token()
-            .expect("create_low_integrity_primary_token must succeed in a normal user-logon test process");
+        let token = create_low_integrity_primary_token().expect(
+            "create_low_integrity_primary_token must succeed in a normal user-logon test process",
+        );
         assert!(
             !token.0.is_null(),
             "low-integrity primary token handle is non-null"
@@ -1583,12 +1634,10 @@ mod low_integrity_primary_token_tests {
             "integrity-label SID must have at least one sub-authority; got {sub_authority_count}"
         );
         // SAFETY: same SID pointer is still valid; `(count - 1)` is in-range.
-        let last_sub_authority = unsafe {
-            *GetSidSubAuthority(label.Label.Sid, (sub_authority_count - 1) as u32)
-        };
+        let last_sub_authority =
+            unsafe { *GetSidSubAuthority(label.Label.Sid, (sub_authority_count - 1) as u32) };
         assert_eq!(
-            last_sub_authority,
-            SECURITY_MANDATORY_LOW_RID as u32,
+            last_sub_authority, SECURITY_MANDATORY_LOW_RID as u32,
             "duplicated token must be at Low integrity (RID 0x1000); got 0x{last_sub_authority:x}"
         );
     }
