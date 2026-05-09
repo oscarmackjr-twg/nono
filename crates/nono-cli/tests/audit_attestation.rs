@@ -510,3 +510,258 @@ fn rollback_signed_session_verifies_from_audit_dir_bundle() {
     // assertions on signature_verified, merkle_root_matches,
     // session_id_matches, verification_error.
 }
+
+// ---------------------------------------------------------------------------
+// Phase 27.2 BLOCKER regression tests (added 2026-05-09 by validation pass)
+// ---------------------------------------------------------------------------
+//
+// The two BLOCKERs below were surfaced by 27.2-REVIEW.md and resolved
+// inline by orchestrator commit 6e3a158f (`fix(27.2-CR): close BL-01 +
+// BL-02 from code review`). The existing pre-fix tests
+// (audit_verify_reports_signed_attestation_with_pinned_public_key and
+// rollback_signed_session_verifies_from_audit_dir_bundle) DO NOT cover
+// the BL-01/BL-02 surfaces because:
+//
+//   * Test 1 is audit-only (no `--rollback`), so finalize_supervised_exit
+//     takes the audit-only branch (line 685+ in rollback_runtime.rs) which
+//     has always written session.json directly to audit_state.session_dir.
+//
+//   * Test 2 uses `--allow-cwd`, which (per derive_tracked_paths in
+//     rollback_runtime.rs:294-304) does NOT register as a User-source
+//     Write|ReadWrite capability — so initialize_rollback_state returns
+//     (None, Skipped), no snapshot is captured, and finalize_supervised_exit
+//     also takes the audit-only branch. The combo (`--rollback`) flag is
+//     set but the rollback-active code path is short-circuited.
+//
+// To exercise the BL-01 mirror block (rollback_runtime.rs:658-671) and the
+// BL-02 canonical-rollback-root helper call (rollback_runtime.rs:244-252),
+// these tests pass an explicit `--allow <writable_dir>` to make
+// derive_tracked_paths return non-empty. That triggers
+// initialize_rollback_state to capture a snapshot AND finalize_supervised_exit
+// to take the rollback path (line 633+) which writes session.json to the
+// rollback dir, then post-fix mirrors it to the audit dir.
+//
+// A future revert of either fix would silently regress both verify-
+// correctness (`nono audit verify`) and rollback discoverability
+// (`nono rollback list`) for combo sessions. These tests catch that.
+
+/// REGRESSION TEST FOR BL-01 (REQ-AAHX-01):
+///
+/// Combo `--audit-integrity --rollback --allow <writable>` sessions write
+/// session.json exclusively to the rollback dir BEFORE the post-review fix
+/// at commit 6e3a158f. Without the mirror block at
+/// rollback_runtime.rs:658-671, `audit_session::load_session` `?`-fails on
+/// the missing audit-side session.json and `nono audit verify <id>`
+/// returns "Session not found" instead of running verification.
+///
+/// This test fails closed (assert exit 0 from `nono audit verify`)
+/// when the BL-01 mirror block is reverted or weakened.
+#[test]
+fn combo_rollback_audit_session_findable_by_audit_verify() {
+    let (_tmp, home, workspace) = setup_isolated_home();
+
+    // Reproduction recipe per 27.2-REVIEW.md §BL-01: the writable allow-dir
+    // is what triggers derive_tracked_paths to return non-empty (the
+    // strictly-writable User-source capability gate at
+    // rollback_runtime.rs:294-304). Without it, `--rollback` short-circuits
+    // to (None, Skipped) and finalize_supervised_exit takes the audit-only
+    // branch — bypassing the BL-01 surface.
+    //
+    // The dir lives INSIDE the test's NONO_TEST_HOME tempdir so the
+    // supervisor's canonicalize-then-starts_with path-traversal guard
+    // accepts it.
+    let writable_dir = home.join("workdir");
+    fs::create_dir_all(&writable_dir).expect("create writable dir");
+    let writable_str = writable_dir.to_str().expect("writable dir utf8");
+
+    // Generate signing key so --audit-sign-key is satisfied. Reuses the
+    // existing test helper (locked per D-27.2-13).
+    let key_path = generate_file_signing_key(&home, &workspace);
+    let keyref = format!("file://{}", key_path.display());
+
+    // --no-rollback-prompt avoids the interactive review-and-restore TUI.
+    // Reproduction recipe per 27.2-REVIEW.md §BL-01: BOTH `--allow-cwd`
+    // (to whitelist the workspace as a valid launch directory for the
+    // Windows execution-directory allowlist guard) AND
+    // `--allow <writable_dir>` (to make derive_tracked_paths return
+    // non-empty so the rollback-active code path runs end-to-end). With
+    // only `--allow-cwd`, derive_tracked_paths is empty and finalize
+    // takes the audit-only branch — bypassing the BL-01/BL-02 surfaces.
+    let cmd_args = run_command_args();
+    let mut args = vec![
+        "run",
+        "--audit-integrity",
+        "--rollback",
+        "--no-rollback-prompt",
+        "--allow-cwd",
+        "--allow",
+        writable_str,
+        "--audit-sign-key",
+        &keyref,
+        "--",
+    ];
+    args.extend(cmd_args.iter().copied());
+    let run_output = run_nono(&args, &home, &workspace);
+    assert_success(&run_output);
+
+    // Resolve session id from audit dir (single-session per test).
+    let session_id = only_audit_session_id(&home);
+    let audit_session_dir = home.join(".nono").join("audit").join(&session_id);
+
+    // STRUCTURAL ASSERTION: post-BL-01-fix, session.json is mirrored to
+    // the audit dir. Pre-fix this file does NOT exist for combo sessions;
+    // its presence is the structural signal that the mirror block ran.
+    assert!(
+        audit_session_dir.join("session.json").exists(),
+        "BL-01 regression: session.json should be mirrored to audit dir at {:?} \
+         for combo --audit-integrity --rollback sessions. Pre-fix, only the \
+         rollback dir held session.json and `audit verify` returned \
+         'Session not found'.",
+        audit_session_dir.join("session.json"),
+    );
+
+    // BEHAVIORAL ASSERTION: `nono audit verify <id>` must succeed (exit 0)
+    // and produce parseable JSON. Pre-fix, this fails with stderr
+    // containing "Session not found: Failed to read session metadata
+    // .../audit/<id>/session.json".
+    let verify_output = run_nono(
+        &["audit", "verify", &session_id, "--json"],
+        &home,
+        &workspace,
+    );
+    assert!(
+        verify_output.status.success(),
+        "BL-01 regression: `nono audit verify {}` should succeed for combo \
+         --audit-integrity --rollback session. Pre-fix this failed with \
+         'Session not found'. stderr: {}, stdout: {}",
+        session_id,
+        String::from_utf8_lossy(&verify_output.stderr),
+        String::from_utf8_lossy(&verify_output.stdout),
+    );
+
+    let json: Value =
+        serde_json::from_slice(&verify_output.stdout).expect("parse verify json");
+    assert_eq!(
+        json["attestation_present"], true,
+        "verify output should report attestation_present=true; full json: {json}",
+    );
+    assert_eq!(
+        json["attestation_valid"], true,
+        "verify output should report attestation_valid=true; full json: {json}",
+    );
+}
+
+/// REGRESSION TEST FOR BL-02 (REQ-AAHX-02):
+///
+/// Combo session's rollback dir was inlined to
+/// `nono_home_dir().join(".nono").join("rollbacks")` BEFORE the post-review
+/// fix at commit 6e3a158f. On Windows production this resolves to
+/// %USERPROFILE% but the canonical `rollback_session::rollback_root()`
+/// returns %LOCALAPPDATA% — so `nono rollback list` / `restore` cannot
+/// see combo sessions on Windows. Post-fix, `create_audit_state` calls
+/// `audit_session::ensure_rollback_session_dir(...)` which uses the
+/// canonical helper, so combo sessions land where rollback discovery
+/// expects them.
+///
+/// Under NONO_TEST_HOME, `nono_home_dir()` and `rollback_session::rollback_root()`
+/// both honor the override and resolve to the same root, so the divergence
+/// is masked at the path level. The structural regression-prevention is
+/// that `nono rollback list --json` MUST surface combo sessions; a future
+/// revert to inlined `nono_home_dir()` derivation would break BOTH
+/// audit verify (BL-01) AND rollback list (this test). This test catches
+/// the rollback list breakage end-to-end.
+#[test]
+fn combo_rollback_audit_session_findable_by_rollback_list() {
+    let (_tmp, home, workspace) = setup_isolated_home();
+
+    // Same combo-session shape as combo_rollback_audit_session_findable_by_audit_verify:
+    // explicit `--allow <writable>` to drive derive_tracked_paths non-empty
+    // and trigger the rollback-active code path that the BL-02 helper call
+    // governs.
+    let writable_dir = home.join("workdir");
+    fs::create_dir_all(&writable_dir).expect("create writable dir");
+    let writable_str = writable_dir.to_str().expect("writable dir utf8");
+
+    let key_path = generate_file_signing_key(&home, &workspace);
+    let keyref = format!("file://{}", key_path.display());
+
+    // Touch a file inside the writable dir so the rollback baseline has
+    // something to track (mirrors rollback_signed_session_verifies_from_audit_dir_bundle's
+    // `tracked.txt` shape, but inside the --allow target).
+    fs::write(writable_dir.join("tracked.txt"), "before\n").expect("write tracked file");
+
+    // Reproduction recipe per 27.2-REVIEW.md §BL-01: BOTH `--allow-cwd`
+    // (to whitelist the workspace as a valid launch directory for the
+    // Windows execution-directory allowlist guard) AND
+    // `--allow <writable_dir>` (to make derive_tracked_paths return
+    // non-empty so the rollback-active code path runs end-to-end). With
+    // only `--allow-cwd`, derive_tracked_paths is empty and finalize
+    // takes the audit-only branch — bypassing the BL-01/BL-02 surfaces.
+    let cmd_args = run_command_args();
+    let mut args = vec![
+        "run",
+        "--audit-integrity",
+        "--rollback",
+        "--no-rollback-prompt",
+        "--allow-cwd",
+        "--allow",
+        writable_str,
+        "--audit-sign-key",
+        &keyref,
+        "--",
+    ];
+    args.extend(cmd_args.iter().copied());
+    let run_output = run_nono(&args, &home, &workspace);
+    assert_success(&run_output);
+
+    let session_id = only_audit_session_id(&home);
+
+    // BEHAVIORAL ASSERTION: `nono rollback list --json --all` must include
+    // the session id in its output. The `--all` flag suppresses the
+    // "filter to only sessions with actual changes" gate so we don't
+    // depend on whether the cmd-args produce a real diff.
+    //
+    // Pre-fix, on Windows production, the rollback discovery helper would
+    // not find the session because it lived at %USERPROFILE%\.nono\rollbacks\<id>
+    // while discover_sessions reads from %LOCALAPPDATA%\nono\rollbacks. Under
+    // NONO_TEST_HOME this divergence is masked, but a future revert to
+    // inlined nono_home_dir() derivation would still break this test on
+    // Windows production AND break the audit verify path
+    // (combo_rollback_audit_session_findable_by_audit_verify).
+    let list_output = run_nono(
+        &["rollback", "list", "--all", "--json"],
+        &home,
+        &workspace,
+    );
+    assert!(
+        list_output.status.success(),
+        "BL-02 regression: `nono rollback list --all --json` should succeed. \
+         stderr: {}, stdout: {}",
+        String::from_utf8_lossy(&list_output.stderr),
+        String::from_utf8_lossy(&list_output.stdout),
+    );
+
+    let list_json: Value = serde_json::from_slice(&list_output.stdout)
+        .expect("parse rollback list json");
+    let entries = list_json
+        .as_array()
+        .expect("rollback list json is an array");
+    let session_ids: Vec<&str> = entries
+        .iter()
+        .filter_map(|entry| entry["session_id"].as_str())
+        .collect();
+    assert!(
+        session_ids.contains(&session_id.as_str()),
+        "BL-02 regression: combo --audit-integrity --rollback session id {} \
+         should appear in `nono rollback list --all --json` output but did \
+         not. Pre-fix, the create_audit_state helper used \
+         `nono_home_dir().join(\".nono\").join(\"rollbacks\")` while \
+         rollback_session::rollback_root() (the canonical helper used by \
+         discover_sessions) used `user_state_dir().join(\"rollbacks\")` — \
+         on Windows production those diverge to %USERPROFILE% vs \
+         %LOCALAPPDATA%. session_ids returned: {:?}, full output: {}",
+        session_id,
+        session_ids,
+        String::from_utf8_lossy(&list_output.stdout),
+    );
+}
