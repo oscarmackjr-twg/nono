@@ -13,7 +13,7 @@ use crate::config::{InjectMode, RouteConfig};
 use crate::error::{ProxyError, Result};
 use base64::Engine;
 use std::collections::HashMap;
-use tracing::debug;
+use tracing::{debug, warn};
 use zeroize::Zeroizing;
 
 /// A loaded credential ready for injection.
@@ -98,6 +98,14 @@ impl CredentialStore {
                         debug!(
                             "Credential '{}' not available, skipping route: {}",
                             normalized_prefix, msg
+                        );
+                        continue;
+                    }
+                    Err(nono::NonoError::KeystoreAccess(msg)) => {
+                        warn!(
+                            "Credential '{}' for route '{}' could not be loaded: {}. \
+                             Requests will proceed without credential injection.",
+                            key, normalized_prefix, msg
                         );
                         continue;
                     }
