@@ -165,6 +165,14 @@ mod tests {
         ));
     }
 
+    // Unix-only: this test simulates macOS symlinks using forward-slash root
+    // paths (`/tmp`, `/private/tmp`). On Windows, the ancestor-walk
+    // canonicalization correctly resolves `/` to the current drive root
+    // (e.g., `C:\`), which prefixes the result and breaks the
+    // forward-slash `starts_with` comparison — Windows query callers go
+    // through `resolve_path` + `path_starts_with` in protected_paths.rs
+    // which handles this safely. (Plan 34-04 deviation note.)
+    #[cfg(unix)]
     #[test]
     fn test_query_path_symlink_alias() {
         // Simulates macOS /tmp -> /private/tmp: original is the symlink,
