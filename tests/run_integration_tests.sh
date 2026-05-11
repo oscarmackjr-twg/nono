@@ -87,7 +87,7 @@ SUITES=(
     "test_rollback.sh:Rollback"
     "test_setup.sh:Setup"
     "test_learn.sh:Learn Mode"
-    "test_override_deny.sh:Override Deny"
+    "test_bypass_protection.sh:Bypass Protection (legacy: Override Deny)"
 )
 
 TOTAL_SUITES=${#SUITES[@]}

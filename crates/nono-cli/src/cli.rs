@@ -1297,7 +1297,18 @@ pub struct SandboxArgs {
     pub write_file: Vec<PathBuf>,
 
     /// Override a deny rule for a path. Pair with --allow/--read/--write grant
-    #[arg(long, value_name = "PATH", help_heading = "FILESYSTEM")]
+    ///
+    /// Plan 34-04b (upstream f0abd413, v0.47.0, #594): canonical flag name
+    /// is `--bypass-protection`. `--override-deny` continues to work via
+    /// the clap `visible_alias` for v2.3 backwards-compat. Internal Rust
+    /// identifier remains `override_deny` (210-callsite flag-day rename
+    /// deferred to P34-DEFER-04b).
+    #[arg(
+        long = "override-deny",
+        visible_alias = "bypass-protection",
+        value_name = "PATH",
+        help_heading = "FILESYSTEM"
+    )]
     pub override_deny: Vec<PathBuf>,
 
     /// Allow CWD access without prompting (level set by profile, defaults to read-only)
@@ -1637,7 +1648,18 @@ pub struct WrapSandboxArgs {
     pub write_file: Vec<PathBuf>,
 
     /// Override a deny rule for a path. Pair with --allow/--read/--write grant
-    #[arg(long, value_name = "PATH", help_heading = "FILESYSTEM")]
+    ///
+    /// Plan 34-04b (upstream f0abd413, v0.47.0, #594): canonical flag name
+    /// is `--bypass-protection`. `--override-deny` continues to work via
+    /// the clap `visible_alias` for v2.3 backwards-compat. Internal Rust
+    /// identifier remains `override_deny` (210-callsite flag-day rename
+    /// deferred to P34-DEFER-04b).
+    #[arg(
+        long = "override-deny",
+        visible_alias = "bypass-protection",
+        value_name = "PATH",
+        help_heading = "FILESYSTEM"
+    )]
     pub override_deny: Vec<PathBuf>,
 
     /// Allow CWD access without prompting (level set by profile, defaults to read-only)

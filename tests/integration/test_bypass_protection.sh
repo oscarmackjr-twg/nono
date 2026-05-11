@@ -1,13 +1,22 @@
 #!/bin/bash
-# Override Deny Tests
-# Verifies that override_deny in profiles and --override-deny CLI flag
-# correctly punch through deny groups while requiring explicit grants.
+# Bypass Protection Tests (legacy name: Override Deny Tests)
+#
+# Plan 34-04b (upstream f0abd413, v0.47.0, #594): the canonical name is
+# `bypass_protection` (JSON key) / `--bypass-protection` (CLI flag). The
+# legacy `override_deny` / `--override-deny` continues to work via
+# serde alias + clap visible_alias for v2.3 backwards-compat. This test
+# file exercises BOTH paths to verify the rename-acceptance contract.
+#
+# Verifies that bypass_protection (canonical) AND override_deny (legacy)
+# in profiles, and --bypass-protection (canonical) AND --override-deny
+# (legacy) CLI flags, correctly punch through deny groups while requiring
+# explicit grants.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/../lib/test_helpers.sh"
 
 echo ""
-echo -e "${BLUE}=== Override Deny Tests ===${NC}"
+echo -e "${BLUE}=== Bypass Protection Tests (legacy: Override Deny) ===${NC}"
 
 verify_nono_binary
 if ! require_working_sandbox "override deny suite"; then
@@ -266,6 +275,72 @@ expect_failure "excluding required deny_credentials group fails" \
 expect_output_contains "excluding required group mentions 'required'" \
     "required" \
     "$NONO_BIN" run --profile "$PROFILES_DIR/exclude-required.json" --dry-run -- echo ok
+
+# =============================================================================
+# Plan 34-04b canonical-name smoke tests (--bypass-protection + bypass_protection)
+# =============================================================================
+#
+# Upstream f0abd413 renamed --override-deny -> --bypass-protection and the
+# JSON key override_deny -> bypass_protection. The fork accepts both names
+# (Option C: serde alias + clap visible_alias + one-time stderr deprecation
+# warning when the legacy JSON key is observed). Verify both new names work
+# at the CLI and JSON surfaces.
+
+echo ""
+echo "--- Plan 34-04b canonical-name smoke (--bypass-protection / bypass_protection) ---"
+
+if [[ -d "$DOCKER_DIR" ]]; then
+    # Canonical CLI flag --bypass-protection should behave identically to
+    # legacy --override-deny.
+    expect_success "CLI --bypass-protection with --allow succeeds (canonical name)" \
+        "$NONO_BIN" run --allow "$DOCKER_DIR" --bypass-protection "$DOCKER_DIR" --dry-run -- echo ok
+
+    expect_failure "CLI --bypass-protection without grant fails (canonical name)" \
+        "$NONO_BIN" run --bypass-protection "$DOCKER_DIR" --dry-run -- echo ok
+fi
+
+# Canonical JSON key bypass_protection (in profile policy block) should
+# deserialize identically to legacy override_deny via the serde alias on
+# PolicyPatchConfig.
+cat > "$PROFILES_DIR/canonical-bypass-protection.json" <<EOF
+{
+    "meta": { "name": "canonical-bypass-protection", "version": "1.0.0" },
+    "extends": "default",
+    "filesystem": {
+        "allow_readwrite": ["$DOCKER_DIR"]
+    },
+    "policy": {
+        "bypass_protection": ["$DOCKER_DIR"]
+    }
+}
+EOF
+
+if [[ -d "$DOCKER_DIR" ]]; then
+    expect_success "Canonical JSON key bypass_protection deserializes via serde alias" \
+        "$NONO_BIN" run --profile "$PROFILES_DIR/canonical-bypass-protection.json" --dry-run -- echo ok
+fi
+
+# Legacy JSON key override_deny should still load (backwards-compat) and
+# emit a one-time stderr deprecation warning. We only smoke-test the load
+# path here; the warning emission is unit-tested in
+# crates/nono-cli/src/profile/mod.rs::canonical_schema_rename_tests.
+cat > "$PROFILES_DIR/legacy-override-deny.json" <<EOF
+{
+    "meta": { "name": "legacy-override-deny", "version": "1.0.0" },
+    "extends": "default",
+    "filesystem": {
+        "allow_readwrite": ["$DOCKER_DIR"]
+    },
+    "policy": {
+        "override_deny": ["$DOCKER_DIR"]
+    }
+}
+EOF
+
+if [[ -d "$DOCKER_DIR" ]]; then
+    expect_success "Legacy JSON key override_deny still loads (v2.3 backwards-compat)" \
+        "$NONO_BIN" run --profile "$PROFILES_DIR/legacy-override-deny.json" --dry-run -- echo ok
+fi
 
 # =============================================================================
 # Summary

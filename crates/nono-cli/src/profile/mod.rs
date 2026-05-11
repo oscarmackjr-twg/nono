@@ -11,6 +11,176 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+// ============================================================================
+// Plan 34-04b: upstream f0abd413 canonical-schema rename (override_deny ->
+// bypass_protection) — Option C deprecation runway
+// ============================================================================
+//
+// Upstream commit f0abd413 (v0.47.0, #594) renamed the JSON profile key
+// `override_deny` -> `bypass_protection` and renamed the CLI flag
+// `--override-deny` -> `--bypass-protection`. Plan 34-04b's Option C
+// disposition (chosen 2026-05-11) lands the *deprecation runway*:
+//
+//   1. The Rust struct field `PolicyPatchConfig::override_deny` carries
+//      `#[serde(alias = "bypass_protection")]` so JSON profiles using
+//      either key deserialize cleanly. The internal Rust identifier
+//      remains `override_deny` (210-callsite flag-day rename deferred to
+//      P34-DEFER-04b).
+//   2. The CLI flag `--override-deny` carries clap `alias = "bypass-protection"`
+//      so both forms work at the CLI surface.
+//   3. When the legacy `override_deny` JSON key is observed in a profile,
+//      `emit_legacy_override_deny_warning_once()` emits a single
+//      `WARN: profile field `override_deny` is deprecated...` line to
+//      stderr (once per process — matches upstream's
+//      `deprecation_warnings::DeprecationCounter` semantics).
+//
+// The full upstream `deprecated_schema` module (824 LOC) + LegacyPolicyPatch
+// rewriter + canonical sections `groups`/`commands`/`filesystem` is the
+// follow-up surface (P34-DEFER-04b); this commit lands the rename-acceptance
+// contract only. See the commit body for the full rationale.
+
+/// Set to `true` after the first legacy `override_deny` key is observed.
+/// Ensures the deprecation warning prints exactly once per process even
+/// when many profiles are loaded sequentially (e.g. via `extends` chains).
+static LEGACY_OVERRIDE_DENY_WARNED: AtomicBool = AtomicBool::new(false);
+
+/// Returns `true` if the raw JSON contains a legacy `override_deny` key.
+///
+/// Pure function — no side effects, no global state. The production path
+/// passes the result through `emit_legacy_override_deny_warning_once` to
+/// emit a one-time stderr warning; tests can call this directly to verify
+/// detection logic without race conditions on the global flag (which is
+/// flipped exactly once per process during normal use, but tests run in
+/// parallel and would race).
+fn raw_profile_has_legacy_override_deny_key(raw: &str) -> bool {
+    let value: serde_json::Value = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(_) => return false, // main parser will surface the real error
+    };
+    json_value_has_key(&value, "override_deny")
+}
+
+/// Emit a one-time stderr deprecation warning when a legacy `override_deny`
+/// JSON key is observed in a loaded profile.
+///
+/// Matches upstream f0abd413's `deprecation_warnings::DeprecationCounter`
+/// semantics (one warning per legacy key per process), modulo the fork's
+/// pragmatic scope: we report the rename but do not (yet) track a per-key
+/// counter for `--strict` mode. `--strict` is part of P34-DEFER-04b
+/// follow-up.
+fn emit_legacy_override_deny_warning_once() {
+    if !LEGACY_OVERRIDE_DENY_WARNED.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "WARN: profile field `override_deny` is deprecated (upstream #594, \
+             v0.47.0); the canonical key is `bypass_protection`. Both keys \
+             continue to deserialize identically in v2.3; the legacy key may \
+             be removed in a future major release. Migrate your profiles to \
+             use `bypass_protection`."
+        );
+    }
+}
+
+/// Scan a raw JSON profile string for the legacy `override_deny` key and
+/// emit the one-time deprecation warning when found.
+///
+/// Implemented as a coarse `serde_json::Value` walk rather than a structural
+/// AST traversal to keep the detection surface tiny and the code path
+/// orthogonal to the main `Profile` deserialize. False positives (e.g. a
+/// custom JSON string literal containing the substring `"override_deny"`)
+/// are accepted as the lesser cost vs. mis-detecting a real legacy key.
+fn detect_legacy_override_deny_key(raw: &str) {
+    if raw_profile_has_legacy_override_deny_key(raw) {
+        emit_legacy_override_deny_warning_once();
+    }
+}
+
+/// Recursive walk: returns `true` if any object in `v` contains `target` as
+/// a key. Visits arrays and nested objects.
+fn json_value_has_key(v: &serde_json::Value, target: &str) -> bool {
+    match v {
+        serde_json::Value::Object(map) => {
+            if map.contains_key(target) {
+                return true;
+            }
+            map.values().any(|inner| json_value_has_key(inner, target))
+        }
+        serde_json::Value::Array(items) => {
+            items.iter().any(|inner| json_value_has_key(inner, target))
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod canonical_schema_rename_tests {
+    use super::*;
+
+    // NB: these tests avoid touching the global LEGACY_OVERRIDE_DENY_WARNED
+    // flag because Rust test runners parallelize within the same process and
+    // a previous test (or any production-side load) may have already flipped
+    // the flag. We instead test the pure detection helper
+    // `raw_profile_has_legacy_override_deny_key` which has no side effects.
+
+    #[test]
+    fn legacy_override_deny_key_detected() {
+        let raw = r#"{"meta":{"name":"t"},"policy":{"override_deny":["/etc/hosts"]}}"#;
+        assert!(
+            raw_profile_has_legacy_override_deny_key(raw),
+            "legacy override_deny key should be detected in raw JSON"
+        );
+    }
+
+    #[test]
+    fn canonical_bypass_protection_key_does_not_match_legacy_detector() {
+        let raw = r#"{"meta":{"name":"t"},"policy":{"bypass_protection":["/etc/hosts"]}}"#;
+        assert!(
+            !raw_profile_has_legacy_override_deny_key(raw),
+            "canonical bypass_protection key must NOT trigger the legacy detector"
+        );
+    }
+
+    #[test]
+    fn bypass_protection_alias_deserializes_into_override_deny_field() {
+        // Verifies the #[serde(alias = "bypass_protection")] attribute on
+        // PolicyPatchConfig::override_deny. A profile using the canonical
+        // bypass_protection key must populate the existing override_deny
+        // Vec so downstream consumers (210 callsites) remain untouched.
+        let raw = r#"{"bypass_protection":["/etc/hosts"]}"#;
+        let cfg: PolicyPatchConfig =
+            serde_json::from_str(raw).expect("bypass_protection must deserialize via serde alias");
+        assert_eq!(cfg.override_deny, vec!["/etc/hosts".to_string()]);
+    }
+
+    #[test]
+    fn legacy_override_deny_key_still_deserializes() {
+        let raw = r#"{"override_deny":["/etc/hosts"]}"#;
+        let cfg: PolicyPatchConfig =
+            serde_json::from_str(raw).expect("legacy override_deny must continue to deserialize");
+        assert_eq!(cfg.override_deny, vec!["/etc/hosts".to_string()]);
+    }
+
+    #[test]
+    fn json_value_has_key_walks_nested_objects() {
+        let raw = r#"{"a":{"b":{"override_deny":[]}}}"#;
+        assert!(raw_profile_has_legacy_override_deny_key(raw));
+    }
+
+    #[test]
+    fn json_value_has_key_handles_arrays() {
+        let raw = r#"{"items":[{"override_deny":[]}]}"#;
+        assert!(raw_profile_has_legacy_override_deny_key(raw));
+    }
+
+    #[test]
+    fn malformed_json_returns_false_silently() {
+        // Detector must not panic on malformed input; the main parser
+        // will surface the real error path.
+        assert!(!raw_profile_has_legacy_override_deny_key("not json"));
+        assert!(!raw_profile_has_legacy_override_deny_key("{"));
+    }
+}
 
 // Re-export InjectMode and OAuth2Config from nono-proxy for use in profiles
 pub use nono_proxy::config::{InjectMode, OAuth2Config};
@@ -249,7 +419,24 @@ pub struct PolicyPatchConfig {
     /// Paths to exempt from deny groups.
     /// Each path must also be explicitly granted via `filesystem` or `policy.add_allow_*`.
     /// Does not implicitly grant access; only removes the deny rule.
-    #[serde(default)]
+    ///
+    /// **Upstream rename (v0.47.0 / #594):** the canonical JSON key is now
+    /// `bypass_protection`. The legacy `override_deny` key continues to
+    /// deserialize via the `#[serde(alias = "bypass_protection")]` attribute
+    /// for v2.3 backwards-compat, and `Profile::load_from_path` emits a
+    /// one-time stderr deprecation warning when the legacy key is observed.
+    /// The internal Rust identifier intentionally remains `override_deny` to
+    /// avoid a 210-callsite flag-day rename across capability_ext.rs,
+    /// policy.rs, policy_cmd.rs, command_runtime.rs, execution_runtime.rs,
+    /// launch_runtime.rs, sandbox_prepare.rs, etc. — that internal rename
+    /// is tracked as a deferred follow-up to Plan 34-04b (P34-DEFER-04b).
+    /// Option C (per Plan 34-04b Task 2 disposition): backwards-compat
+    /// deserialize plus deprecation warning runway. Full Option C
+    /// (upstream's 824-line `deprecated_schema` module, `LegacyPolicyPatch`
+    /// rewriter, and canonical sections `groups`/`commands`/`filesystem`)
+    /// is the follow-up surface; this commit lands only the
+    /// rename-acceptance contract.
+    #[serde(default, alias = "bypass_protection")]
     pub override_deny: Vec<String>,
 }
 
@@ -1702,6 +1889,12 @@ fn parse_profile_file(path: &Path) -> Result<Profile> {
         path: path.to_path_buf(),
         source: e,
     })?;
+
+    // Plan 34-04b Option C: emit a one-time deprecation warning if this
+    // profile uses the legacy `override_deny` JSON key (upstream f0abd413
+    // renamed it to `bypass_protection`; both continue to deserialize for
+    // v2.3 backwards-compat via the serde alias on PolicyPatchConfig).
+    detect_legacy_override_deny_key(&content);
 
     let profile: Profile =
         serde_json::from_str(&content).map_err(|e| NonoError::ProfileParse(e.to_string()))?;
