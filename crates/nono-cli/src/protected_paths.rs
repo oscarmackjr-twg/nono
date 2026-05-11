@@ -247,7 +247,6 @@ fn emit_deny_rules_for_path(path: &Path, caps: &mut CapabilitySet) -> Result<()>
     Ok(())
 }
 
-
 #[cfg(target_os = "windows")]
 fn path_starts_with(path: &Path, prefix: &Path) -> bool {
     let mut path_components = path.components();
