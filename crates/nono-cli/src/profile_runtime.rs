@@ -120,11 +120,34 @@ fn collect_override_deny_paths(
     paths
 }
 
+/// Plan 35-02 (REQ-PORT-CLOSURE-06 / P34-DEFER-09-1): cherry-pick of
+/// upstream `bdf183e9` (v0.44.0) — pre-create `~/.config/nono/profiles/`
+/// BEFORE the caller (sandbox_prepare.rs:298 → Sandbox::apply →
+/// landlock::restrict_self) locks the filesystem ruleset. Landlock is
+/// strictly allow-list and requires the parent directory of any
+/// granted child path to exist at ruleset-apply time, even when the
+/// child path is explicitly granted write. Without this pre-create,
+/// first-run `nono run` on a clean install (with `~/.config/nono/`
+/// missing) produces a confusing `No such file or directory` error
+/// pointing at the profiles path.
+///
+/// macOS and Windows are compile-time no-ops (Seatbelt and Windows
+/// Job-Object sandbox have no equivalent restriction).
+#[cfg(target_os = "linux")]
+fn pre_create_landlock_profiles_dir() -> crate::Result<()> {
+    let dir = crate::config::user_profiles_dir()?;
+    std::fs::create_dir_all(&dir)?;
+    Ok(())
+}
+
 pub(crate) fn prepare_profile(
     args: &SandboxArgs,
     silent: bool,
     workdir: &Path,
 ) -> crate::Result<PreparedProfile> {
+    #[cfg(target_os = "linux")]
+    pre_create_landlock_profiles_dir()?;
+
     let loaded_profile = if let Some(ref profile_name) = args.profile {
         let profile = profile::load_profile(profile_name)?;
         install_profile_hooks(Some(profile_name.as_str()), &profile, silent);
