@@ -8,8 +8,8 @@ use crate::cli::{
     ProfileCmdArgs, ProfileCommands, ProfileDiffArgs, ProfileGroupsArgs, ProfileGuideArgs,
     ProfileInitArgs, ProfileListArgs, ProfileSchemaArgs, ProfileShowArgs, ProfileValidateArgs,
 };
-use crate::deprecated_schema::{DeprecationCounter, LegacyPolicyPatch, GLOBAL_DEPRECATION_COUNTER};
 use crate::config::embedded;
+use crate::deprecated_schema::{DeprecationCounter, LegacyPolicyPatch, GLOBAL_DEPRECATION_COUNTER};
 use crate::policy::{self, AllowOps, DenyOps, Group};
 use crate::profile::{self, Profile, WorkdirAccess};
 use crate::theme;

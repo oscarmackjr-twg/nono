@@ -328,8 +328,7 @@ mod tests {
         // `LegacyPolicyPatch` (it only matches the legacy `override_deny` key).
         // Profiles using `bypass_protection` should NOT trigger legacy-key detection.
         let raw_canonical = r#"{"bypass_protection":["/var/log"]}"#;
-        let result: std::result::Result<LegacyPolicyPatch, _> =
-            serde_json::from_str(raw_canonical);
+        let result: std::result::Result<LegacyPolicyPatch, _> = serde_json::from_str(raw_canonical);
         assert!(
             result.is_err(),
             "LegacyPolicyPatch must reject canonical bypass_protection key \
