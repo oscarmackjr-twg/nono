@@ -340,6 +340,14 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn test_pre_create_landlock_profiles_dir_idempotent() {
+        // WR-03 fix (REVIEW.md): acquire the process-wide env lock BEFORE
+        // mutating XDG_CONFIG_HOME so parallel tests don't read the tempdir
+        // value during the modified window. EnvGuard::Drop restores on the
+        // way out, but other tests reading XDG_CONFIG_HOME during this
+        // test's runtime would still see the tempdir value without this
+        // lock. Matches the convention in policy.rs / profile_save_runtime
+        // tests per CLAUDE.md § Environment variables in tests.
+        let _env_lock = crate::test_env::lock_env();
         let tmp = tempfile::TempDir::new().expect("create tempdir");
         let _xdg_guard = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
 
