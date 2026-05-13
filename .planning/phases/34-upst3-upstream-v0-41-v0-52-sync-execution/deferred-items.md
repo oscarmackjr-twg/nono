@@ -579,3 +579,109 @@ closes the entire `format!("{:?}")` JSON-leak regression class via
 full audit per D-35-C3.
 
 ---
+
+## Phase 36 closure (appended 2026-05-12)
+
+Phase 36 (UPST3 deep closure, completed 2026-05-12) closed the following
+Phase 34 deferrals via six wave-parallel plans across two waves.
+Per D-36-B3, Plan 36-01d (last to close Wave 2) owns this consolidated append.
+
+Evidence SUMMARYs present at append time:
+- `.planning/phases/36-upst3-deep-closure/36-01a-DEPRECATED-SCHEMA-MODULE-SUMMARY.md`
+- `.planning/phases/36-upst3-deep-closure/36-01b-CANONICAL-PROFILE-SECTIONS-SUMMARY.md`
+- `.planning/phases/36-upst3-deep-closure/36-01c-OVERRIDE-DENY-RENAME-SUMMARY.md`
+- `.planning/phases/36-upst3-deep-closure/36-01d-PROFILE-DATA-DOCS-TOOLING-SUMMARY.md` (this plan)
+- `.planning/phases/36-upst3-deep-closure/36-02-WIRING-YAML-MERGE-SUMMARY.md`
+- `.planning/phases/36-upst3-deep-closure/36-03-EXECCFG-SURGICAL-PORT-SUMMARY.md`
+
+### P34-DEFER-04b-1 — CLOSED by Plans 36-01a + 36-01b + 36-01c + 36-01d
+
+**Status:** CLOSED
+
+**Closing plans:** 36-01a (deprecated_schema module), 36-01b (canonical Profile
+sections), 36-01c (210-callsite Rust rename), 36-01d (data + docs + tooling
+migration).
+
+**Closure shape:** Full D-20 manual replay of upstream `f0abd413` (v0.47.0).
+Plan 36-01a shipped the full `deprecated_schema` module (`LegacyPolicyPatch`
+rewriter, per-key `DeprecationCounter`, `--strict` mode for `nono profile validate`).
+Plan 36-01b added canonical Profile struct sections (`CommandsConfig`,
+`FilesystemConfig.{deny,bypass_protection}`, `Profile.commands`). Plan 36-01c
+performed the 210-callsite atomic rename of the Rust identifier
+`override_deny` → `bypass_protection` across `capability_ext.rs`, `cli.rs`,
+`command_runtime.rs`, `execution_runtime.rs`, `launch_runtime.rs`, `main.rs`,
+`policy.rs`, `policy_cmd.rs`, `profile_cmd.rs`, `profile_runtime.rs`,
+`query_ext.rs`, `sandbox_prepare.rs`, `sandbox_state.rs` (serde alias preserves
+legacy JSON acceptance indefinitely per D-36-B3). Plan 36-01d migrated
+`data/policy.json` (1 residual `override_deny` callsite → `bypass_protection`),
+restructured `data/nono-profile.schema.json` to canonical form, created
+tooling scripts (`scripts/test-list-aliases.sh`, `scripts/lint-docs.sh`),
+migrated MDX docs + profile-authoring-guide, and added 5-test integration
+suite (`crates/nono-cli/tests/builtin_profile_load.rs`). REQ-PORT-CLOSURE-02
+fully closed; acceptance criteria #1-#6 met across the four plans.
+
+### P34-DEFER-06-1 — CLOSED with scope trim by Plan 36-02
+
+**Status:** CLOSED
+
+**Closing plan:** 36-02 (wiring yaml_merge).
+
+**Closure shape:** Ported the `yaml_merge` install-record idempotency fix
+(upstream `e3b2f819`) for Linux and macOS. Acceptance criterion #1 (idempotent
+JSON-merge install records) deferred to v2.5-FU-3 per D-36-C1 (install-record
+format changed between the referenced upstream commit and v0.52; scope too large
+for Phase 36). Plan 36-02 SUMMARY documents the scope trim.
+
+### P34-DEFER-08b-1 — CLOSED with surgical port by Plan 36-03
+
+**Status:** CLOSED
+
+**Closing plan:** 36-03 (ExecConfig surgical port).
+
+**Closure shape:** D-20 manual replay of upstream `b5f0a3ab` (deep ExecConfig
+refactor) as a 3-sequenced-commit surgical port: interface shim layer,
+command-argument pipeline migration, integration test harness. Fork's
+`ExecConfig` shape preserved per D-36-D1 (fork-only fields retained).
+Full upstream-shape adoption deferred to v2.5-FU-4. Plan 36-03 SUMMARY
+documents the deviation.
+
+### P34-DEFER-08b-2 — CLOSED with surgical port by Plan 36-03
+
+**Status:** CLOSED
+
+**Closing plan:** 36-03 (ExecConfig surgical port).
+
+**Closure shape:** D-20 manual replay of upstream `bbdf7b85` (escape-quote
+pipeline) as part of the same 3-commit sequence as P34-DEFER-08b-1. The
+escape-quote pipeline is now wired into the fork's ExecConfig command-argument
+assembly. Plan 36-03 SUMMARY documents the full closure.
+
+### P34-DEFER-09-2 — CLOSED with scope trim by Plan 36-02
+
+**Status:** CLOSED
+
+**Closing plan:** 36-02 (wiring yaml_merge).
+
+**Closure shape:** Same as P34-DEFER-06-1. The `wiring.rs` base abstraction
+referenced by P34-DEFER-09-2 was ported at the level needed to wire
+`yaml_merge` on Linux and macOS. The full 188/239 LOC `wiring.rs` refactor
+is deferred to v2.5-FU-3 per D-36-C1.
+
+### Phase 36 carry-forwards to v2.5+
+
+The following items were identified during Phase 36 execution and are
+tracked for v2.5 follow-up work:
+
+- **v2.5-FU-3**: Full `wiring.rs` base-abstraction port (upstream 188/239 LOC;
+  deferred from Plans 36-02 closure of P34-DEFER-06-1 + P34-DEFER-09-2 per
+  D-36-C1). Install-record idempotent JSON-merge also depends on this.
+- **v2.5-FU-4**: Upstream-shape ExecConfig full adoption (fork's ExecConfig
+  shape preserved in Plan 36-03 per D-36-D1; upstream shape migration deferred).
+- **v2.5-FU-5**: `override_deny` hard-deprecation ADR (D-36-B3 currently
+  mandates indefinite acceptance; a future major release may remove the legacy
+  alias. An ADR scoping the removal timeline should precede any such change).
+- **v2.5-FU-6**: PTY quiet-period parametric proptest (Plan 36-03 identified
+  a flakiness risk in the PTY quiet-period logic; parametric proptest coverage
+  would improve reliability confidence).
+
+---
