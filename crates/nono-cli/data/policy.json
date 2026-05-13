@@ -692,7 +692,7 @@
         "add_allow_readwrite": [
           "$HOME/Library/Keychains"
         ],
-        "override_deny": [
+        "bypass_protection": [
           "$HOME/Library/Keychains"
         ]
       },

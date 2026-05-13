@@ -33,6 +33,10 @@
       "$ref": "#/$defs/FilesystemConfig",
       "description": "Filesystem access rules specifying which directories and files the sandboxed process can read or write."
     },
+    "commands": {
+      "$ref": "#/$defs/CommandsConfig",
+      "description": "Commands configuration for the profile — canonical section per upstream f0abd413 (v0.47.0). Specifies commands to allow or deny execution of."
+    },
     "policy": {
       "$ref": "#/$defs/PolicyPatchConfig",
       "description": "Policy patch configuration for subtractive and additive composition on top of inherited groups."
@@ -283,6 +287,33 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "Single files with write-only access."
+        },
+        "deny": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Paths to deny access to within this filesystem section. Complements policy.add_deny_access for inline deny composition."
+        },
+        "bypass_protection": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Paths to exempt from deny groups within this filesystem section. Each path must also be explicitly granted via allow/read/write. Does not implicitly grant access; only removes the deny rule. Canonical key (since v0.47.0 / upstream f0abd413). Legacy key 'override_deny' is accepted indefinitely per D-36-B3."
+        }
+      }
+    },
+    "CommandsConfig": {
+      "type": "object",
+      "description": "Commands configuration in a profile — canonical section per upstream f0abd413 (v0.47.0). Specifies commands to allow or deny execution of.",
+      "additionalProperties": false,
+      "properties": {
+        "allow": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Commands to allow execution of, overriding any deny rules."
+        },
+        "deny": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Commands to deny execution of. Complements policy.add_deny_access for inline deny composition."
         }
       }
     },
@@ -316,10 +347,15 @@
           "items": { "type": "string" },
           "description": "Additional deny.access paths to apply."
         },
+        "bypass_protection": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Paths to exempt from deny groups. Each path must also be explicitly granted via filesystem or policy.add_allow_* fields. Does not implicitly grant access; only removes the deny rule. Canonical key since v0.47.0 (upstream f0abd413). Legacy key 'override_deny' is accepted indefinitely via serde alias per D-36-B3."
+        },
         "override_deny": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Paths to exempt from deny groups. Each path must also be explicitly granted via filesystem or policy.add_allow_* fields. Does not implicitly grant access; only removes the deny rule."
+          "description": "Legacy alias for bypass_protection (deprecated since v0.47.0 / upstream f0abd413). Accepted indefinitely per D-36-B3. Use bypass_protection in new profiles."
         }
       }
     },

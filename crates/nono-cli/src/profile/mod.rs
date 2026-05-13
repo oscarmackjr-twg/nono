@@ -5523,7 +5523,7 @@ mod tests {
             "policy": {
                 "exclude_groups": ["dangerous_commands"],
                 "add_allow_read": ["/opt/data"],
-                "override_deny": ["/etc/hosts"]
+                "bypass_protection": ["/etc/hosts"]
             },
             "network": {
                 "block": false,
@@ -5537,12 +5537,11 @@ mod tests {
                 "exclude_globs": ["*.tmp"]
             }
         }"#;
-        // NOTE: Test uses the legacy `override_deny` key because the JSON schema
-        // (`nono-profile.schema.json`) is being updated in Plan 36-01d (data migration).
-        // The canonical `bypass_protection` key is the Rust field; the schema will
-        // be updated to accept both keys in Plan 36-01d.
+        // Plan 36-01d: schema now accepts `bypass_protection` (canonical key per
+        // upstream f0abd413 v0.47.0). The legacy `override_deny` key is still
+        // accepted per D-36-B3 indefinite alias acceptance.
         validate_against_schema(json)
-            .expect("full profile with array extends should pass schema validation");
+            .expect("full profile with canonical bypass_protection should pass schema validation");
     }
 
     #[test]
