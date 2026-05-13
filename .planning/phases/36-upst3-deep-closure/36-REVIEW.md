@@ -52,7 +52,14 @@ findings:
   warning: 7
   info: 4
   total: 15
-status: issues_found
+status: fixes_applied
+fixes_applied_at: 2026-05-13T07:00:00Z
+fixes_scope: critical_warning
+fixes_summary:
+  blocker_fixed: 4
+  warning_fixed: 7
+  info_fixed: 0
+  info_deferred: 4
 ---
 
 # Phase 36: Code Review Report
@@ -60,7 +67,7 @@ status: issues_found
 **Reviewed:** 2026-05-13T03:26:39Z
 **Depth:** standard
 **Files Reviewed:** 42
-**Status:** issues_found
+**Status:** fixes_applied (all 4 BLOCKERs + 7 WARNINGs landed; 4 INFOs deferred per fix-scope policy)
 
 ## Summary
 
@@ -484,3 +491,56 @@ The `pid.chars().all(is_ascii_digit)` guard ensures we got a real PID segment.
 _Reviewed: 2026-05-13T03:26:39Z_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_
+
+---
+
+## Fixes Applied
+
+**Applied:** 2026-05-13
+**Scope:** All BLOCKER (CR-*) + WARNING (WR-*) findings. INFO (IN-*) findings deferred per fix-scope policy.
+**Build verification (release mode):**
+- `cargo build --workspace --release` — clean
+- `cargo test --workspace --release --lib` — 148 nono-proxy tests + nono lib tests pass; 0 failed
+- `cargo test --workspace --release --bins` — 974 main bin tests + 13 shell-broker tests + 18 wfp-service tests pass; 0 failed
+- `cargo test --workspace --release --tests` — integration tests all pass; 0 failed
+- `cargo clippy --workspace --release --all-targets -- -D warnings -D clippy::unwrap_used` — clean (exit 0)
+
+CR-04 Linux-only block (sandbox_prepare.rs:350) could not be cross-compile-verified on this Windows host (the `x86_64-linux-gnu-gcc` linker is absent; documented in MEMORY.md feedback_clippy_cross_target). Fix is correct by inspection — uses fully-qualified `tracing::warn!`, matching the existing pattern at line 377 in the same file. Linux CI will exercise the block.
+
+### BLOCKER fixes
+
+| ID | Commit | Files | Notes |
+|----|--------|-------|-------|
+| CR-01 | `b0e5e4c3` | `crates/nono-cli/src/capability_ext.rs` | Wired `profile.commands.{allow,deny}` (canonical CommandsConfig) into `CapabilitySet::from_profile`. Added regression test `test_from_profile_commands_allow_deny_canonical_section` asserting both `commands.allow` and `commands.deny` propagate to the resulting CapabilitySet. Closes fail-open security regression — profiles that said "deny rm" were silently no-ops. |
+| CR-02 | `f454cce1` | `crates/nono-cli/src/profile_cmd.rs` | Fixed `cmd_validate` strict-mode legacy-key block: `counter.emit_once("override_deny", "bypass_protection")` (was `("bypass_protection", "bypass_protection")`, a silent no-op); error and warning messages now correctly reference `override_deny` as the legacy key and `bypass_protection` as the canonical replacement (were incoherent before). |
+| CR-03 | `d132263c` | `crates/nono/src/diagnostic.rs` | Renamed lingering `policy.override_deny` → `policy.bypass_protection` at lines 1417 (user-facing stderr message on permanently-restricted paths) and 1425 (doc comment for `is_denial_policy_blocked`). Closes atomic-rename miss in commit e168dd6b — the library crate was not in the per-file diff stats. |
+| CR-04 | `1640c1ae` | `crates/nono-cli/src/sandbox_prepare.rs` | Replaced bare `warn!` macro (not in scope; file only imports `tracing::info`) with fully-qualified `tracing::warn!` in the Linux-gated `#[cfg(target_os = "linux")]` pre-create block at line 350. Matches the convention at line 377 in the same file. Closes Linux compile error invisible from Windows-host clippy. |
+
+### WARNING fixes
+
+| ID | Commit | Files | Notes |
+|----|--------|-------|-------|
+| WR-01 | `a6644451` | `crates/nono-cli/src/profile/mod.rs`, `crates/nono-cli/data/nono-profile.schema.json` | Added raw-JSON pre-check `raw_profile_has_both_bypass_and_override_keys` that returns `NonoError::ProfileParse` when both `policy.bypass_protection` AND `policy.override_deny` appear simultaneously (serde's "last key wins" alias semantics is non-deterministic and silently fail-opens during migration). Added schema-level `not: { required: [...] }` constraint. Three regression tests cover both-set (rejects), canonical-only (accepts), legacy-only (accepts). |
+| WR-02 | `a3e8ffe3` | `crates/nono-cli/src/sandbox_state.rs` | Switched `cleanup_stale_state_files` from PID-parsing (which never matched the random-hex naming scheme used by `execution_runtime::next_capability_state_file_path`) to mtime-based with a 7-day retention window. Removed now-unused `is_process_running` helper. |
+| WR-03 | `a65cb9dc` | `crates/nono-cli/src/profile_runtime.rs` | Added `let _env_lock = crate::test_env::lock_env();` at the start of `test_pre_create_landlock_profiles_dir_idempotent` before any env-var mutation, matching the convention used in policy.rs / profile_save_runtime / session / trust_cmd tests per CLAUDE.md § Environment variables in tests. |
+| WR-04 | `6c8ce9b5` | `scripts/lint-docs.sh` | Replaced hand-rolled JSON escape (only handled double-quotes) in `emit_json` with delegation to `python3 -c '...json.dumps...'` (or `jq` as a fallback). Files / lines / texts are streamed as null-separated arrays via stdin. Fails loudly when neither python3 nor jq is on PATH rather than silently emitting malformed JSON. `scripts/test-list-aliases.sh` left untouched — its JSON output has no user-controlled text field. |
+| WR-05 | `68321b9b` | `crates/nono-cli/src/profile_cmd.rs` | Decoupled `cmd_validate`'s legacy-key detection from `LegacyPolicyPatch`'s `#[serde(deny_unknown_fields)]` schema. Direct JSON inspection (`policy_val.get("override_deny")`) extracts the legacy field robustly when sibling canonical fields coexist. Then synthesises a single-field `{"override_deny": [...]}` object and feeds it to `LegacyPolicyPatch::rewrite` so the canonical-form contract stays centralised in `deprecated_schema`. |
+| WR-06 | `d69fac8d` | `crates/nono-cli/src/wiring.rs` | After canonicalization, `apply_yaml_merge` now compares `canonical_target == canonical_source` and returns `NonoError::ProfileParse` when they are equal. Closes silent formatting corruption (comments, anchors, quoting style lost on a YAML self-merge round-trip). Symlink/`..` aliases also caught by the canonicalize-then-compare. Added regression test `apply_yaml_merge_rejects_self_merge`. |
+| WR-07 | `8f6f39a2` | `crates/nono-cli/src/wiring.rs`, `crates/nono-cli/tests/yaml_merge_reversal.rs` | Replaced manual `components().zip()` loop in `validate_target_path` with `Path::starts_with()` (which itself uses component-based comparison per stdlib docs). Removed the "grep acceptance criterion" process-check encoded into structural code. Path-validation suite (traversal, symlink escape, UNC alias, valid target, yaml_merge integration) all continue to pass. |
+
+### Deferred INFOs
+
+Per fix-scope policy, INFO findings are not auto-applied:
+
+- IN-01: Duplicate `tracing::{debug, info, warn}` import branches in `learn.rs` — cosmetic; both cfgs mutually exclusive.
+- IN-02: `select_exec_strategy` accepts 5 args but uses none — by-design convergence, comment polish only.
+- IN-03: `serde_yaml_ng = "=0.10.0"` exact-version pin lacks renovate config — documentation-only.
+- IN-04: `sandbox_log.rs::parse_event_message` `rsplit_once('(')` edge case — exotic process names with `(`.
+
+Each is recommended for handling in a future quick-task rather than the Phase 36 closure.
+
+---
+
+_Fixes applied: 2026-05-13_
+_Fixer: Claude (gsd-code-fixer)_
+_Scope: critical_warning (4 CR + 7 WR)_
