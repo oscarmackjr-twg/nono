@@ -939,6 +939,7 @@ fn load_single_secret(_service: &str, account: &str) -> Result<Zeroizing<String>
     )))
 }
 
+#[cfg(feature = "system-keyring")]
 fn system_keystore_label() -> &'static str {
     #[cfg(target_os = "windows")]
     {
@@ -1561,7 +1562,7 @@ pub fn build_secret_mappings(
 mod tests {
     use super::*;
 
-    #[cfg(target_os = "windows")]
+    #[cfg(all(target_os = "windows", feature = "system-keyring"))]
     #[test]
     fn system_keystore_label_mentions_windows_credential_manager() {
         assert_eq!(system_keystore_label(), "Windows Credential Manager");
