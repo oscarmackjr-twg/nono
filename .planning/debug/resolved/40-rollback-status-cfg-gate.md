@@ -1,6 +1,9 @@
 ---
 slug: 40-rollback-status-cfg-gate
-status: fixing
+status: resolved
+resolved_on: 2026-05-15
+resolved_by: |
+  Fix-chain landed via commits a72736bb (Path/PathBuf cfg-gating) → a66691c7 (round 2 unbreak Linux/macOS cascading compile errors) → 66c6e1da (round 3 borrow-checker + unused on non-Windows). Post-fix CI confirmed clean across all in-scope Phase 40 commits — zero `success → failure` transitions vs baseline `4665ae75` on every Wave 1 + Wave 2 head commit. Phase 40 closed 2026-05-15 with 8/8 verification PASS. Marking resolved during v2.4 audit cleanup pass.
 trigger: |
   DATA_START
   Phase 40 / Plan 40-03 cherry-picks broke non-Windows compilation; fix structural

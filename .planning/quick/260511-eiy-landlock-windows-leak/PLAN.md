@@ -3,7 +3,7 @@ slug: landlock-windows-leak
 quick_id: 260511-eiy
 created: 2026-05-11
 type: bug-fix
-status: in-progress
+status: completed
 ---
 
 # Quick task: Fix Landlock deny-overlap fail-closed leak on Windows hosts

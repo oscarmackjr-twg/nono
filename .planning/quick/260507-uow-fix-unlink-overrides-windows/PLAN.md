@@ -1,7 +1,7 @@
 ---
 slug: 260507-uow-fix-unlink-overrides-windows
 date: 2026-05-07
-status: in-progress
+status: completed
 type: bug-fix
 ---
 

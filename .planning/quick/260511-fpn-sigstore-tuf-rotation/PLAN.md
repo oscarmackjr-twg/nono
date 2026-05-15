@@ -3,7 +3,7 @@ slug: sigstore-tuf-rotation
 quick_id: 260511-fpn
 created: 2026-05-11
 type: docs-workaround
-status: in-progress
+status: completed
 ---
 
 # Quick task: Document Sigstore TUF root rotation workaround + track upstream upgrade

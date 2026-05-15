@@ -1,7 +1,7 @@
 ---
 slug: 260507-tui-shell-fix
 date: 2026-05-07
-status: in-progress
+status: completed
 type: docs
 ---
 

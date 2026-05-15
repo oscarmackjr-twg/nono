@@ -3,7 +3,7 @@ slug: keyring-windows-native
 quick_id: 260511-gzq
 created: 2026-05-11
 type: bug-fix
-status: in-progress
+status: completed
 ---
 
 # Quick task: Enable `keyring v3` Windows-native backend — fix Credential Manager bypass

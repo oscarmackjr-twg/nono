@@ -1,7 +1,7 @@
 ---
 slug: 260507-wix-bump-to-7-0-0
 date: 2026-05-07
-status: in-progress
+status: completed
 type: build-config
 ---
 

@@ -3,7 +3,7 @@ slug: poc-keyless-doc-fix
 quick_id: 260511-fg3
 created: 2026-05-11
 type: docs-fix
-status: in-progress
+status: completed
 ---
 
 # Quick task: Strip nonexistent `--keyless` flag from `nono trust verify` POC docs
