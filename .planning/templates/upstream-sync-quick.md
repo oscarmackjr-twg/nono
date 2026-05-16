@@ -93,6 +93,27 @@ trailer block.
 
 ---
 
+## Baseline-aware CI gate
+
+For upstream-sync waves landing on top of a known-green baseline, the close
+gate flags ONLY `success → failure` transitions vs the baseline. Drift
+accumulates across milestones; reset at each milestone-internal cleanup.
+
+**Current baseline SHA:** `13cc0628`
+**Last reset:** Phase 41 close (REQ-CI-03), 2026-05-16 → cleaning the
+pre-existing red carried forward from baseline `a72736bb`.
+**Reset cadence:** Every milestone-internal cleanup phase (see Phase 41 for
+the v2.5 precedent).
+
+CI gate result interpretation:
+- Lane was green on baseline AND is green on PR head: PASS.
+- Lane was green on baseline AND is red on PR head: FAIL (real regression).
+- Lane was red on baseline AND is red on PR head: PASS (carry-forward, not
+  introduced by this PR).
+- Lane was red on baseline AND is green on PR head: PASS + IMPROVEMENT.
+
+---
+
 ## Conflict-file inventory
 
 <!--
