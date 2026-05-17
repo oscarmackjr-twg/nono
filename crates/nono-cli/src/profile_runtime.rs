@@ -311,8 +311,9 @@ mod tests {
         prior: Option<std::ffi::OsString>,
     }
 
-    #[allow(clippy::disallowed_methods)] // EnvGuard IS the Drop-restore primitive — same role as
-                                         // crate::test_env::EnvVarGuard. Lint applies to consumers.
+    #[allow(clippy::disallowed_methods)]
+    // EnvGuard IS the Drop-restore primitive — same role as
+    // crate::test_env::EnvVarGuard. Lint applies to consumers.
     #[cfg(target_os = "linux")]
     impl EnvGuard {
         fn set(key: &str, value: &std::path::Path) -> Self {

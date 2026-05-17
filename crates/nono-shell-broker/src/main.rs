@@ -547,7 +547,14 @@ mod broker {
         /// 64-bit Windows) is also REJECTED. Defense-in-depth alongside the null check.
         #[test]
         fn parse_args_invalid_handle_value_inherit_handle_returns_error() {
-            let raw = argv(&["--shell", "foo", "--cwd", r"C:\", "--inherit-handle", "0xFFFFFFFFFFFFFFFF"]);
+            let raw = argv(&[
+                "--shell",
+                "foo",
+                "--cwd",
+                r"C:\",
+                "--inherit-handle",
+                "0xFFFFFFFFFFFFFFFF",
+            ]);
             let Err(NonoError::SandboxInit(msg)) = parse_args(&raw) else {
                 panic!("expected SandboxInit error on --inherit-handle 0xFFFFFFFFFFFFFFFF");
             };

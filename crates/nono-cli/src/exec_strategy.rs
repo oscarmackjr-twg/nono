@@ -2636,7 +2636,9 @@ fn request_path(request: &nono::CapabilityRequest) -> &std::path::Path {
         Some(HandleTarget::FilePath { path }) => path.as_path(),
         _ => {
             #[allow(deprecated)]
-            { &request.path }
+            {
+                &request.path
+            }
         }
     }
 }
